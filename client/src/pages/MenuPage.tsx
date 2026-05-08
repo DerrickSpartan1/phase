@@ -21,6 +21,7 @@ import {
   useGameStore,
 } from "../stores/gameStore";
 import type { ActiveGameMeta } from "../stores/gameStore";
+import { usePreferencesStore } from "../stores/preferencesStore";
 
 interface FormatCoverageSummary {
   total_cards: number;
@@ -46,6 +47,7 @@ export function MenuPage() {
   const [, setDeckCount] = useState(0);
   const [, setActiveDeckName] = useState<string | null>(null);
   const [formatCoverage, setFormatCoverage] = useState<[string, FormatCoverageSummary][]>([]);
+  const experimentalFeatures = usePreferencesStore((s) => s.experimentalFeatures);
   useAudioContext("menu");
 
   useEffect(() => {
@@ -154,6 +156,18 @@ export function MenuPage() {
         onClick: () => navigate("/multiplayer"),
         icon: <CrownIcon />,
       },
+    );
+    if (experimentalFeatures) {
+      actions.push({
+        key: "draft",
+        title: "Draft",
+        description: "Solo Quick Draft against AI or live Pod Draft with friends.",
+        accent: "ember" as const,
+        onClick: () => navigate("/draft"),
+        icon: <DraftIcon />,
+      });
+    }
+    actions.push(
       {
         key: "decks",
         title: "Decks",
@@ -164,7 +178,7 @@ export function MenuPage() {
       },
     );
     return actions;
-  }, [hasSavedGame, navigate, handleResumeGame]);
+  }, [hasSavedGame, experimentalFeatures, navigate, handleResumeGame]);
 
   return (
     <div className="menu-scene relative flex min-h-screen flex-col overflow-hidden">
@@ -344,6 +358,15 @@ function KoFiIcon() {
     </svg>
   );
 }
+
+function DraftIcon() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24" className="h-7 w-7 fill-current">
+      <path d="M4 4h6v6H4V4Zm10 0h6v6h-6V4ZM4 14h6v6H4v-6Zm10 0h6v6h-6v-6Z" />
+    </svg>
+  );
+}
+
 
 function DeckIcon() {
   return (

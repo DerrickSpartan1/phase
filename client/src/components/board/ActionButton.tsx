@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { AttackTarget, ObjectId, WaitingFor } from "../../adapter/types.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
-import { dispatchAction } from "../../game/dispatch.ts";
+import { dispatchAction, dispatchResolveAll } from "../../game/dispatch.ts";
+import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { usePhaseInfo } from "../../hooks/usePhaseInfo.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useMultiplayerStore } from "../../stores/multiplayerStore.ts";
@@ -346,10 +347,18 @@ export function ActionButton() {
             </button>
             <button
               disabled={actionPending}
-              onClick={() => dispatchAction({ type: "SetAutoPass", data: { mode: { type: "UntilStackEmpty" } } })}
+              onClick={() => {
+                const playerCount = useGameStore.getState().gameState?.players?.length ?? 2;
+                const aiSeats = usePreferencesStore.getState().aiSeats;
+                const seats = Array.from({ length: playerCount - 1 }, (_, i) => ({
+                  playerId: i + 1,
+                  difficulty: aiSeats[i]?.difficulty ?? "Medium",
+                }));
+                dispatchResolveAll(playerId, seats);
+              }}
               className={gameButtonClass({ tone: "slate", size: "md", disabled: actionPending, className: secondaryButtonClass })}
             >
-              Auto-Resolve Stack
+              Resolve All
             </button>
           </>
         )}
@@ -380,13 +389,19 @@ export function ActionButton() {
             <button
               disabled={blocked}
               onClick={() => dispatchAction({ type: "SetAutoPass", data: { mode: { type: "UntilEndOfTurn" } } })}
-              className={gameButtonClass({ tone: "slate", size: "md", disabled: blocked, className: secondaryButtonClass })}
+              className={`group relative ${gameButtonClass({ tone: "slate", size: "md", disabled: blocked, className: secondaryButtonClass })}`}
             >
               <span className="flex items-center gap-1">
-                Pass Until End Step
+                Pass
                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4">
                   <path fillRule="evenodd" d="M2 10a.75.75 0 0 1 .75-.75h12.59l-2.1-1.95a.75.75 0 1 1 1.02-1.1l3.5 3.25a.75.75 0 0 1 0 1.1l-3.5 3.25a.75.75 0 1 1-1.02-1.1l2.1-1.95H2.75A.75.75 0 0 1 2 10Z" clipRule="evenodd" />
                 </svg>
+              </span>
+              <span
+                role="tooltip"
+                className="pointer-events-none absolute bottom-full right-0 z-50 mb-2 hidden w-48 rounded-md border border-white/10 bg-slate-950/95 px-3 py-2 text-left text-[11px] leading-snug font-medium text-slate-100 shadow-2xl shadow-black/40 backdrop-blur-xl group-hover:block group-focus-visible:block"
+              >
+                Pass until end step — skip all remaining priority in this turn
               </span>
             </button>
           </>

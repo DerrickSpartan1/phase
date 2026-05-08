@@ -1,8 +1,6 @@
 use std::str::FromStr;
 
-use crate::game::combat::AttackTarget;
 use crate::game::game_object::GameObject;
-use crate::game::players;
 use crate::game::zones;
 use crate::types::ability::{AbilityCost, NinjutsuVariant};
 use crate::types::events::GameEvent;
@@ -42,6 +40,17 @@ pub fn object_has_effective_keyword_kind(
     crate::game::off_zone_characteristics::off_zone_has_keyword_kind(state, object_id, kind)
 }
 
+/// CR 702.61a: True when any spell on the stack has split second. While true,
+/// players can't cast spells or activate abilities that aren't mana abilities.
+pub fn stack_has_split_second(state: &GameState) -> bool {
+    state.stack.iter().any(|entry| {
+        state
+            .objects
+            .get(&entry.id)
+            .is_some_and(|obj| has_keyword(obj, &Keyword::SplitSecond))
+    })
+}
+
 pub fn effective_flashback_cost(state: &GameState, object_id: ObjectId) -> Option<FlashbackCost> {
     let keyword = effective_keyword_for_object(state, object_id, KeywordKind::Flashback)?;
     match keyword {
@@ -74,6 +83,15 @@ pub fn effective_sneak_cost(state: &GameState, object_id: ObjectId) -> Option<Ma
         Keyword::Sneak(cost) => Some(resolve_keyword_mana_cost(state, object_id, &cost)),
         _ => None,
     }
+}
+
+/// CR 702.188a: Effective Web-slinging alt-cost for an object.
+pub fn effective_web_slinging_cost(state: &GameState, object_id: ObjectId) -> Option<ManaCost> {
+    let obj = state.objects.get(&object_id)?;
+    obj.keywords.iter().find_map(|keyword| match keyword {
+        Keyword::WebSlinging(cost) => Some(resolve_keyword_mana_cost(state, object_id, cost)),
+        _ => None,
+    })
 }
 
 fn effective_keyword_for_object(
@@ -209,9 +227,7 @@ pub fn parse_keywords(keyword_strings: &[String]) -> Vec<Keyword> {
 pub fn ninjutsu_timing_ok(phase: &Phase, variant: &NinjutsuVariant) -> bool {
     match variant {
         // CR 702.49a/d: Ninjutsu/CommanderNinjutsu can be activated during declare blockers step or later
-        NinjutsuVariant::Ninjutsu
-        | NinjutsuVariant::CommanderNinjutsu
-        | NinjutsuVariant::WebSlinging => {
+        NinjutsuVariant::Ninjutsu | NinjutsuVariant::CommanderNinjutsu => {
             matches!(phase, Phase::DeclareBlockers | Phase::CombatDamage)
         }
     }
@@ -219,7 +235,6 @@ pub fn ninjutsu_timing_ok(phase: &Phase, variant: &NinjutsuVariant) -> bool {
 
 /// CR 702.49: Return the creatures that can be returned for this variant.
 /// - Ninjutsu/CommanderNinjutsu: unblocked attackers controlled by `player`
-/// - WebSlinging: any tapped creature controlled by `player`
 pub fn returnable_creatures_for_variant(
     state: &GameState,
     player: PlayerId,
@@ -237,19 +252,6 @@ pub fn returnable_creatures_for_variant(
                 })
                 .collect()
         }
-        NinjutsuVariant::WebSlinging => state
-            .objects
-            .values()
-            .filter(|o| {
-                o.controller == player
-                    && o.zone == Zone::Battlefield
-                    && o.tapped
-                    && o.card_types
-                        .core_types
-                        .contains(&crate::types::card_type::CoreType::Creature)
-            })
-            .map(|o| o.id)
-            .collect(),
     }
 }
 
@@ -257,43 +259,39 @@ pub fn returnable_creatures_for_variant(
 ///
 /// Validates the activation, returns the specified creature to its owner's hand,
 /// and puts the Ninjutsu creature onto the battlefield tapped and attacking the
-/// same player/planeswalker as the returned creature (or active player's opponent
-/// for WebSlinging when the returned creature isn't an attacker).
+/// same player/planeswalker as the returned creature.
 ///
 /// CR 702.49c: The creature is never "declared as an attacker" so it
 /// does not fire "whenever ~ attacks" triggers.
 pub fn activate_ninjutsu(
     state: &mut GameState,
     player: PlayerId,
-    ninjutsu_card_id: CardId,
+    ninjutsu_obj_id: ObjectId,
     creature_to_return: ObjectId,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), String> {
-    // Find the ninjutsu card in player's hand or command zone (for commander ninjutsu)
     // CR 903.8: Commander tax applies to casting, not to ninjutsu activation.
     let p = &state.players[player.0 as usize];
-    let ninjutsu_obj_id = p
-        .hand
-        .iter()
-        .chain(state.command_zone.iter())
-        .find(|&&obj_id| {
-            state
-                .objects
-                .get(&obj_id)
-                .is_some_and(|o| o.card_id == ninjutsu_card_id)
-        })
-        .copied()
-        .ok_or("Ninjutsu-family card not in hand or command zone")?;
+    if !p.hand.contains(&ninjutsu_obj_id) && !state.command_zone.contains(&ninjutsu_obj_id) {
+        return Err("Ninjutsu-family card not in hand or command zone".to_string());
+    }
 
     // Determine which variant from the card's keywords
     let ninjutsu_obj = state
         .objects
         .get(&ninjutsu_obj_id)
         .ok_or("Ninjutsu-family card object not found")?;
+    if ninjutsu_obj.owner != player {
+        return Err("You don't own that Ninjutsu-family card".to_string());
+    }
     let variant = ninjutsu_family_variant(ninjutsu_obj)
         .ok_or("Card does not have a Ninjutsu-family keyword")?;
+    if ninjutsu_obj.zone == Zone::Command && !matches!(variant, NinjutsuVariant::CommanderNinjutsu)
+    {
+        return Err("Only commander ninjutsu can be activated from the command zone".to_string());
+    }
 
-    // CR 702.49b: Extract the mana cost (validated after all other checks, paid before mutations)
+    // CR 702.49a/d: Extract the activation cost (validated after all other checks, paid before mutations)
     let mana_cost =
         ninjutsu_family_cost(ninjutsu_obj).ok_or("Ninjutsu-family card has no mana cost")?;
 
@@ -330,44 +328,6 @@ pub fn activate_ninjutsu(
 
             (attacker_info.defending_player, attacker_info.attack_target)
         }
-        NinjutsuVariant::WebSlinging => {
-            // Must be a tapped creature controlled by player
-            let obj = state
-                .objects
-                .get(&creature_to_return)
-                .ok_or("Creature not found")?;
-            // CR 702.49: WebSlinging requires a creature on the battlefield
-            if obj.zone != Zone::Battlefield {
-                return Err("WebSlinging requires a creature on the battlefield".to_string());
-            }
-            if !obj.tapped {
-                return Err("WebSlinging requires a tapped creature".to_string());
-            }
-            if !obj
-                .card_types
-                .core_types
-                .contains(&crate::types::card_type::CoreType::Creature)
-            {
-                return Err("WebSlinging requires a creature".to_string());
-            }
-
-            // If the tapped creature is an attacker, inherit its attack target;
-            // otherwise use the opponent of the active player
-            combat
-                .attackers
-                .iter()
-                .find(|a| a.object_id == creature_to_return)
-                .map(|a| (a.defending_player, a.attack_target))
-                .unwrap_or_else(|| {
-                    // CR 702.49c + CR 508.4: Ninjutsu enters attacking same defender;
-                    // fallback to first opponent in seat order (multiplayer-aware).
-                    let pid = players::opponents(state, player)
-                        .first()
-                        .copied()
-                        .unwrap_or(player);
-                    (pid, AttackTarget::Player(pid))
-                })
-        }
     };
 
     // Validate: creature controlled by player
@@ -383,7 +343,7 @@ pub fn activate_ninjutsu(
     // CR 601.2f: All ninjutsu-family variants share the "ninjutsu" keyword for cost reduction.
     let effective_cost = apply_ability_cost_reduction(state, player, "ninjutsu", mana_cost);
 
-    // CR 702.49b: Pay the ninjutsu-family mana cost (after all validation, before mutations)
+    // CR 702.49a/d: Pay the ninjutsu-family mana cost (after all validation, before mutations)
     super::casting::pay_ability_cost(
         state,
         player,
@@ -446,7 +406,6 @@ fn ninjutsu_family_variant(obj: &GameObject) -> Option<NinjutsuVariant> {
         match kw {
             Keyword::Ninjutsu(_) => return Some(NinjutsuVariant::Ninjutsu),
             Keyword::CommanderNinjutsu(_) => return Some(NinjutsuVariant::CommanderNinjutsu),
-            Keyword::WebSlinging(_) => return Some(NinjutsuVariant::WebSlinging),
             _ => {}
         }
     }
@@ -454,13 +413,12 @@ fn ninjutsu_family_variant(obj: &GameObject) -> Option<NinjutsuVariant> {
 }
 
 /// CR 702.49b: Extract the mana cost for a ninjutsu-family (activated)
-/// keyword on this object. Excludes Sneak (CR 702.190a — a cast alt-cost).
+/// keyword on this object. Excludes Sneak and Web-slinging because they are
+/// cast alternative costs, not activated abilities.
 fn ninjutsu_family_cost(obj: &GameObject) -> Option<ManaCost> {
     for kw in &obj.keywords {
         match kw {
-            Keyword::Ninjutsu(c) | Keyword::CommanderNinjutsu(c) | Keyword::WebSlinging(c) => {
-                return Some(c.clone())
-            }
+            Keyword::Ninjutsu(c) | Keyword::CommanderNinjutsu(c) => return Some(c.clone()),
             _ => {}
         }
     }
@@ -486,6 +444,7 @@ fn apply_ability_cost_reduction(
         if let StaticMode::ReduceAbilityCost {
             ref keyword,
             amount,
+            ..
         } = static_def.mode
         {
             if keyword == ability_keyword {
@@ -501,66 +460,51 @@ fn apply_ability_cost_reduction(
     cost
 }
 
-/// CR 702.49b: Look up the ninjutsu-family mana cost for a card eligible for activation.
-pub fn ninjutsu_family_cost_for_card(
+/// CR 702.49a/d: Look up the source object, variant, and effective cost for
+/// every Ninjutsu-family card the player may activate.
+pub fn ninjutsu_family_activatable_sources(
     state: &GameState,
     player: PlayerId,
-    card_id: CardId,
-) -> Option<ManaCost> {
-    // Reuse activatable_cards to validate card is eligible (DRY — same zone traversal)
-    if !ninjutsu_family_activatable_cards(state, player)
-        .iter()
-        .any(|(c, _)| *c == card_id)
-    {
-        return None;
-    }
-    // Look up the object to extract cost
-    state
-        .objects
-        .values()
-        .find(|o| o.card_id == card_id && o.owner == player)
-        .and_then(ninjutsu_family_cost)
-}
-
-/// Returns the CardIds + variant of activatable Ninjutsu-family cards.
-/// Checks the player's hand for all variants, plus the command zone for CommanderNinjutsu.
-pub fn ninjutsu_family_activatable_cards(
-    state: &GameState,
-    player: PlayerId,
-) -> Vec<(CardId, NinjutsuVariant)> {
+) -> Vec<(ObjectId, CardId, NinjutsuVariant, ManaCost)> {
     let p = &state.players[player.0 as usize];
-    let mut results: Vec<(CardId, NinjutsuVariant)> = p
-        .hand
-        .iter()
-        .filter_map(|&obj_id| {
-            let obj = state.objects.get(&obj_id)?;
-            let variant = ninjutsu_family_variant(obj)?;
-            Some((obj.card_id, variant))
-        })
-        .collect();
+    let hand_sources = p.hand.iter().filter_map(|&obj_id| {
+        let obj = state.objects.get(&obj_id)?;
+        let variant = ninjutsu_family_variant(obj)?;
+        let cost =
+            apply_ability_cost_reduction(state, player, "ninjutsu", ninjutsu_family_cost(obj)?);
+        Some((obj_id, obj.card_id, variant, cost))
+    });
 
-    // CR 702.49d: CommanderNinjutsu can also be activated from the command zone.
-    for &obj_id in &state.command_zone {
-        if let Some(obj) = state.objects.get(&obj_id) {
-            if obj.owner != player {
-                continue;
-            }
-            if let Some(variant) = ninjutsu_family_variant(obj) {
-                if matches!(variant, NinjutsuVariant::CommanderNinjutsu) {
-                    results.push((obj.card_id, variant));
-                }
-            }
+    let command_sources = state.command_zone.iter().filter_map(|&obj_id| {
+        let obj = state.objects.get(&obj_id)?;
+        if obj.owner != player {
+            return None;
         }
-    }
+        let variant = ninjutsu_family_variant(obj)?;
+        if !matches!(variant, NinjutsuVariant::CommanderNinjutsu) {
+            return None;
+        }
+        let cost =
+            apply_ability_cost_reduction(state, player, "ninjutsu", ninjutsu_family_cost(obj)?);
+        Some((obj_id, obj.card_id, variant, cost))
+    });
 
-    results
+    hand_sources.chain(command_sources).collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use crate::ai_support::legal_actions;
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, Effect, ManaContribution, ManaProduction,
+    };
+    use crate::types::actions::GameAction;
+    use crate::types::game_state::WaitingFor;
     use crate::types::identifiers::{CardId, ObjectId};
-    use crate::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+    use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
 
@@ -696,6 +640,37 @@ mod tests {
     use crate::types::events::GameEvent;
     use crate::types::game_state::GameState;
 
+    fn add_mana_land(state: &mut GameState, card_id: CardId, color: ManaColor) -> ObjectId {
+        let land_id = create_object(
+            state,
+            card_id,
+            PlayerId(0),
+            "Test Land".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&land_id).unwrap();
+        obj.card_types
+            .core_types
+            .push(crate::types::card_type::CoreType::Land);
+        Arc::make_mut(&mut obj.abilities).push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::Fixed {
+                        colors: vec![color],
+                        contribution: ManaContribution::Base,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .cost(AbilityCost::Tap),
+        );
+        land_id
+    }
+
     fn setup_ninjutsu_scenario() -> (GameState, ObjectId, ObjectId) {
         let mut state = GameState::new_two_player(42);
         state.active_player = PlayerId(0);
@@ -767,17 +742,10 @@ mod tests {
     #[test]
     fn ninjutsu_returns_attacker_to_hand() {
         let (mut state, attacker_id, ninja_id) = setup_ninjutsu_scenario();
-        let ninja_card_id = state.objects.get(&ninja_id).unwrap().card_id;
         let mut events = Vec::new();
 
-        activate_ninjutsu(
-            &mut state,
-            PlayerId(0),
-            ninja_card_id,
-            attacker_id,
-            &mut events,
-        )
-        .expect("activation should succeed");
+        activate_ninjutsu(&mut state, PlayerId(0), ninja_id, attacker_id, &mut events)
+            .expect("activation should succeed");
 
         // Attacker should be in hand
         let attacker = state.objects.get(&attacker_id).unwrap();
@@ -791,17 +759,10 @@ mod tests {
     #[test]
     fn ninjutsu_creature_enters_battlefield_tapped_attacking() {
         let (mut state, attacker_id, ninja_id) = setup_ninjutsu_scenario();
-        let ninja_card_id = state.objects.get(&ninja_id).unwrap().card_id;
         let mut events = Vec::new();
 
-        activate_ninjutsu(
-            &mut state,
-            PlayerId(0),
-            ninja_card_id,
-            attacker_id,
-            &mut events,
-        )
-        .expect("activation should succeed");
+        activate_ninjutsu(&mut state, PlayerId(0), ninja_id, attacker_id, &mut events)
+            .expect("activation should succeed");
 
         // Ninjutsu creature should be on battlefield, tapped, attacking
         let ninja = state.objects.get(&ninja_id).unwrap();
@@ -835,17 +796,10 @@ mod tests {
     #[test]
     fn ninjutsu_creature_does_not_fire_attack_triggers() {
         let (mut state, attacker_id, ninja_id) = setup_ninjutsu_scenario();
-        let ninja_card_id = state.objects.get(&ninja_id).unwrap().card_id;
         let mut events = Vec::new();
 
-        activate_ninjutsu(
-            &mut state,
-            PlayerId(0),
-            ninja_card_id,
-            attacker_id,
-            &mut events,
-        )
-        .expect("activation should succeed");
+        activate_ninjutsu(&mut state, PlayerId(0), ninja_id, attacker_id, &mut events)
+            .expect("activation should succeed");
 
         // CR 702.49c: No AttackersDeclared event should be emitted for the Ninjutsu creature
         let has_attackers_declared = events
@@ -860,7 +814,6 @@ mod tests {
     #[test]
     fn ninjutsu_fails_if_attacker_is_blocked() {
         let (mut state, attacker_id, ninja_id) = setup_ninjutsu_scenario();
-        let ninja_card_id = state.objects.get(&ninja_id).unwrap().card_id;
 
         // Add a blocker assignment
         let blocker_id = create_object(
@@ -878,48 +831,28 @@ mod tests {
             .insert(attacker_id, vec![blocker_id]);
 
         let mut events = Vec::new();
-        let result = activate_ninjutsu(
-            &mut state,
-            PlayerId(0),
-            ninja_card_id,
-            attacker_id,
-            &mut events,
-        );
+        let result = activate_ninjutsu(&mut state, PlayerId(0), ninja_id, attacker_id, &mut events);
         assert!(result.is_err(), "Should fail when attacker is blocked");
     }
 
     #[test]
     fn ninjutsu_fails_without_combat() {
         let (mut state, attacker_id, ninja_id) = setup_ninjutsu_scenario();
-        let ninja_card_id = state.objects.get(&ninja_id).unwrap().card_id;
         state.combat = None; // Remove combat
 
         let mut events = Vec::new();
-        let result = activate_ninjutsu(
-            &mut state,
-            PlayerId(0),
-            ninja_card_id,
-            attacker_id,
-            &mut events,
-        );
+        let result = activate_ninjutsu(&mut state, PlayerId(0), ninja_id, attacker_id, &mut events);
         assert!(result.is_err(), "Should fail without active combat");
     }
 
     #[test]
     fn ninjutsu_activation_fails_without_mana() {
         let (mut state, attacker_id, ninja_id) = setup_ninjutsu_scenario();
-        let ninja_card_id = state.objects.get(&ninja_id).unwrap().card_id;
         // Clear all mana
         state.players[0].mana_pool.clear();
 
         let mut events = Vec::new();
-        let result = activate_ninjutsu(
-            &mut state,
-            PlayerId(0),
-            ninja_card_id,
-            attacker_id,
-            &mut events,
-        );
+        let result = activate_ninjutsu(&mut state, PlayerId(0), ninja_id, attacker_id, &mut events);
         assert!(result.is_err(), "Should fail without mana");
 
         // Verify no zone changes occurred — creature still on battlefield, ninja still in hand
@@ -936,17 +869,10 @@ mod tests {
     #[test]
     fn ninjutsu_activation_deducts_mana() {
         let (mut state, attacker_id, ninja_id) = setup_ninjutsu_scenario();
-        let ninja_card_id = state.objects.get(&ninja_id).unwrap().card_id;
         let mut events = Vec::new();
 
-        activate_ninjutsu(
-            &mut state,
-            PlayerId(0),
-            ninja_card_id,
-            attacker_id,
-            &mut events,
-        )
-        .expect("activation should succeed");
+        activate_ninjutsu(&mut state, PlayerId(0), ninja_id, attacker_id, &mut events)
+            .expect("activation should succeed");
 
         // Mana pool should be empty after paying {1}{U}
         assert_eq!(
@@ -957,80 +883,42 @@ mod tests {
     }
 
     #[test]
-    fn webslinging_rejects_non_battlefield_creature() {
-        let mut state = GameState::new_two_player(42);
-        state.active_player = PlayerId(0);
-        state.turn_number = 2;
-        state.phase = crate::types::phase::Phase::DeclareBlockers;
+    fn ninjutsu_legal_action_uses_auto_tappable_mana_sources() {
+        let (mut state, attacker_id, ninja_id) = setup_ninjutsu_scenario();
+        state.players[0].mana_pool.clear();
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
 
-        // Create a tapped creature in the graveyard (not on battlefield)
-        let creature_id = create_object(
-            &mut state,
-            CardId(1),
-            PlayerId(0),
-            "Graveyard Creature".to_string(),
-            Zone::Graveyard,
-        );
-        {
-            let obj = state.objects.get_mut(&creature_id).unwrap();
-            obj.card_types
-                .core_types
-                .push(crate::types::card_type::CoreType::Creature);
-            obj.tapped = true;
-        }
+        add_mana_land(&mut state, CardId(10), ManaColor::Blue);
+        add_mana_land(&mut state, CardId(11), ManaColor::Blue);
 
-        // Set up minimal combat state
-        state.combat = Some(CombatState {
-            attackers: vec![],
-            ..Default::default()
-        });
+        let actions = legal_actions(&state);
 
-        // Create WebSlinging card in hand
-        let ws_id = create_object(
-            &mut state,
-            CardId(2),
-            PlayerId(0),
-            "WebSlinger".to_string(),
-            Zone::Hand,
-        );
-        {
-            let obj = state.objects.get_mut(&ws_id).unwrap();
-            obj.card_types
-                .core_types
-                .push(crate::types::card_type::CoreType::Creature);
-            obj.keywords.push(Keyword::WebSlinging(ManaCost::Cost {
-                generic: 0,
-                shards: vec![ManaCostShard::Blue],
-            }));
-            obj.base_keywords = obj.keywords.clone();
-        }
-
-        // Add mana for WebSlinging cost
-        state.players[0].mana_pool.add(ManaUnit {
-            color: ManaType::Blue,
-            source_id: ObjectId(0),
-            snow: false,
-            restrictions: Vec::new(),
-            grants: vec![],
-            expiry: None,
-        });
-
-        let ws_card_id = state.objects.get(&ws_id).unwrap().card_id;
-        let mut events = Vec::new();
-        let result = activate_ninjutsu(
-            &mut state,
-            PlayerId(0),
-            ws_card_id,
-            creature_id,
-            &mut events,
-        );
         assert!(
-            result.is_err(),
-            "Should reject non-battlefield creature for WebSlinging"
+            actions.iter().any(|a| matches!(
+                a,
+                GameAction::ActivateNinjutsu {
+                    ninjutsu_object_id,
+                    creature_to_return,
+                } if *ninjutsu_object_id == ninja_id && *creature_to_return == attacker_id
+            )),
+            "Ninjutsu should be legal when untapped mana sources can pay the cost"
         );
+
+        let (_, _, grouped) = crate::ai_support::legal_actions_full(&state);
         assert!(
-            result.unwrap_err().contains("battlefield"),
-            "Error should mention battlefield"
+            grouped
+                .get(&ninja_id)
+                .is_some_and(|actions| actions.iter().any(|a| matches!(
+                    a,
+                    GameAction::ActivateNinjutsu {
+                        ninjutsu_object_id,
+                        creature_to_return,
+                    } if *ninjutsu_object_id == ninja_id && *creature_to_return == attacker_id
+                ))),
+            "Ninjutsu should be grouped under the hand object for frontend playability"
         );
     }
 }

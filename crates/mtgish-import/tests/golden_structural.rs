@@ -159,6 +159,19 @@ fn equipment_with_equip_cost() {
 }
 
 #[test]
+fn bestow_x_with_x_counters() {
+    // Bestow X (CR 702.103a + CR 107.3a): X-cost alternative-cost keyword
+    // coupled with X-bound enters-with-counters. Card: Nyxborn Hydra —
+    // `Rule::BestowX(PayManaX([X, G, G], ValueX))` lowers to
+    // `Keyword::Bestow(ManaCost::Cost { shards: [X, G, G], generic: 0 })`,
+    // and the `EntersWithNumberCounters(ValueX, P1P1)` replacement applies
+    // the X→CostXPaid rewrite (CR 107.3m). The host-pump static
+    // (`PermanentLayerEffect(HostPermanent, ...)`) lowers to a static with
+    // `affected = AttachedTo`, naturally inert when not attached.
+    assert_golden("bestow_x_with_x_counters");
+}
+
+#[test]
 fn madness_alternative_cost() {
     // Archetype 8: alternative-cost spell.
     // Card: Reckless Wurm — Trample + Madness {2}{R}.

@@ -6,6 +6,7 @@ import type { GameAction, GameObject, PlayerId } from "../../adapter/types.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
 import { useCardHover } from "../../hooks/useCardHover.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
+import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { useDragToCast } from "../../hooks/useDragToCast.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
@@ -49,6 +50,7 @@ export function CommanderCardZone({ playerId }: CommanderCardZoneProps) {
 }
 
 function CommanderCard({ commander }: { commander: GameObject }) {
+  const isCompactHeight = useIsCompactHeight();
   const legalActions = useGameStore((s) => s.legalActions);
   const effectiveCost = useGameStore(
     (s) => s.spellCosts[String(commander.id)],
@@ -75,7 +77,7 @@ function CommanderCard({ commander }: { commander: GameObject }) {
   // canCast is engine-authoritative: the action is in legalActions only when
   // priority + mana + timing all permit the cast. Reuse it as the drag gate
   // rather than threading a separate hasPriority check through.
-  const dragCast = useDragToCast({ castAction, hasPriority: canCast });
+  const dragCast = useDragToCast({ castAction, hasPriority: canCast, useDistanceThreshold: true });
   // Framer Motion does not suppress the synthetic click that follows a
   // drag gesture on a <motion.button>. Without this guard, a successful
   // drag-cast would immediately trigger the click handler and open the
@@ -90,22 +92,28 @@ function CommanderCard({ commander }: { commander: GameObject }) {
   return (
     <motion.button
       {...hoverHandlers}
-      onClick={() => {
+      onClick={(e: React.MouseEvent) => {
         if (dragCastedRef.current) {
           dragCastedRef.current = false;
           return;
         }
-        if (!firedRef.current) inspectObject(commander.id);
+        if (firedRef.current) return;
+        if (useUiStore.getState().debugInteractionMode) {
+          e.stopPropagation();
+          useUiStore.getState().openDebugContextMenu({ objectId: commander.id, x: e.clientX, y: e.clientY });
+          return;
+        }
+        inspectObject(commander.id);
       }}
       onDoubleClick={canCast ? () => dispatchAction(castAction) : undefined}
-      drag={canCast ? "y" : false}
+      drag={canCast || false}
       dragSnapToOrigin
       onDragEnd={onDragEnd}
       whileDrag={{ cursor: "grabbing", scale: 1.04 }}
       className={`group relative ${canCast ? "cursor-grab" : "cursor-default"}`}
       title={
         canCast
-          ? `Cast ${commander.name}${tax > 0 ? ` (Tax: +${tax})` : ""} — double-click or drag up`
+          ? `Cast ${commander.name}${tax > 0 ? ` (Tax: +${tax})` : ""} — double-click or drag to play`
           : `Commander: ${commander.name}${tax > 0 ? ` (Tax: +${tax})` : ""}`
       }
       style={{ width: "var(--card-w)", height: "var(--card-h)" }}
@@ -157,6 +165,7 @@ function CommanderCard({ commander }: { commander: GameObject }) {
         <ManaCostPips
           cost={displayCost}
           isReduced={false}
+          size={isCompactHeight ? "xs" : "md"}
           className="absolute right-[4%] top-[2%]"
         />
       )}

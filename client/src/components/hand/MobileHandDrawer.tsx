@@ -8,7 +8,7 @@ import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useLongPress } from "../../hooks/useLongPress.ts";
 import { useCanActForWaitingState, usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
-import type { GameAction, ManaCost, ObjectId } from "../../adapter/types.ts";
+import type { ManaCost, ObjectId } from "../../adapter/types.ts";
 import { collectObjectActions } from "../../viewmodel/cardActionChoice.ts";
 
 export function MobileHandDrawer() {
@@ -17,7 +17,6 @@ export function MobileHandDrawer() {
   const playerId = usePerspectivePlayerId();
   const player = useGameStore((s) => s.gameState?.players[playerId]);
   const objects = useGameStore((s) => s.gameState?.objects);
-  const legalActions = useGameStore((s) => s.legalActions);
   const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
   const inspectObject = useUiStore((s) => s.inspectObject);
   const setPendingAbilityChoice = useUiStore((s) => s.setPendingAbilityChoice);
@@ -51,31 +50,8 @@ export function MobileHandDrawer() {
   }, [isOpen, setOpen]);
 
   const playableObjectIds = useMemo(() => {
-    const ids = new Set<number>();
-    for (const action of legalActions) {
-      if (action.type === "PlayLand" || action.type === "CastSpell" || action.type === "Foretell") {
-        ids.add(
-          Number(
-            (action as Extract<GameAction, { type: "PlayLand" | "CastSpell" | "Foretell" }>).data.object_id,
-          ),
-        );
-      } else if (action.type === "CastSpellAsSneak") {
-        // CR 702.190a: Sneak casts originate from `hand_object` (not `object_id`).
-        ids.add(Number(action.data.hand_object));
-      }
-    }
-    return ids;
-  }, [legalActions]);
-
-  const activatableObjectIds = useMemo(() => {
-    const ids = new Set<number>();
-    for (const action of legalActions) {
-      if (action.type === "ActivateAbility") {
-        ids.add(Number(action.data.source_id));
-      }
-    }
-    return ids;
-  }, [legalActions]);
+    return new Set(Object.keys(legalActionsByObject ?? {}).map(Number));
+  }, [legalActionsByObject]);
 
   const playCard = useCallback(
     (objectId: number) => {
@@ -153,10 +129,7 @@ export function MobileHandDrawer() {
               style={{ gridTemplateColumns: "repeat(auto-fill, minmax(170px, 1fr))" }}
             >
               {handObjects.map((obj) => {
-                const isPlayable = hasPriority && (
-                  playableObjectIds.has(Number(obj.id)) ||
-                  activatableObjectIds.has(Number(obj.id))
-                );
+                const isPlayable = hasPriority && playableObjectIds.has(Number(obj.id));
                 return (
                   <DrawerCard
                     key={obj.id}

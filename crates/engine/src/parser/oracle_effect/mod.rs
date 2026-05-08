@@ -5,47 +5,51 @@ pub(crate) mod counter;
 pub(crate) mod imperative;
 pub(crate) mod mana;
 mod search;
-mod sequence;
+pub(crate) mod sequence;
 pub(crate) mod subject;
 pub(crate) mod token;
-pub(crate) mod types;
 
 pub(crate) use self::token::parse_token_description;
-pub(crate) use self::types::TokenDescription;
 
 use std::str::FromStr;
 
+use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::multispace1;
-use nom::combinator::{opt, value};
+use nom::combinator::{eof, map, opt, value};
 use nom::multi::many1;
 use nom::sequence::preceded;
 use nom::Parser;
-use nom_language::error::VerboseError;
 
 use super::oracle_nom::bridge::nom_on_lower;
+use super::oracle_nom::error::OracleResult;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_quantity::{
-    parse_cda_quantity, parse_for_each_clause, parse_for_each_clause_expr,
+    parse_cda_quantity, parse_event_context_quantity, parse_for_each_clause,
+    parse_for_each_clause_expr, parse_for_each_clause_expr_with_context,
+    parse_for_each_object_filter_clause,
 };
-use super::oracle_target::{parse_event_context_ref, parse_target, parse_type_phrase};
+use super::oracle_target::{
+    parse_event_context_ref, parse_target, parse_target_with_ctx, parse_type_phrase,
+};
 use super::oracle_util::{
-    contains_possessive, has_unconsumed_conditional, parse_mana_symbols, split_around,
-    starts_with_possessive, strip_after, TextPair,
+    contains_possessive, has_unconsumed_conditional, parse_mana_symbols, parse_number,
+    split_around, starts_with_possessive, strip_after, TextPair,
 };
 use crate::database::mtgjson::parse_mtgjson_mana_cost;
 use crate::parser::oracle_effect::subject::parse_subject_application;
-use crate::parser::oracle_warnings::push_warning;
+use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, CardPlayMode, CastingPermission, ChoiceType,
     ChooseFromZoneConstraint, CombatDamageScope, ConjureCard, ContinuousModification,
     ControllerRef, DamageModification, DamageSource, DelayedTriggerCondition, Duration, Effect,
-    FilterProp, GainLifePlayer, GameRestriction, MultiTargetSpec, PlayerFilter, PlayerScope,
-    PreventionAmount, PtValue, QuantityExpr, QuantityRef, ReplacementDefinition, RestrictionExpiry,
-    RestrictionPlayerScope, RoundingMode, StaticCondition, StaticDefinition, TargetFilter,
-    TriggerDefinition, TypeFilter, TypedFilter, UnlessCost,
+    FilterProp, GainLifePlayer, GameRestriction, ManaProduction, MultiTargetSpec, ObjectScope,
+    PlayerFilter, PlayerScope, PreventionAmount, PtValue, QuantityExpr, QuantityRef,
+    ReplacementDefinition, RestrictionExpiry, RestrictionPlayerScope, RoundingMode,
+    StaticCondition, StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
+    UnlessCost, UnlessPayModifier,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::game_state::{DistributionUnit, NextSpellModifier, RetargetScope};
@@ -72,35 +76,9 @@ use self::sequence::{
     parse_intrinsic_continuation_ast, split_clause_sequence,
 };
 use self::subject::{try_parse_subject_predicate_ast, try_parse_targeted_controller_gain_life};
-use self::types::*;
-
-/// Context threaded through the effect parsing pipeline.
-/// Enables pronoun resolution relative to the current subject.
-#[derive(Debug, Clone, Default)]
-pub(crate) struct ParseContext {
-    /// The trigger subject, if parsing within a trigger effect.
-    /// When Some and not SelfRef, bare pronouns ("it") resolve to TriggeringSource.
-    pub subject: Option<TargetFilter>,
-    /// The card name for self-name effect parsing (e.g. "Exile Card Name.").
-    pub card_name: Option<String>,
-    /// CR 707.9a + CR 603.1: Index of the printed trigger whose body is being
-    /// parsed, in the source object's `base_trigger_definitions` list. Set by
-    /// the trigger parser before invoking the effect chain. Consumed by the
-    /// `<subject pronoun> has this ability` arm of the BecomeCopy except-clause
-    /// parser to emit `RetainPrintedTriggerFromSource { source_trigger_index }`.
-    /// `None` for non-trigger contexts (replacements, instants, sorceries),
-    /// in which case the "has this ability" arm declines gracefully.
-    pub current_trigger_index: Option<usize>,
-    /// CR 701.21a + CR 608.2k: The actor performing the effect, when the effect
-    /// body has been stripped of an actor prefix ("you (may) ", "an opponent
-    /// (may) ", "each opponent ", "each player "). Used by targeted-action
-    /// parsers to default `TargetFilter::Typed.controller` from `None` to the
-    /// actor when the target phrase itself doesn't specify a controller (e.g.
-    /// "you may sacrifice a non-Demon creature" → `controller: Some(You)`).
-    /// CR 701.21a forbids sacrificing a permanent you don't control, so the
-    /// default must be enforced at parse time, not at resolution.
-    pub actor: Option<ControllerRef>,
-}
+use crate::parser::oracle_ir::ast::*;
+pub(crate) use crate::parser::oracle_ir::context::ParseContext;
+use crate::parser::oracle_ir::effect_chain::{ClauseIr, EffectChainIr, SpecialClause};
 
 /// CR 608.2k: True when `text` is a standalone object pronoun referring to
 /// the trigger/spell subject. Used by effect-target parsers that need to
@@ -125,7 +103,7 @@ pub(crate) fn is_bare_object_pronoun(text: &str) -> bool {
 /// For self-triggers ("~ enters"), "it" stays SelfRef.
 /// For AttachedTo subjects ("equipped creature"), TriggeringSource is also correct
 /// because the triggering event's source IS the attached-to creature.
-pub(crate) fn resolve_it_pronoun(ctx: &ParseContext) -> TargetFilter {
+pub(crate) fn resolve_it_pronoun(ctx: &mut ParseContext) -> TargetFilter {
     match &ctx.subject {
         Some(subject) if !matches!(subject, TargetFilter::SelfRef | TargetFilter::Any) => {
             TargetFilter::TriggeringSource
@@ -150,6 +128,118 @@ fn condition_refs_source_object(condition: &AbilityCondition) -> bool {
     }
 }
 
+fn condition_refs_cost_paid_object(condition: &AbilityCondition) -> bool {
+    match condition {
+        AbilityCondition::CostPaidObjectMatchesFilter { .. } => true,
+        AbilityCondition::Not { condition }
+        | AbilityCondition::ConditionInstead { inner: condition } => {
+            condition_refs_cost_paid_object(condition)
+        }
+        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+            conditions.iter().any(condition_refs_cost_paid_object)
+        }
+        _ => false,
+    }
+}
+
+fn if_you_do_object_anchor(
+    clauses: &[ClauseIr],
+    condition: &Option<AbilityCondition>,
+) -> Option<TargetFilter> {
+    if !matches!(condition, Some(AbilityCondition::IfYouDo)) {
+        return None;
+    }
+    clauses
+        .iter()
+        .rev()
+        .find(|clause| !clause.absorbed_by_followup)
+        .and_then(|clause| match &clause.parsed.effect {
+            Effect::GenericEffect {
+                static_abilities,
+                target,
+                ..
+            } => target.clone().or_else(|| {
+                static_abilities
+                    .iter()
+                    .find_map(|definition| definition.affected.clone())
+            }),
+            _ => None,
+        })
+}
+
+fn merge_clause_conditions(
+    outer: AbilityCondition,
+    inner: Option<AbilityCondition>,
+) -> AbilityCondition {
+    let mut conditions = match inner {
+        Some(AbilityCondition::And { conditions }) => conditions,
+        Some(condition) => vec![condition],
+        None => Vec::new(),
+    };
+    match outer {
+        AbilityCondition::And {
+            conditions: outer_conditions,
+        } => {
+            for condition in outer_conditions {
+                if !conditions.contains(&condition) {
+                    conditions.push(condition);
+                }
+            }
+        }
+        condition => {
+            if !conditions.contains(&condition) {
+                conditions.insert(0, condition);
+            }
+        }
+    }
+    match conditions.len() {
+        0 => AbilityCondition::And { conditions },
+        1 => conditions.pop().unwrap(),
+        _ => AbilityCondition::And { conditions },
+    }
+}
+
+fn apply_outer_condition_to_clause(outer: &AbilityCondition, clause: &mut ClauseIr) {
+    let inner = clause
+        .condition
+        .take()
+        .or_else(|| clause.parsed.condition.clone());
+    clause.condition = Some(merge_clause_conditions(outer.clone(), inner));
+}
+
+pub(super) fn rewrite_cost_paid_object_quantities_in_definition(ability: &mut AbilityDefinition) {
+    rewrite_cost_paid_object_quantities(&mut ability.effect);
+    if let Some(sub_ability) = ability.sub_ability.as_mut() {
+        rewrite_cost_paid_object_quantities_in_definition(sub_ability);
+    }
+    if let Some(else_ability) = ability.else_ability.as_mut() {
+        rewrite_cost_paid_object_quantities_in_definition(else_ability);
+    }
+    for mode in &mut ability.mode_abilities {
+        rewrite_cost_paid_object_quantities_in_definition(mode);
+    }
+}
+
+fn rewrite_cost_paid_object_quantities(effect: &mut Effect) {
+    if let Effect::Token { count, .. } = effect {
+        if matches!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::EventContextSourceToughness
+                    | QuantityRef::Toughness {
+                        scope: ObjectScope::Source
+                    }
+            }
+        ) {
+            *count = QuantityExpr::Ref {
+                qty: QuantityRef::Toughness {
+                    scope: ObjectScope::CostPaidObject,
+                },
+            };
+        }
+    }
+}
+
 /// Parse an effect clause from Oracle text into an Effect enum.
 /// This handles the verb-based matching for spell effects, activated ability effects,
 /// and the effect portion of triggered abilities.
@@ -157,7 +247,7 @@ fn condition_refs_source_object(condition: &AbilityCondition) -> bool {
 /// For compound effects ("Gain 3 life. Draw a card."), call `parse_effect_chain`
 /// which splits on sentence boundaries and chains via AbilityDefinition::sub_ability.
 pub fn parse_effect(text: &str) -> Effect {
-    parse_effect_clause(text, &ParseContext::default()).effect
+    parse_effect_clause(text, &mut ParseContext::default()).effect
 }
 
 // ── Word-boundary scanners for delayed trigger dispatch ──────────────────
@@ -176,7 +266,7 @@ enum DelayedConditionKind {
 /// (e.g., "enters the battlefield" before bare "enters").
 fn parse_delayed_condition_keyword(
     input: &str,
-) -> nom::IResult<&str, DelayedConditionKind, VerboseError<&str>> {
+) -> nom::IResult<&str, DelayedConditionKind, OracleError<'_>> {
     alt((
         value(
             DelayedConditionKind::LeavesPlay,
@@ -215,9 +305,7 @@ fn scan_delayed_condition_kind(text: &str) -> Option<DelayedConditionKind> {
 
 /// Nom combinator for delayed trigger subject reference phrases.
 /// Returns `Some(TargetFilter)` for ParentTarget or SelfRef references.
-fn parse_delayed_subject_keyword(
-    input: &str,
-) -> nom::IResult<&str, TargetFilter, VerboseError<&str>> {
+fn parse_delayed_subject_keyword(input: &str) -> nom::IResult<&str, TargetFilter, OracleError<'_>> {
     alt((
         // ParentTarget references (longer phrases first)
         value(TargetFilter::ParentTarget, tag("the exiled ")),
@@ -249,17 +337,15 @@ fn scan_delayed_subject(text: &str) -> Option<TargetFilter> {
     // Fallback: bare "it" at any word boundary (end of string or followed by space,
     // but NOT "its " which is possessive, not a pronoun reference)
     if nom_primitives::scan_at_word_boundaries(text, |input| {
-        let (rest, _) = tag::<_, _, VerboseError<&str>>("it").parse(input)?;
+        let (rest, _) = tag::<_, _, OracleError<'_>>("it").parse(input)?;
         // Require word boundary: end of string, space (but not "its"), or punctuation
         if rest.is_empty() || rest.starts_with(' ') && !rest.starts_with("s ") {
             Ok((rest, ()))
         } else {
-            Err(nom::Err::Error(VerboseError {
-                errors: vec![(
-                    input,
-                    nom_language::error::VerboseErrorKind::Context("it word boundary"),
-                )],
-            }))
+            Err(nom::Err::Error(OracleError::new(
+                input,
+                nom::error::ErrorKind::Fail,
+            )))
         }
     })
     .is_some()
@@ -271,8 +357,8 @@ fn scan_delayed_subject(text: &str) -> Option<TargetFilter> {
     // name (un-normalized), or a definite noun phrase describing the source object
     // (e.g., "the pandorica becomes untapped"). Indefinite articles indicate a
     // different object class ("a creature dealt damage this way"), not the source.
-    if tag::<_, _, VerboseError<&str>>("a ").parse(text).is_err()
-        && tag::<_, _, VerboseError<&str>>("an ").parse(text).is_err()
+    if tag::<_, _, OracleError<'_>>("a ").parse(text).is_err()
+        && tag::<_, _, OracleError<'_>>("an ").parse(text).is_err()
     {
         return Some(TargetFilter::SelfRef);
     }
@@ -284,7 +370,7 @@ fn scan_delayed_subject(text: &str) -> Option<TargetFilter> {
 fn scan_tracked_set_reference(text: &str) -> bool {
     nom_primitives::scan_at_word_boundaries(text, |input| {
         alt((
-            tag::<_, _, VerboseError<&str>>("that "),
+            tag::<_, _, OracleError<'_>>("that "),
             tag("the exiled "),
             tag("the targeted "),
         ))
@@ -302,7 +388,7 @@ fn scan_contains_phrase(text: &str, phrase: &str) -> bool {
 /// These create multi-fire delayed triggers that persist until end of turn.
 /// Example: "whenever a creature you control deals combat damage to a player this turn, draw a card"
 fn try_parse_whenever_this_turn(tp: TextPair) -> Option<ParsedEffectClause> {
-    if tag::<_, _, VerboseError<&str>>("whenever ")
+    if tag::<_, _, OracleError<'_>>("whenever ")
         .parse(tp.lower)
         .is_err()
     {
@@ -319,8 +405,10 @@ fn try_parse_whenever_this_turn(tp: TextPair) -> Option<ParsedEffectClause> {
     let effect_text = after.original;
 
     // Parse the condition as a trigger using the trigger parser
-    let (_, mut trigger_def) =
-        crate::parser::oracle_trigger::parse_trigger_condition(condition_text);
+    let (_, mut trigger_def) = crate::parser::oracle_trigger::parse_trigger_condition(
+        condition_text,
+        &mut ParseContext::default(),
+    );
     trigger_def.execute = None; // Effect lives in DelayedTrigger.ability, not here
 
     let inner = parse_effect_chain(effect_text, AbilityKind::Spell);
@@ -417,7 +505,7 @@ fn try_parse_when_next_event(tp: TextPair) -> Option<ParsedEffectClause> {
 
     // Must start with "when you next cast a " or "when you next cast an ".
     // Article choice depends on the payload — "a creature spell" vs "an instant or sorcery spell".
-    let article_result: nom::IResult<&str, &str, VerboseError<&str>> =
+    let article_result: nom::IResult<&str, &str, OracleError<'_>> =
         alt((tag("when you next cast a "), tag("when you next cast an "))).parse(tp.lower);
     let (_, matched_prefix) = article_result.ok()?;
 
@@ -465,6 +553,16 @@ fn try_parse_when_next_event(tp: TextPair) -> Option<ParsedEffectClause> {
     })
 }
 
+pub(crate) fn try_parse_temporal_delayed_trigger_ability(
+    text: &str,
+    kind: AbilityKind,
+) -> Option<AbilityDefinition> {
+    let lower = text.to_lowercase();
+    let tp = TextPair::new(text, &lower);
+    let clause = try_parse_whenever_this_turn(tp).or_else(|| try_parse_when_next_event(tp))?;
+    Some(ability_definition_from_clause(kind, clause))
+}
+
 /// CR 614.1a + CR 514.2: Detect "If [target_phrase] would die this turn, exile
 /// it instead." damage-spell rider, returning an `AddTargetReplacement` def.
 /// Returns `None` if the text doesn't match.
@@ -485,11 +583,11 @@ fn try_parse_die_exile_rider(lower: &str, kind: AbilityKind) -> Option<AbilityDe
 
     // Strip optional leading "if ", then the subject, then " would die this turn",
     // then ", exile <anaphor> instead" (with optional trailing period).
-    let (rest, _) = nom::combinator::opt(tag::<_, _, VerboseError<&str>>("if "))
+    let (rest, _) = nom::combinator::opt(tag::<_, _, OracleError<'_>>("if "))
         .parse(lower)
         .ok()?;
     let (rest, _) = alt((
-        tag::<_, _, VerboseError<&str>>("that creature or planeswalker"),
+        tag::<_, _, OracleError<'_>>("that creature or planeswalker"),
         tag("that creature"),
         tag("that planeswalker"),
         tag("that token"),
@@ -499,15 +597,15 @@ fn try_parse_die_exile_rider(lower: &str, kind: AbilityKind) -> Option<AbilityDe
     ))
     .parse(rest)
     .ok()?;
-    let (rest, _) = tag::<_, _, VerboseError<&str>>(" would die this turn")
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" would die this turn")
         .parse(rest)
         .ok()?;
-    let (rest, _) = alt((tag::<_, _, VerboseError<&str>>(", "), tag(" ")))
+    let (rest, _) = alt((tag::<_, _, OracleError<'_>>(", "), tag(" ")))
         .parse(rest)
         .ok()?;
-    let (rest, _) = tag::<_, _, VerboseError<&str>>("exile ").parse(rest).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("exile ").parse(rest).ok()?;
     let (rest, _) = alt((
-        tag::<_, _, VerboseError<&str>>("that creature or planeswalker"),
+        tag::<_, _, OracleError<'_>>("that creature or planeswalker"),
         tag("that creature"),
         tag("that planeswalker"),
         tag("them"),
@@ -515,10 +613,8 @@ fn try_parse_die_exile_rider(lower: &str, kind: AbilityKind) -> Option<AbilityDe
     ))
     .parse(rest)
     .ok()?;
-    let (rest, _) = tag::<_, _, VerboseError<&str>>(" instead")
-        .parse(rest)
-        .ok()?;
-    let (rest, _) = nom::combinator::opt(tag::<_, _, VerboseError<&str>>("."))
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" instead").parse(rest).ok()?;
+    let (rest, _) = nom::combinator::opt(tag::<_, _, OracleError<'_>>("."))
         .parse(rest)
         .ok()?;
     if !rest.trim().is_empty() {
@@ -559,7 +655,7 @@ fn try_parse_die_exile_rider(lower: &str, kind: AbilityKind) -> Option<AbilityDe
 }
 
 fn parse_optional_period_and_end(input: &str) -> Option<()> {
-    let (rest, _) = nom::combinator::opt(tag::<_, _, VerboseError<&str>>("."))
+    let (rest, _) = nom::combinator::opt(tag::<_, _, OracleError<'_>>("."))
         .parse(input)
         .ok()?;
     rest.trim().is_empty().then_some(())
@@ -567,7 +663,7 @@ fn parse_optional_period_and_end(input: &str) -> Option<()> {
 
 fn parse_damage_source_subject(input: &str) -> Option<&str> {
     alt((
-        tag::<_, _, VerboseError<&str>>("a source"),
+        tag::<_, _, OracleError<'_>>("a source"),
         tag("that source"),
         tag("it"),
     ))
@@ -577,15 +673,15 @@ fn parse_damage_source_subject(input: &str) -> Option<&str> {
 }
 
 fn parse_that_player_or_their_permanent(input: &str) -> Option<&str> {
-    let (rest, _) = tag::<_, _, VerboseError<&str>>("that player")
+    let (rest, _) = tag::<_, _, OracleError<'_>>("that player")
         .parse(input)
         .ok()?;
-    let (rest, _) = tag::<_, _, VerboseError<&str>>(" or ").parse(rest).ok()?;
-    let (rest, _) = tag::<_, _, VerboseError<&str>>("a permanent ")
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" or ").parse(rest).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("a permanent ")
         .parse(rest)
         .ok()?;
     let (rest, _) = alt((
-        tag::<_, _, VerboseError<&str>>("that player controls"),
+        tag::<_, _, OracleError<'_>>("that player controls"),
         tag("controlled by that player"),
     ))
     .parse(rest)
@@ -594,25 +690,25 @@ fn parse_that_player_or_their_permanent(input: &str) -> Option<&str> {
 }
 
 fn parse_source_deals_double_instead(input: &str) -> Option<&str> {
-    let (rest, _) = alt((tag::<_, _, VerboseError<&str>>("it"), tag("that source")))
+    let (rest, _) = alt((tag::<_, _, OracleError<'_>>("it"), tag("that source")))
         .parse(input)
         .ok()?;
-    let (rest, _) = tag::<_, _, VerboseError<&str>>(" deals double that damage instead")
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" deals double that damage instead")
         .parse(rest)
         .ok()?;
     Some(rest)
 }
 
 fn try_parse_triggered_damage_replacement(lower: &str) -> Option<Effect> {
-    let (rest, _) = nom::combinator::opt(tag::<_, _, VerboseError<&str>>("if "))
+    let (rest, _) = nom::combinator::opt(tag::<_, _, OracleError<'_>>("if "))
         .parse(lower)
         .ok()?;
     let rest = parse_damage_source_subject(rest)?;
-    let (rest, _) = tag::<_, _, VerboseError<&str>>(" would deal damage to ")
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" would deal damage to ")
         .parse(rest)
         .ok()?;
     let rest = parse_that_player_or_their_permanent(rest)?;
-    let (rest, _) = tag::<_, _, VerboseError<&str>>(", ").parse(rest).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(", ").parse(rest).ok()?;
     let rest = parse_source_deals_double_instead(rest)?;
     parse_optional_period_and_end(rest)?;
 
@@ -626,11 +722,11 @@ fn try_parse_triggered_damage_replacement(lower: &str) -> Option<Effect> {
 }
 
 fn try_parse_next_time_source_damage_replacement(lower: &str) -> Option<Effect> {
-    let (rest, _) = tag::<_, _, VerboseError<&str>>("the next time ")
+    let (rest, _) = tag::<_, _, OracleError<'_>>("the next time ")
         .parse(lower)
         .ok()?;
     let (rest, _) = alt((
-        tag::<_, _, VerboseError<&str>>("that creature would deal combat damage this turn, "),
+        tag::<_, _, OracleError<'_>>("that creature would deal combat damage this turn, "),
         tag("it would deal combat damage this turn, "),
     ))
     .parse(rest)
@@ -640,15 +736,14 @@ fn try_parse_next_time_source_damage_replacement(lower: &str) -> Option<Effect> 
         .damage_source_filter(TargetFilter::SelfRef)
         .combat_scope(CombatDamageScope::CombatOnly);
     if let Ok((rest, _)) = alt((
-        tag::<_, _, VerboseError<&str>>("it deals double that damage instead"),
+        tag::<_, _, OracleError<'_>>("it deals double that damage instead"),
         tag("that creature deals double that damage instead"),
     ))
     .parse(rest)
     {
         parse_optional_period_and_end(rest)?;
         replacement = replacement.damage_modification(DamageModification::Double);
-    } else if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("prevent that damage").parse(rest)
-    {
+    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("prevent that damage").parse(rest) {
         parse_optional_period_and_end(rest)?;
         replacement = replacement.prevention_shield(PreventionAmount::All);
     } else {
@@ -669,18 +764,16 @@ fn try_parse_next_time_source_damage_replacement(lower: &str) -> Option<Effect> 
 fn try_parse_enters_with_additional_counters(lower: &str) -> Option<AbilityDefinition> {
     // "that creature enters with an additional +1/+1 counter on it"
     // "that creature enters with N additional +1/+1 counters on it"
-    let (rest, _) = tag::<_, _, VerboseError<&str>>("that creature enters with ")
+    let (rest, _) = tag::<_, _, OracleError<'_>>("that creature enters with ")
         .parse(lower)
         .ok()?;
 
     // Parse "an additional" or "N additional"
     let (rest, count) =
-        if let Ok((r, _)) = tag::<_, _, VerboseError<&str>>("an additional ").parse(rest) {
+        if let Ok((r, _)) = tag::<_, _, OracleError<'_>>("an additional ").parse(rest) {
             (r, 1u32)
         } else if let Ok((r, n)) = nom_primitives::parse_number(rest) {
-            let (r, _) = tag::<_, _, VerboseError<&str>>(" additional ")
-                .parse(r)
-                .ok()?;
+            let (r, _) = tag::<_, _, OracleError<'_>>(" additional ").parse(r).ok()?;
             (r, n)
         } else {
             return None;
@@ -688,7 +781,7 @@ fn try_parse_enters_with_additional_counters(lower: &str) -> Option<AbilityDefin
 
     // Parse counter type: "+1/+1 counter" or "-1/-1 counter" etc.
     let (rest, counter_type) = alt((
-        value("P1P1".to_string(), tag::<_, _, VerboseError<&str>>("+1/+1")),
+        value("P1P1".to_string(), tag::<_, _, OracleError<'_>>("+1/+1")),
         value("M1M1".to_string(), tag("-1/-1")),
     ))
     .parse(rest)
@@ -696,7 +789,7 @@ fn try_parse_enters_with_additional_counters(lower: &str) -> Option<AbilityDefin
 
     // Match " counter on it" or " counters on it"
     let _ = alt((
-        tag::<_, _, VerboseError<&str>>(" counter on it"),
+        tag::<_, _, OracleError<'_>>(" counter on it"),
         tag(" counters on it"),
     ))
     .parse(rest)
@@ -715,8 +808,11 @@ fn try_parse_enters_with_additional_counters(lower: &str) -> Option<AbilityDefin
 
 /// CR 603.7c: Parse inline delayed triggers like "when that creature dies, draw a card".
 /// Returns a `CreateDelayedTrigger` wrapping the parsed inner effect.
-fn try_parse_inline_delayed_trigger(tp: TextPair) -> Option<ParsedEffectClause> {
-    if tag::<_, _, VerboseError<&str>>("when ")
+fn try_parse_inline_delayed_trigger(
+    tp: TextPair,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
+    if tag::<_, _, OracleError<'_>>("when ")
         .parse(tp.lower)
         .is_err()
     {
@@ -731,11 +827,11 @@ fn try_parse_inline_delayed_trigger(tp: TextPair) -> Option<ParsedEffectClause> 
     let condition = match scan_delayed_condition_kind(condition_text) {
         Some(DelayedConditionKind::Dies | DelayedConditionKind::PutIntoGraveyard) => {
             DelayedTriggerCondition::WhenDies {
-                filter: parse_delayed_subject_filter(condition_text),
+                filter: parse_delayed_subject_filter(condition_text, ctx),
             }
         }
         Some(DelayedConditionKind::LeavesPlay) => DelayedTriggerCondition::WhenLeavesPlayFiltered {
-            filter: parse_delayed_subject_filter(condition_text),
+            filter: parse_delayed_subject_filter(condition_text, ctx),
         },
         Some(DelayedConditionKind::EntersBattlefield) => {
             if has_unconsumed_conditional(condition_text) {
@@ -745,7 +841,7 @@ fn try_parse_inline_delayed_trigger(tp: TextPair) -> Option<ParsedEffectClause> 
                 );
             }
             DelayedTriggerCondition::WhenEntersBattlefield {
-                filter: parse_delayed_subject_filter(condition_text),
+                filter: parse_delayed_subject_filter(condition_text, ctx),
             }
         }
         None => return None,
@@ -780,12 +876,13 @@ fn try_parse_inline_delayed_trigger(tp: TextPair) -> Option<ParsedEffectClause> 
 /// "the targeted creature" → ParentTarget.
 /// "it"/"this creature"/"this permanent"/"this artifact" → SelfRef (source object).
 /// "target creature" → ParentTarget (named target in the condition).
-fn parse_delayed_subject_filter(condition_text: &str) -> TargetFilter {
+fn parse_delayed_subject_filter(condition_text: &str, ctx: &mut ParseContext) -> TargetFilter {
     scan_delayed_subject(condition_text).unwrap_or_else(|| {
-        push_warning(format!(
-            "target-fallback: unrecognized delayed subject '{}'",
-            condition_text
-        ));
+        ctx.push_diagnostic(OracleDiagnostic::TargetFallback {
+            context: "unrecognized delayed subject".into(),
+            text: condition_text.trim().into(),
+            line_index: 0,
+        });
         TargetFilter::Any
     })
 }
@@ -797,13 +894,13 @@ fn try_parse_reduce_next_spell_cost(tp: TextPair) -> Option<ParsedEffectClause> 
     use nom::sequence::delimited;
 
     // Match prefix: "the next spell you cast this turn costs "
-    let (rest, _) = tag::<_, _, VerboseError<&str>>("the next spell you cast this turn costs ")
+    let (rest, _) = tag::<_, _, OracleError<'_>>("the next spell you cast this turn costs ")
         .parse(tp.lower)
         .ok()?;
 
     // Extract the mana amount: "{1}", "{2}", etc.
     let (after_amount, amount) = delimited(
-        tag::<_, _, VerboseError<&str>>("{"),
+        tag::<_, _, OracleError<'_>>("{"),
         nom::character::complete::u32,
         tag("}"),
     )
@@ -812,7 +909,7 @@ fn try_parse_reduce_next_spell_cost(tp: TextPair) -> Option<ParsedEffectClause> 
 
     // Match suffix: " less to cast" with optional trailing clause
     alt((
-        tag::<_, _, VerboseError<&str>>(" less to cast for each counter removed this way"),
+        tag::<_, _, OracleError<'_>>(" less to cast for each counter removed this way"),
         tag(" less to cast"),
     ))
     .parse(after_amount)
@@ -834,7 +931,7 @@ fn try_parse_reduce_next_spell_cost(tp: TextPair) -> Option<ParsedEffectClause> 
 /// - "the next face-down creature spell you cast this turn costs {3} less to cast"
 fn try_parse_grant_next_spell_ability(tp: TextPair) -> Option<ParsedEffectClause> {
     // Must start with "the next "
-    let rest = tag::<_, _, VerboseError<&str>>("the next ")
+    let rest = tag::<_, _, OracleError<'_>>("the next ")
         .parse(tp.lower)
         .ok()
         .map(|(r, _)| r)?;
@@ -844,9 +941,9 @@ fn try_parse_grant_next_spell_ability(tp: TextPair) -> Option<ParsedEffectClause
     // "instant or sorcery spell you cast this turn", "noncreature spell you cast this turn",
     // "face-down creature spell you cast this turn"
     let (ability_text, filter_text) = nom::sequence::terminated(
-        take_until::<_, _, VerboseError<&str>>("spell"),
+        take_until::<_, _, OracleError<'_>>("spell"),
         alt((
-            tag::<_, _, VerboseError<&str>>("spell you cast this turn "),
+            tag::<_, _, OracleError<'_>>("spell you cast this turn "),
             tag("spell of the chosen type you cast this turn "),
         )),
     )
@@ -865,7 +962,7 @@ fn try_parse_grant_next_spell_ability(tp: TextPair) -> Option<ParsedEffectClause
 
     // Now parse the ability: "can't be countered", "has convoke", "can be cast as though it had flash"
     // CR 601.2f: "can't be countered"
-    if tag::<_, _, VerboseError<&str>>("can't be countered")
+    if tag::<_, _, OracleError<'_>>("can't be countered")
         .parse(ability_text)
         .is_ok()
     {
@@ -876,7 +973,7 @@ fn try_parse_grant_next_spell_ability(tp: TextPair) -> Option<ParsedEffectClause
     }
 
     // CR 601.2f: "can be cast as though it had flash"
-    if tag::<_, _, VerboseError<&str>>("can be cast as though it had flash")
+    if tag::<_, _, OracleError<'_>>("can be cast as though it had flash")
         .parse(ability_text)
         .is_ok()
     {
@@ -888,7 +985,7 @@ fn try_parse_grant_next_spell_ability(tp: TextPair) -> Option<ParsedEffectClause
 
     // "can be cast without paying its mana cost" — requires casting infrastructure
     // changes (alternative cost injection during casting). Deferred.
-    if tag::<_, _, VerboseError<&str>>("can be cast without paying its mana cost")
+    if tag::<_, _, OracleError<'_>>("can be cast without paying its mana cost")
         .parse(ability_text)
         .is_ok()
     {
@@ -896,11 +993,8 @@ fn try_parse_grant_next_spell_ability(tp: TextPair) -> Option<ParsedEffectClause
     }
 
     // CR 601.2f: "has [keyword]"
-    if let Ok((_, keyword_text)) = preceded(
-        tag::<_, _, VerboseError<&str>>("has "),
-        nom::combinator::rest,
-    )
-    .parse(ability_text)
+    if let Ok((_, keyword_text)) =
+        preceded(tag::<_, _, OracleError<'_>>("has "), nom::combinator::rest).parse(ability_text)
     {
         // Strip trailing period/reminder text
         let keyword_text = keyword_text
@@ -932,15 +1026,15 @@ fn try_parse_grant_next_spell_ability(tp: TextPair) -> Option<ParsedEffectClause
 
     // "costs {N} less to cast" — delegate to the existing ReduceNextSpellCost for filtered variants
     // e.g., "the next face-down creature spell you cast this turn costs {3} less to cast"
-    if let Ok((amount_rest, _)) = tag::<_, _, VerboseError<&str>>("costs ").parse(ability_text) {
+    if let Ok((amount_rest, _)) = tag::<_, _, OracleError<'_>>("costs ").parse(ability_text) {
         if let Ok((after_amount, amount)) = nom::sequence::delimited(
-            tag::<_, _, VerboseError<&str>>("{"),
+            tag::<_, _, OracleError<'_>>("{"),
             nom::character::complete::u32,
             tag("}"),
         )
         .parse(amount_rest)
         {
-            if tag::<_, _, VerboseError<&str>>(" less to cast")
+            if tag::<_, _, OracleError<'_>>(" less to cast")
                 .parse(after_amount)
                 .is_ok()
             {
@@ -1040,7 +1134,7 @@ fn try_parse_cast_only_from_zones_restriction(tp: TextPair<'_>) -> Option<Parsed
     }
 
     let affected_players = if alt((
-        tag::<_, _, VerboseError<&str>>("your opponents"),
+        tag::<_, _, OracleError<'_>>("your opponents"),
         tag("opponents"),
     ))
     .parse(scope_tp.lower)
@@ -1088,7 +1182,7 @@ fn try_parse_cant_cast_spells_effect(tp: TextPair<'_>) -> Option<ParsedEffectCla
 
     // Determine affected player scope from subject prefix.
     let affected_players = if alt((
-        tag::<_, _, VerboseError<&str>>("your opponents"),
+        tag::<_, _, OracleError<'_>>("your opponents"),
         tag("opponents"),
         tag("each opponent"),
     ))
@@ -1117,7 +1211,10 @@ fn try_parse_cant_cast_spells_effect(tp: TextPair<'_>) -> Option<ParsedEffectCla
     })
 }
 
-fn try_parse_self_name_exile(tp: TextPair<'_>, ctx: &ParseContext) -> Option<ParsedEffectClause> {
+fn try_parse_self_name_exile(
+    tp: TextPair<'_>,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
     let card_name = ctx.card_name.as_deref()?;
     let (_, rest_orig) =
         nom_on_lower(tp.original, tp.lower, |i| value((), tag("exile ")).parse(i))?;
@@ -1155,7 +1252,7 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
             shards: vec![],
         });
     let lower_rest = rest.lower.trim_start();
-    let is_mass = alt((tag::<_, _, VerboseError<&str>>("all "), tag("each ")))
+    let is_mass = alt((tag::<_, _, OracleError<'_>>("all "), tag("each ")))
         .parse(lower_rest)
         .is_ok();
 
@@ -1340,11 +1437,38 @@ fn try_parse_earthbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
 ///      with 3+ branches are rare and handled by bulleted modal text instead.
 fn try_parse_choose_one_of_inline(
     tp: TextPair<'_>,
-    ctx: &ParseContext,
+    ctx: &mut ParseContext,
 ) -> Option<ParsedEffectClause> {
+    let mut chooser = PlayerFilter::Controller;
+    let mut scoped_choice_player = false;
+    let mut tp = tp;
+    if let Some((prefix_chooser, rest_original)) = nom_on_lower(tp.original, tp.lower, |i| {
+        alt((
+            value(
+                PlayerFilter::DefendingPlayer,
+                tag("defending player faces a villainous choice — "),
+            ),
+            value(
+                PlayerFilter::Opponent,
+                tag("target opponent faces a villainous choice — "),
+            ),
+            value(PlayerFilter::Controller, tag("face a villainous choice — ")),
+            value(
+                PlayerFilter::Controller,
+                tag("faces a villainous choice — "),
+            ),
+        ))
+        .parse(i)
+    }) {
+        let consumed = tp.original.len() - rest_original.len();
+        tp = TextPair::new(rest_original, &tp.lower[consumed..]);
+        chooser = prefix_chooser;
+        scoped_choice_player = true;
+    }
+
     // CR 115.1: bail on target phrases — "target creature or player" is a
     // typed-target disjunction, not a choice between effects.
-    if tag::<_, _, VerboseError<&str>>("target ")
+    if tag::<_, _, OracleError<'_>>("target ")
         .parse(tp.lower)
         .is_ok()
     {
@@ -1396,7 +1520,7 @@ fn try_parse_choose_one_of_inline(
     // Detection uses nom's `take_until` to scan for ` or ` in the already-
     // separated left half — a structural post-split sanity check, not parser
     // dispatch.
-    if take_until::<_, _, VerboseError<&str>>(" or ")
+    if take_until::<_, _, OracleError<'_>>(" or ")
         .parse(before_lower)
         .is_ok()
     {
@@ -1422,9 +1546,19 @@ fn try_parse_choose_one_of_inline(
     // failed trial pollutes the committed warnings buffer with spurious
     // gaps from a malformed branch (e.g., "return a red" left half from
     // splitting "return a red or green creature" at the wrong " or ").
-    let warnings_snapshot = super::oracle_warnings::snapshot_warnings();
-    let left_clause = parse_effect_clause(left_orig, ctx);
-    let right_clause = parse_effect_clause(right_orig, ctx);
+    let diagnostics_snapshot = ctx.diagnostics.len();
+    let left_clause;
+    let right_clause;
+    if scoped_choice_player {
+        let mut branch_ctx = ctx.clone();
+        branch_ctx.relative_player_scope = Some(ControllerRef::ScopedPlayer);
+        left_clause = parse_effect_clause(left_orig, &mut branch_ctx);
+        right_clause = parse_effect_clause(right_orig, &mut branch_ctx);
+        ctx.diagnostics = branch_ctx.diagnostics;
+    } else {
+        left_clause = parse_effect_clause(left_orig, ctx);
+        right_clause = parse_effect_clause(right_orig, ctx);
+    }
 
     // Reject unless BOTH branches produce non-Unimplemented effects. This
     // prevents false positives on noun-phrase disjunctions and "and/or"
@@ -1432,7 +1566,7 @@ fn try_parse_choose_one_of_inline(
     if matches!(left_clause.effect, Effect::Unimplemented { .. })
         || matches!(right_clause.effect, Effect::Unimplemented { .. })
     {
-        super::oracle_warnings::truncate_warnings(warnings_snapshot);
+        ctx.diagnostics.truncate(diagnostics_snapshot);
         return None;
     }
 
@@ -1442,16 +1576,52 @@ fn try_parse_choose_one_of_inline(
     if matches!(left_clause.effect, Effect::TargetOnly { .. })
         || matches!(right_clause.effect, Effect::TargetOnly { .. })
     {
-        super::oracle_warnings::truncate_warnings(warnings_snapshot);
+        ctx.diagnostics.truncate(diagnostics_snapshot);
         return None;
     }
 
-    let left_def = AbilityDefinition::new(AbilityKind::Spell, left_clause.effect);
-    let right_def = AbilityDefinition::new(AbilityKind::Spell, right_clause.effect);
+    let mut left_def = ability_definition_from_clause(AbilityKind::Spell, left_clause);
+    left_def.description = Some(left_orig.to_string());
+    let mut right_def = ability_definition_from_clause(AbilityKind::Spell, right_clause);
+    right_def.description = Some(right_orig.to_string());
 
     Some(parsed_clause(Effect::ChooseOneOf {
+        chooser,
         branches: vec![left_def, right_def],
     }))
+}
+
+fn ability_definition_from_clause(
+    kind: AbilityKind,
+    clause: ParsedEffectClause,
+) -> AbilityDefinition {
+    let mut def = AbilityDefinition::new(kind, clause.effect);
+    def.sub_ability = clause.sub_ability;
+    def.duration = clause.duration;
+    def.condition = clause.condition;
+    def.optional = clause.optional;
+    def.multi_target = clause.multi_target;
+    def.distribute = clause.distribute;
+    def
+}
+
+fn parse_event_context_ref_with_ctx<'a>(
+    text: &'a str,
+    ctx: &ParseContext,
+) -> Option<(TargetFilter, &'a str)> {
+    let (target, rest) = parse_event_context_ref(text)?;
+    let target = if matches!(
+        (&target, ctx.relative_player_scope.as_ref()),
+        (
+            TargetFilter::TriggeringPlayer,
+            Some(ControllerRef::ScopedPlayer)
+        )
+    ) {
+        TargetFilter::ScopedPlayer
+    } else {
+        target
+    };
+    Some((target, rest))
 }
 
 fn try_parse_no_max_hand_size_effect(tp: TextPair<'_>) -> Option<Effect> {
@@ -1461,13 +1631,13 @@ fn try_parse_no_max_hand_size_effect(tp: TextPair<'_>) -> Option<Effect> {
     let rest_lower = rest.to_lowercase();
 
     // Match "have no maximum hand size" with optional trailing "for the rest of the game"
-    let matched = tag::<_, _, VerboseError<&str>>("have no maximum hand size")
+    let matched = tag::<_, _, OracleError<'_>>("have no maximum hand size")
         .parse(rest_lower.as_str())
         .ok()?;
     let remainder = matched.0.trim().trim_end_matches('.');
     // Allow bare "have no maximum hand size" or "for the rest of the game" suffix
     if !remainder.is_empty()
-        && tag::<_, _, VerboseError<&str>>("for the rest of the game")
+        && tag::<_, _, OracleError<'_>>("for the rest of the game")
             .parse(remainder)
             .is_err()
     {
@@ -1483,7 +1653,10 @@ fn try_parse_no_max_hand_size_effect(tp: TextPair<'_>) -> Option<Effect> {
 /// CR 608.2d: Parse "have it [verb]" / "have you [verb]" causative constructions.
 /// Used by "any opponent may" effects where the opponent causes the source or controller
 /// to perform an action (e.g., "have it deal 4 damage to them").
-fn try_parse_have_causative(tp: TextPair<'_>, ctx: &ParseContext) -> Option<ParsedEffectClause> {
+fn try_parse_have_causative(
+    tp: TextPair<'_>,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
     // Pattern A: "have it deal N damage to them" / "have ~ deal N damage to them"
     let after_have = nom_on_lower(tp.original, tp.lower, |input| {
         value((), alt((tag("have it "), tag("have ~ ")))).parse(input)
@@ -1541,7 +1714,7 @@ fn all_core_type_categories() -> Vec<CoreType> {
 }
 
 fn try_parse_distinct_card_types_from_revealed(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
-    type E<'a> = VerboseError<&'a str>;
+    type E<'a> = OracleError<'a>;
 
     let (rest, _) = tag::<_, _, E>("for each ").parse(tp.lower).ok()?;
     let (rest, _) = alt((tag::<_, _, E>("card type"), tag("card types")))
@@ -1596,7 +1769,7 @@ fn try_parse_distinct_card_types_from_revealed(tp: TextPair<'_>) -> Option<Parse
 }
 
 #[tracing::instrument(level = "debug")]
-fn parse_effect_clause(text: &str, ctx: &ParseContext) -> ParsedEffectClause {
+fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectClause {
     // Phase 2 PoC: peel structural slots off the head of the clause before
     // body parsing. The recursive shell strips slot-bearing prefixes
     // (currently just "you may " for the Optional slot) and accumulates them
@@ -1610,7 +1783,7 @@ fn parse_effect_clause(text: &str, ctx: &ParseContext) -> ParsedEffectClause {
     if peel_ctx.is_empty() {
         return parse_effect_clause_inner(text, ctx);
     }
-    if let Some(mut clause) = try_parse_for_each_effect(text) {
+    if let Some(mut clause) = try_parse_for_each_effect(text, ctx) {
         peel_ctx.apply_optional(&mut clause.optional);
         if clause.condition.is_none() {
             if let Some(cond) = peel_ctx.condition().cloned() {
@@ -1652,8 +1825,76 @@ fn parse_effect_clause(text: &str, ctx: &ParseContext) -> ParsedEffectClause {
     clause
 }
 
+fn try_parse_for_each_copy_token_source(
+    text: &str,
+    lower: &str,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
+    let (source_filter, body) = parse_for_each_object_copy_parts(text, lower)?;
+    let body_lower = body.to_lowercase();
+    let Effect::CopyTokenOf {
+        target,
+        enters_attacking,
+        tapped,
+        count,
+        extra_keywords,
+        additional_modifications,
+        ..
+    } = token::try_parse_token(&body_lower, body, ctx)?
+    else {
+        return None;
+    };
+    if !matches!(target, TargetFilter::ParentTarget | TargetFilter::SelfRef) {
+        return None;
+    }
+    Some(parsed_clause(Effect::CopyTokenOf {
+        target: TargetFilter::None,
+        source_filter: Some(source_filter),
+        enters_attacking,
+        tapped,
+        count,
+        extra_keywords,
+        additional_modifications,
+    }))
+}
+
+fn parse_for_each_object_copy_parts<'a>(
+    text: &'a str,
+    lower: &str,
+) -> Option<(TargetFilter, &'a str)> {
+    let (after_prefix, _) = tag::<_, _, OracleError<'_>>("for each ")
+        .parse(lower)
+        .ok()?;
+    let clause_start = lower.len() - after_prefix.len();
+    let (after_clause, clause_lower) = take_until::<_, _, OracleError<'_>>(", ")
+        .parse(after_prefix)
+        .ok()?;
+    let (body_lower, _) = tag::<_, _, OracleError<'_>>(", ")
+        .parse(after_clause)
+        .ok()?;
+    if !is_copy_token_anaphor_body(body_lower.trim()) {
+        return None;
+    }
+    let clause = &lower[clause_start..clause_start + clause_lower.len()];
+    let source_filter = parse_for_each_object_filter_clause(clause)?;
+    let body_start = text.len() - body_lower.len();
+    Some((source_filter, text[body_start..].trim()))
+}
+
+fn is_copy_token_anaphor_body(input: &str) -> bool {
+    let parsed = |i| -> OracleResult<'_, ()> {
+        let (i, _) = token::parse_copy_token_entry_modifiers(i)?;
+        let i = i.trim_start();
+        let (i, _) = tag("it").parse(i)?;
+        let (i, _) = opt(tag(".")).parse(i)?;
+        let (i, _) = eof.parse(i)?;
+        Ok((i, ()))
+    };
+    parsed(input).is_ok()
+}
+
 #[tracing::instrument(level = "debug")]
-fn parse_effect_clause_inner(text: &str, ctx: &ParseContext) -> ParsedEffectClause {
+fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffectClause {
     let text = strip_leading_sequence_connector(text)
         .trim()
         .trim_end_matches('.');
@@ -1678,7 +1919,7 @@ fn parse_effect_clause_inner(text: &str, ctx: &ParseContext) -> ParsedEffectClau
     let text = {
         let lower = text.to_ascii_lowercase();
         let stripped_lower = alt((
-            value((), tag::<_, _, VerboseError<&str>>("~ also ")),
+            value((), tag::<_, _, OracleError<'_>>("~ also ")),
             value((), tag("this creature also ")),
             value((), tag("this permanent also ")),
         ))
@@ -1728,6 +1969,10 @@ fn parse_effect_clause_inner(text: &str, ctx: &ParseContext) -> ParsedEffectClau
     }
     if let Some(effect) = try_parse_next_time_source_damage_replacement(&lower) {
         return parsed_clause(effect);
+    }
+
+    if let Some(clause) = try_parse_for_each_copy_token_source(text, &lower, ctx) {
+        return clause;
     }
 
     // CR 700.2 + CR 608.2d: Inline binary-choice imperative — "discard a card
@@ -1801,7 +2046,7 @@ fn parse_effect_clause_inner(text: &str, ctx: &ParseContext) -> ParsedEffectClau
     // player controls an artifact, a creature, ..." — Tragic Arrogance pattern where
     // the spell's controller chooses for all players.
     if let Ok((after_prefix, _)) =
-        tag::<_, _, VerboseError<&str>>("for each player, you choose ").parse(tp.lower)
+        tag::<_, _, OracleError<'_>>("for each player, you choose ").parse(tp.lower)
     {
         if let Some(ast) = imperative::parse_category_and_sacrifice_rest_pub(after_prefix) {
             return parsed_clause(imperative::lower_choose_ast(ast));
@@ -1823,7 +2068,7 @@ fn parse_effect_clause_inner(text: &str, ctx: &ParseContext) -> ParsedEffectClau
         });
     }
 
-    if let Some(amount_text) = tag::<_, _, VerboseError<&str>>("increase your speed by ")
+    if let Some(amount_text) = tag::<_, _, OracleError<'_>>("increase your speed by ")
         .parse(tp.lower)
         .ok()
         .map(|(rest, _)| rest.trim())
@@ -1852,7 +2097,7 @@ fn parse_effect_clause_inner(text: &str, ctx: &ParseContext) -> ParsedEffectClau
     }
 
     // CR 603.7c: "When that creature dies, ..." — inline delayed trigger creation.
-    if let Some(clause) = try_parse_inline_delayed_trigger(tp) {
+    if let Some(clause) = try_parse_inline_delayed_trigger(tp, ctx) {
         return clause;
     }
 
@@ -1905,7 +2150,10 @@ fn parse_effect_clause_inner(text: &str, ctx: &ParseContext) -> ParsedEffectClau
     // Returns a FlipCoin with the appropriate branch filled in.
     // consolidate_die_and_coin_defs merges these into the preceding FlipCoin.
     if let Some((is_win, effect_text)) = imperative::try_parse_coin_flip_branch(text) {
-        let branch_def = parse_effect_chain_impl(effect_text, AbilityKind::Spell, ctx);
+        let branch_def = {
+            let ir = parse_effect_chain_ir(effect_text, AbilityKind::Spell, ctx);
+            lower_effect_chain_ir(&ir)
+        };
         return if is_win {
             parsed_clause(Effect::FlipCoin {
                 win_effect: Some(Box::new(branch_def)),
@@ -1929,6 +2177,11 @@ fn parse_effect_clause_inner(text: &str, ctx: &ParseContext) -> ParsedEffectClau
         return clause;
     }
 
+    // CR 614.10a: "you skip your next untap/draw/upkeep step" — one-shot step skip.
+    if let Some(clause) = try_parse_skip_next_step(tp, ctx) {
+        return clause;
+    }
+
     // CR 614.10: "you skip your next turn" / "skip your next turn" — temporal penalty.
     if let Some(clause) = try_parse_skip_next_turn(tp) {
         return clause;
@@ -1947,7 +2200,7 @@ fn parse_effect_clause_inner(text: &str, ctx: &ParseContext) -> ParsedEffectClau
 
     // CR 601.2d: "distribute N [type] counters among [targets]" →
     // PutCounter with distribute: Some(Counters(type)).
-    if tag::<_, _, VerboseError<&str>>("distribute ")
+    if tag::<_, _, OracleError<'_>>("distribute ")
         .parse(lower.as_str())
         .is_ok()
         && scan_contains_phrase(&lower, "counter")
@@ -1959,7 +2212,7 @@ fn parse_effect_clause_inner(text: &str, ctx: &ParseContext) -> ParsedEffectClau
     }
 
     // "for each" patterns: "draw a card for each [filter]", etc.
-    if let Some(clause) = try_parse_for_each_effect(text) {
+    if let Some(clause) = try_parse_for_each_effect(text, ctx) {
         return clause;
     }
 
@@ -1983,10 +2236,10 @@ fn parse_effect_clause_inner(text: &str, ctx: &ParseContext) -> ParsedEffectClau
     // CR 701.20a: "reveal it" / "reveal them" — standalone reveal of a referenced object
     // (e.g., the card looked at via a dig effect). Maps to RevealTop { count: 1 }.
     if let Ok((rest, _)) =
-        alt((tag::<_, _, VerboseError<&str>>("reveal "), tag("reveals "))).parse(tp.lower)
+        alt((tag::<_, _, OracleError<'_>>("reveal "), tag("reveals "))).parse(tp.lower)
     {
         if alt((
-            value((), tag::<_, _, VerboseError<&str>>("it")),
+            value((), tag::<_, _, OracleError<'_>>("it")),
             value((), tag("them")),
         ))
         .parse(rest.trim_end_matches('.'))
@@ -2022,39 +2275,56 @@ fn parse_effect_clause_inner(text: &str, ctx: &ParseContext) -> ParsedEffectClau
         return clause;
     }
 
-    // CR 701.57a: "discover N" — effect variant
-    if let Some((_, rest_orig)) =
-        super::oracle_nom::bridge::nom_on_lower(tp.original, tp.lower, |i| {
-            value((), tag("discover ")).parse(i)
+    // CR 701.57a: "discover N" / "discover X" — effect variant.
+    let (discover_tp, discover_where_x) = strip_trailing_where_x(tp);
+    if let Some((limit, rest_orig)) =
+        super::oracle_nom::bridge::nom_on_lower(discover_tp.original, discover_tp.lower, |i| {
+            let (rest, _) = tag("discover ").parse(i)?;
+            let (rest, limit) = alt((
+                map(nom_primitives::parse_number, |value| QuantityExpr::Fixed {
+                    value: value as i32,
+                }),
+                value(
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Variable {
+                            name: "X".to_string(),
+                        },
+                    },
+                    tag("x"),
+                ),
+            ))
+            .parse(rest)?;
+            let (rest, _) = opt(tag(".")).parse(rest)?;
+            Ok((rest, limit))
         })
     {
-        let rest_lower = &tp.lower[tp.lower.len() - rest_orig.len()..];
-        if let Ok(n) = rest_lower.trim().parse::<u32>() {
+        if rest_orig.trim().is_empty() {
+            let limit = apply_where_x_quantity_expression(limit, discover_where_x.as_deref());
             return parsed_clause(Effect::Discover {
-                mana_value_limit: n,
+                mana_value_limit: limit,
             });
         }
     }
 
     // CR 401.4: "[target]'s owner puts it on their choice of the top or bottom of their library"
-    if let Some(clause) = try_parse_put_on_top_or_bottom(tp) {
+    if let Some(clause) = try_parse_put_on_top_or_bottom(tp, ctx) {
         return clause;
     }
 
     // CR 701.24a + CR 400.3: "the owner of target [filter] shuffles it into their library"
-    if let Some(clause) = try_parse_owner_of_target_shuffle(tp) {
+    if let Some(clause) = try_parse_owner_of_target_shuffle(tp, ctx) {
         return clause;
     }
 
     // CR 401.4 + CR 400.3: "the owner of target [filter] puts it into their library second from
     // the top or on the bottom"
-    if let Some(clause) = try_parse_owner_of_target_put_second(tp) {
+    if let Some(clause) = try_parse_owner_of_target_put_second(tp, ctx) {
         return clause;
     }
 
     // CR 509.1c: "All creatures able to block [target/~] [this turn] do so" — mass forced block.
     // Semantically equivalent to "[target/~] must be blocked this turn if able".
-    if let Some(clause) = try_parse_mass_forced_block(tp) {
+    if let Some(clause) = try_parse_mass_forced_block(tp, ctx) {
         return clause;
     }
 
@@ -2088,7 +2358,7 @@ fn parse_effect_clause_inner(text: &str, ctx: &ParseContext) -> ParsedEffectClau
 /// Uses nom combinators exclusively for dispatch and structure recognition.
 fn try_parse_conjure(tp: TextPair) -> Option<Effect> {
     // Gate: must start with "conjure " (nom tag dispatch).
-    let (rest, _) = tag::<_, _, VerboseError<&str>>("conjure ")
+    let (rest, _) = tag::<_, _, OracleError<'_>>("conjure ")
         .parse(tp.lower)
         .ok()?;
     let rest_orig = &tp.original[tp.original.len() - rest.len()..];
@@ -2098,7 +2368,7 @@ fn try_parse_conjure(tp: TextPair) -> Option<Effect> {
     let (count, after_count, _) = parse_conjure_quantity(rest, rest_orig)?;
 
     // Expect "named " after the quantity phrase.
-    let (after_named, _) = tag::<_, _, VerboseError<&str>>("named ")
+    let (after_named, _) = tag::<_, _, OracleError<'_>>("named ")
         .parse(after_count)
         .ok()?;
     let after_named_orig = &rest_orig[rest_orig.len() - after_named.len()..];
@@ -2115,7 +2385,7 @@ fn try_parse_conjure(tp: TextPair) -> Option<Effect> {
     // Check for " and a card named " continuation (multi-card pattern).
     // e.g., "conjure a card named X and a card named Y into your hand"
     let zone_rest = if let Ok((after_and, _)) =
-        tag::<_, _, VerboseError<&str>>(" and a card named ").parse(zone_rest)
+        tag::<_, _, OracleError<'_>>(" and a card named ").parse(zone_rest)
     {
         let after_and_orig = &rest_orig[rest_orig.len() - after_and.len()..];
         let (next_name_lower, next_zone_rest) = parse_conjure_card_name(after_and)?;
@@ -2133,7 +2403,7 @@ fn try_parse_conjure(tp: TextPair) -> Option<Effect> {
     let (destination, zone_rest) = parse_conjure_zone(zone_rest)?;
 
     // Parse optional "tapped" suffix.
-    let tapped = tag::<_, _, VerboseError<&str>>(" tapped")
+    let tapped = tag::<_, _, OracleError<'_>>(" tapped")
         .parse(zone_rest)
         .is_ok();
 
@@ -2152,7 +2422,7 @@ fn parse_conjure_quantity<'a>(
     orig: &'a str,
 ) -> Option<(QuantityExpr, &'a str, &'a str)> {
     // "a card " → quantity 1
-    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("a card ").parse(lower) {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("a card ").parse(lower) {
         let rest_orig = &orig[orig.len() - rest.len()..];
         return Some((QuantityExpr::Fixed { value: 1 }, rest, rest_orig));
     }
@@ -2161,7 +2431,7 @@ fn parse_conjure_quantity<'a>(
     // First try nom parse_number for English words and digits.
     if let Ok((after_num, n)) = nom_primitives::parse_number.parse(lower) {
         let after_num = after_num.trim_start();
-        if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("cards ").parse(after_num) {
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("cards ").parse(after_num) {
             let rest_orig = &orig[orig.len() - rest.len()..];
             return Some((QuantityExpr::Fixed { value: n as i32 }, rest, rest_orig));
         }
@@ -2179,7 +2449,7 @@ fn parse_conjure_quantity<'a>(
 /// and we want the shortest (first occurring) separator.
 fn parse_conjure_card_name(lower: &str) -> Option<(&str, &str)> {
     alt((
-        take_until::<_, _, VerboseError<&str>>(" and a card"),
+        take_until::<_, _, OracleError<'_>>(" and a card"),
         take_until(" onto "),
         take_until(" into "),
     ))
@@ -2193,7 +2463,7 @@ fn parse_conjure_zone(lower: &str) -> Option<(Zone, &str)> {
     alt((
         value(
             Zone::Battlefield,
-            tag::<_, _, VerboseError<&str>>(" onto the battlefield"),
+            tag::<_, _, OracleError<'_>>(" onto the battlefield"),
         ),
         value(Zone::Hand, tag(" into your hand")),
         value(Zone::Graveyard, tag(" into your graveyard")),
@@ -2218,9 +2488,9 @@ fn parse_conjure_zone(lower: &str) -> Option<(Zone, &str)> {
 ///
 /// Distinguished from static "have" (e.g., "creatures you control have flying") by position:
 /// imperative "have" starts the clause; static "have" follows a subject.
-fn try_parse_have_redirection(text: &str, ctx: &ParseContext) -> Option<ParsedEffectClause> {
+fn try_parse_have_redirection(text: &str, ctx: &mut ParseContext) -> Option<ParsedEffectClause> {
     let lower = text.to_lowercase();
-    let (after_have, _) = tag::<_, _, VerboseError<&str>>("have ")
+    let (after_have, _) = tag::<_, _, OracleError<'_>>("have ")
         .parse(lower.as_str())
         .ok()?;
 
@@ -2233,6 +2503,23 @@ fn try_parse_have_redirection(text: &str, ctx: &ParseContext) -> Option<ParsedEf
     // `extract_event_context_filter` + `resolve_token_owner`).
     if let Some(clause) = try_parse_have_its_controller(text, after_have, ctx) {
         return Some(clause);
+    }
+
+    let self_named_redirected;
+    if let Some(card_name) = ctx.card_name.as_deref() {
+        let card_name_lower = card_name.to_lowercase();
+        let parsed_name = tag::<_, _, OracleError<'_>>(card_name_lower.as_str()).parse(after_have);
+        if let Ok((after_name, _)) = parsed_name {
+            if after_name.starts_with(char::is_whitespace) {
+                let consumed = lower.len() - after_name.len();
+                self_named_redirected = format!("~ {}", text[consumed..].trim_start());
+                if let Some(ast) =
+                    subject::try_parse_subject_predicate_ast(&self_named_redirected, ctx)
+                {
+                    return Some(lower_clause_ast(ast, ctx));
+                }
+            }
+        }
     }
 
     // Guard: don't intercept if what follows "have" is not a recognizable subject reference.
@@ -2290,10 +2577,10 @@ fn try_parse_have_redirection(text: &str, ctx: &ParseContext) -> Option<ParsedEf
 fn try_parse_have_its_controller(
     original: &str,
     after_have_lower: &str,
-    ctx: &ParseContext,
+    ctx: &mut ParseContext,
 ) -> Option<ParsedEffectClause> {
     // Nom dispatch: must match "its controller " exactly.
-    let (rest_lower, _) = tag::<_, _, VerboseError<&str>>("its controller ")
+    let (rest_lower, _) = tag::<_, _, OracleError<'_>>("its controller ")
         .parse(after_have_lower)
         .ok()?;
 
@@ -2369,7 +2656,7 @@ fn rebind_controller_to_triggering_source(mut clause: ParsedEffectClause) -> Par
 /// - "all creatures able to block target creature this turn do so"
 /// - "all creatures able to block ~ do so"
 /// - "all creatures able to block ~ this turn do so"
-fn try_parse_mass_forced_block(tp: TextPair) -> Option<ParsedEffectClause> {
+fn try_parse_mass_forced_block(tp: TextPair, ctx: &mut ParseContext) -> Option<ParsedEffectClause> {
     let (_, rest_orig) = nom_on_lower(tp.original, tp.lower, |i| {
         value((), tag("all creatures able to block ")).parse(i)
     })?;
@@ -2396,10 +2683,11 @@ fn try_parse_mass_forced_block(tp: TextPair) -> Option<ParsedEffectClause> {
     let (target, remainder) = parse_target(target_text);
     let (target, remainder) = refine_damage_target_remainder(target, remainder);
     if !remainder.trim().is_empty() {
-        push_warning(format!(
-            "ignored-remainder: '{}' after target parse in must-block",
-            remainder.trim()
-        ));
+        ctx.push_diagnostic(OracleDiagnostic::IgnoredRemainder {
+            text: remainder.trim().into(),
+            parser: "must-block".into(),
+            line_index: 0,
+        });
     }
 
     Some(ParsedEffectClause {
@@ -2466,6 +2754,99 @@ fn try_parse_still_a_type(tp: TextPair) -> Option<ParsedEffectClause> {
     })
 }
 
+/// CR 614.10a: Parse "[subject] skip[s] [their|your] next [step] step[s]" —
+/// one-shot step skips. Handles controller and target-player forms.
+fn try_parse_skip_next_step(tp: TextPair, ctx: &ParseContext) -> Option<ParsedEffectClause> {
+    if let Some((step, rest)) = nom_on_lower(tp.original, tp.lower, |input| {
+        let (input, _) = alt((
+            tag::<_, _, OracleError<'_>>("you skip your next "),
+            tag("skip your next "),
+        ))
+        .parse(input)?;
+        let (input, step) = parse_skip_step_name(input)?;
+        Ok((input, step))
+    }) {
+        if rest.trim().trim_end_matches('.').is_empty() {
+            return Some(parsed_clause(Effect::SkipNextStep {
+                target: TargetFilter::Controller,
+                step,
+                count: QuantityExpr::Fixed { value: 1 },
+            }));
+        }
+    }
+
+    if let Some((target, after_verb_orig)) = nom_on_lower(tp.original, tp.lower, |input| {
+        alt((
+            value(
+                TargetFilter::DefendingPlayer,
+                tag("defending player skips "),
+            ),
+            value(TargetFilter::TriggeringPlayer, tag("that player skips ")),
+            value(TargetFilter::TriggeringPlayer, tag("the player skips ")),
+        ))
+        .parse(input)
+    }) {
+        let target = if matches!(target, TargetFilter::TriggeringPlayer) && ctx.subject.is_none() {
+            TargetFilter::ParentTarget
+        } else {
+            target
+        };
+        let after_verb_lower = &tp.lower[tp.lower.len() - after_verb_orig.len()..];
+        let (after_next_lower, _) = alt((
+            tag::<_, _, OracleError<'_>>("their next "),
+            tag("your next "),
+        ))
+        .parse(after_verb_lower)
+        .ok()?;
+        let (rest, step) = parse_skip_step_name(after_next_lower).ok()?;
+        if rest.trim().trim_end_matches('.').is_empty() {
+            return Some(parsed_clause(Effect::SkipNextStep {
+                target,
+                step,
+                count: QuantityExpr::Fixed { value: 1 },
+            }));
+        }
+    }
+
+    nom::combinator::peek(alt((
+        tag::<_, _, OracleError<'_>>("target opponent "),
+        tag("target player "),
+    )))
+    .parse(tp.lower)
+    .ok()?;
+
+    let (target, after_target_orig) = super::oracle_target::parse_target(tp.original);
+    let after_target_lower = &tp.lower[tp.lower.len() - after_target_orig.len()..];
+    let (after_verb_lower, _) = alt((tag::<_, _, OracleError<'_>>(" skips "), tag(" skip ")))
+        .parse(after_target_lower)
+        .ok()?;
+    let (after_next_lower, _) = alt((
+        tag::<_, _, OracleError<'_>>("their next "),
+        tag("your next "),
+    ))
+    .parse(after_verb_lower)
+    .ok()?;
+    let (rest, step) = parse_skip_step_name(after_next_lower).ok()?;
+    if !rest.trim().trim_end_matches('.').is_empty() {
+        return None;
+    }
+
+    Some(parsed_clause(Effect::SkipNextStep {
+        target,
+        step,
+        count: QuantityExpr::Fixed { value: 1 },
+    }))
+}
+
+fn parse_skip_step_name(input: &str) -> OracleResult<'_, Phase> {
+    alt((
+        value(Phase::Untap, tag("untap step")),
+        value(Phase::Upkeep, tag("upkeep step")),
+        value(Phase::Draw, tag("draw step")),
+    ))
+    .parse(input)
+}
+
 /// CR 614.10: Parse "[subject] skip[s] [their|your] next [N] turn[s]" — temporal
 /// penalty effect. Handles:
 ///   - "you skip your next turn" / "skip your next turn" → Controller, 1
@@ -2480,10 +2861,7 @@ fn try_parse_skip_next_turn(tp: TextPair) -> Option<ParsedEffectClause> {
     // Bare subjectless form (controller skips).
     if nom_on_lower(tp.original, tp.lower, |input| {
         alt((
-            value(
-                (),
-                tag::<_, _, VerboseError<&str>>("you skip your next turn"),
-            ),
+            value((), tag::<_, _, OracleError<'_>>("you skip your next turn")),
             value((), tag("skip your next turn")),
         ))
         .parse(input)
@@ -2499,7 +2877,7 @@ fn try_parse_skip_next_turn(tp: TextPair) -> Option<ParsedEffectClause> {
     // Targeted form: "target {opponent|player} skips their next [N|X] turn[s]".
     // Guard on the lowercase prefix before delegating to `parse_target`.
     nom::combinator::peek(alt((
-        tag::<_, _, VerboseError<&str>>("target opponent "),
+        tag::<_, _, OracleError<'_>>("target opponent "),
         tag("target player "),
     )))
     .parse(tp.lower)
@@ -2511,13 +2889,13 @@ fn try_parse_skip_next_turn(tp: TextPair) -> Option<ParsedEffectClause> {
     let after_target_lower = &tp.lower[tp.lower.len() - after_target_orig.len()..];
 
     // Verb: " skips " / " skip " (surrounding spaces keep word boundary safe).
-    let (after_verb_lower, _) = alt((tag::<_, _, VerboseError<&str>>(" skips "), tag(" skip ")))
+    let (after_verb_lower, _) = alt((tag::<_, _, OracleError<'_>>(" skips "), tag(" skip ")))
         .parse(after_target_lower)
         .ok()?;
 
     // Possessive: "their next " / "your next ".
     let (after_next_lower, _) = alt((
-        tag::<_, _, VerboseError<&str>>("their next "),
+        tag::<_, _, OracleError<'_>>("their next "),
         tag("your next "),
     ))
     .parse(after_verb_lower)
@@ -2538,7 +2916,7 @@ fn try_parse_skip_next_turn(tp: TextPair) -> Option<ParsedEffectClause> {
     let after_count_lower = &tp.lower[tp.lower.len() - after_count_orig.len()..];
 
     // Require "turn[s]" with word-boundary termination.
-    let (after_turn_lower, _) = alt((tag::<_, _, VerboseError<&str>>("turns"), tag("turn")))
+    let (after_turn_lower, _) = alt((tag::<_, _, OracleError<'_>>("turns"), tag("turn")))
         .parse(after_count_lower)
         .ok()?;
     if after_turn_lower
@@ -2554,7 +2932,7 @@ fn try_parse_skip_next_turn(tp: TextPair) -> Option<ParsedEffectClause> {
     // invocation per heads), so normalize the count to 1.
     let trailing = after_turn_lower.trim_start_matches(|c: char| c == ',' || c.is_whitespace());
     let is_heads_tail =
-        tag::<_, _, VerboseError<&str>>("where x is the number of coins that came up heads")
+        tag::<_, _, OracleError<'_>>("where x is the number of coins that came up heads")
             .parse(trailing)
             .is_ok();
     let count = if matches!(
@@ -2620,7 +2998,10 @@ fn try_parse_equal_to_quantity_effect(tp: TextPair) -> Option<ParsedEffectClause
 /// Two Oracle patterns:
 /// - "Target creature's owner puts it on their choice of the top or bottom of their library"
 /// - "The owner of target nonland permanent puts it on their choice of the top or bottom of their library"
-fn try_parse_put_on_top_or_bottom(tp: TextPair) -> Option<ParsedEffectClause> {
+fn try_parse_put_on_top_or_bottom(
+    tp: TextPair,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
     let tp = tp.trim_end_matches('.');
 
     // Must contain the signature suffix
@@ -2639,10 +3020,11 @@ fn try_parse_put_on_top_or_bottom(tp: TextPair) -> Option<ParsedEffectClause> {
         let target_text = &tp.original[..idx];
         let (filter, remainder) = parse_target(target_text);
         if !remainder.trim().is_empty() {
-            push_warning(format!(
-                "ignored-remainder: '{}' after target parse in owner-puts-it",
-                remainder.trim()
-            ));
+            ctx.push_diagnostic(OracleDiagnostic::IgnoredRemainder {
+                text: remainder.trim().into(),
+                parser: "owner-puts-it".into(),
+                line_index: 0,
+            });
         }
         return Some(parsed_clause(Effect::PutOnTopOrBottom { target: filter }));
     }
@@ -2659,10 +3041,11 @@ fn try_parse_put_on_top_or_bottom(tp: TextPair) -> Option<ParsedEffectClause> {
             let target_text = &rest.original[..idx];
             let (filter, remainder) = parse_target(target_text);
             if !remainder.trim().is_empty() {
-                push_warning(format!(
-                    "ignored-remainder: '{}' after target parse in owner-puts-it",
-                    remainder.trim()
-                ));
+                ctx.push_diagnostic(OracleDiagnostic::IgnoredRemainder {
+                    text: remainder.trim().into(),
+                    parser: "owner-puts-it".into(),
+                    line_index: 0,
+                });
             }
             return Some(parsed_clause(Effect::PutOnTopOrBottom { target: filter }));
         }
@@ -2678,7 +3061,10 @@ fn try_parse_put_on_top_or_bottom(tp: TextPair) -> Option<ParsedEffectClause> {
 /// - "Target permanent's owner shuffles it into their library"
 ///
 /// Produces a `ChangeZone` to Library with `owner_library: true` + a `Shuffle` sub_ability.
-fn try_parse_owner_of_target_shuffle(tp: TextPair) -> Option<ParsedEffectClause> {
+fn try_parse_owner_of_target_shuffle(
+    tp: TextPair,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
     let tp = tp.trim_end_matches('.');
 
     // Must contain both "shuffle" and "library" to be a shuffle-into-library pattern
@@ -2688,7 +3074,7 @@ fn try_parse_owner_of_target_shuffle(tp: TextPair) -> Option<ParsedEffectClause>
         return None;
     }
 
-    let target = extract_owner_of_target(tp)?;
+    let target = extract_owner_of_target(tp, ctx)?;
 
     Some(imperative::with_shuffle_sub_ability(Effect::ChangeZone {
         origin: None,
@@ -2713,7 +3099,10 @@ fn try_parse_owner_of_target_shuffle(tp: TextPair) -> Option<ParsedEffectClause>
 ///
 /// The "second from the top or on the bottom" pattern is semantically PutOnTopOrBottom (the
 /// player chooses). We map it to the same `PutOnTopOrBottom` effect.
-fn try_parse_owner_of_target_put_second(tp: TextPair) -> Option<ParsedEffectClause> {
+fn try_parse_owner_of_target_put_second(
+    tp: TextPair,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
     let tp = tp.trim_end_matches('.');
 
     // Must contain the signature suffix
@@ -2721,7 +3110,7 @@ fn try_parse_owner_of_target_put_second(tp: TextPair) -> Option<ParsedEffectClau
         return None;
     }
 
-    let target = extract_owner_of_target(tp)?;
+    let target = extract_owner_of_target(tp, ctx)?;
 
     Some(parsed_clause(Effect::PutOnTopOrBottom { target }))
 }
@@ -2730,16 +3119,17 @@ fn try_parse_owner_of_target_put_second(tp: TextPair) -> Option<ParsedEffectClau
 /// or "target [filter]'s owner [verb]s it ..." subject patterns.
 ///
 /// Returns `Some(target_filter)` if the pattern matches, `None` otherwise.
-fn extract_owner_of_target(tp: TextPair) -> Option<TargetFilter> {
+fn extract_owner_of_target(tp: TextPair, ctx: &mut ParseContext) -> Option<TargetFilter> {
     // Pattern 1: "target [filter]'s owner [verb]s it ..."
     if let Some(idx) = tp.find("'s owner ") {
         let target_text = &tp.original[..idx];
         let (filter, remainder) = parse_target(target_text);
         if !remainder.trim().is_empty() {
-            push_warning(format!(
-                "ignored-remainder: '{}' after target parse in owner-of-target",
-                remainder.trim()
-            ));
+            ctx.push_diagnostic(OracleDiagnostic::IgnoredRemainder {
+                text: remainder.trim().into(),
+                parser: "owner-of-target".into(),
+                line_index: 0,
+            });
         }
         return Some(filter);
     }
@@ -2756,10 +3146,11 @@ fn extract_owner_of_target(tp: TextPair) -> Option<TargetFilter> {
                 let target_text = &rest.original[..idx];
                 let (filter, remainder) = parse_target(target_text);
                 if !remainder.trim().is_empty() {
-                    push_warning(format!(
-                        "ignored-remainder: '{}' after target parse in owner-of-target",
-                        remainder.trim()
-                    ));
+                    ctx.push_diagnostic(OracleDiagnostic::IgnoredRemainder {
+                        text: remainder.trim().into(),
+                        parser: "owner-of-target".into(),
+                        line_index: 0,
+                    });
                 }
                 return Some(filter);
             }
@@ -2841,7 +3232,7 @@ fn try_parse_exile_from_top_until(tp: TextPair) -> Option<ParsedEffectClause> {
 ///
 /// Returns the slice after the matched article (`a`/`an`), so the caller can
 /// extract the filter text directly.
-fn parse_reveal_until_prefix(input: &str) -> nom::IResult<&str, (), VerboseError<&str>> {
+fn parse_reveal_until_prefix(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
     // CR 701.20a: verb form — bare imperative ("reveal") or third-person ("reveals")
     let (input, _) = alt((tag("reveals "), tag("reveal "))).parse(input)?;
     let (input, _) = tag("cards from the top of ").parse(input)?;
@@ -2927,7 +3318,7 @@ fn try_parse_per_grantee_play_grant(tp: TextPair<'_>) -> Option<ParsedEffectClau
     let lower = tp.lower;
 
     let grantee = if alt((
-        tag::<_, _, VerboseError<&str>>("for each of those cards, its owner may play it"),
+        tag::<_, _, OracleError<'_>>("for each of those cards, its owner may play it"),
         tag("for each of those cards, its owner may cast it"),
         tag("its owner may play it"),
         tag("its owner may cast it"),
@@ -2937,7 +3328,7 @@ fn try_parse_per_grantee_play_grant(tp: TextPair<'_>) -> Option<ParsedEffectClau
     {
         crate::types::ability::PermissionGrantee::ObjectOwner
     } else if alt((
-        tag::<_, _, VerboseError<&str>>("they may play those cards"),
+        tag::<_, _, OracleError<'_>>("they may play those cards"),
         tag("they may cast those cards"),
         tag("they may play them"),
         tag("they may cast them"),
@@ -2993,7 +3384,7 @@ fn try_parse_play_from_exile(tp: TextPair) -> Option<ParsedEffectClause> {
     if let Some(rest) = full_rest {
         // Full form: rest must start with a card reference
         if alt((
-            tag::<_, _, VerboseError<&str>>("that card"),
+            tag::<_, _, OracleError<'_>>("that card"),
             tag("that spell"),
             tag("those cards"),
             tag("it "),
@@ -3017,7 +3408,7 @@ fn try_parse_play_from_exile(tp: TextPair) -> Option<ParsedEffectClause> {
             return None;
         }
         if alt((
-            tag::<_, _, VerboseError<&str>>("play that card"),
+            tag::<_, _, OracleError<'_>>("play that card"),
             tag("cast that card"),
             tag("play it"),
             tag("cast it"),
@@ -3052,7 +3443,7 @@ fn try_parse_play_from_exile(tp: TextPair) -> Option<ParsedEffectClause> {
 /// - "draw a card for each creature you control"
 /// - "gain 1 life for each creature you control"
 /// - "mill a card for each [counter type] counter on ~"
-fn try_parse_for_each_effect(text: &str) -> Option<ParsedEffectClause> {
+fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<ParsedEffectClause> {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
 
@@ -3061,6 +3452,8 @@ fn try_parse_for_each_effect(text: &str) -> Option<ParsedEffectClause> {
     let (base_tp, _) = tp.split_at(for_each_idx);
     let base_tp = base_tp.trim_end();
     let for_each_clause = &tp.lower[for_each_idx + "for each ".len()..];
+    let (base_no_duration, base_duration) = strip_trailing_duration(base_tp.original);
+    let quantity_ctx = for_each_quantity_context(base_no_duration, ctx);
 
     // Parse the "for each" clause into a QuantityExpr. Try the full clause
     // before stripping duration-like suffixes: "this turn" is part of
@@ -3069,22 +3462,22 @@ fn try_parse_for_each_effect(text: &str) -> Option<ParsedEffectClause> {
     let (for_each_no_duration, stripped_for_each_duration) =
         strip_trailing_duration(for_each_clause);
     let for_each_stripped = for_each_no_duration.trim_end_matches('.');
-    let (quantity, for_each_duration, reference_clause) =
-        if let Some(quantity) = parse_for_each_clause_expr(for_each_full) {
-            (quantity, None, for_each_full)
-        } else {
-            (
-                parse_for_each_clause_expr(for_each_stripped)?,
-                stripped_for_each_duration,
-                for_each_stripped,
-            )
-        };
+    let (quantity, for_each_duration, reference_clause) = if let Some(quantity) =
+        parse_for_each_clause_expr_with_context(for_each_full, &quantity_ctx)
+    {
+        (quantity, None, for_each_full)
+    } else {
+        (
+            parse_for_each_clause_expr_with_context(for_each_stripped, &quantity_ctx)?,
+            stripped_for_each_duration,
+            for_each_stripped,
+        )
+    };
     let reference_target = for_each_clause_target_controller_filter(reference_clause);
 
     // Strip trailing duration from the base text (e.g., "gets +2/+0 until end of turn"
     // → "gets +2/+0" with duration=UntilEndOfTurn). Duration often appears between
     // the base effect and the "for each" clause.
-    let (base_no_duration, base_duration) = strip_trailing_duration(base_tp.original);
     let duration = base_duration.or(for_each_duration);
     let numeric_base_storage = subject::strip_subject_clause(base_no_duration);
     let numeric_base = numeric_base_storage.as_deref().unwrap_or(base_no_duration);
@@ -3121,7 +3514,7 @@ fn try_parse_for_each_effect(text: &str) -> Option<ParsedEffectClause> {
     if let Some(ast) = imperative::parse_targeted_action_ast(
         targeted_base,
         &targeted_base_lower,
-        &ParseContext::default(),
+        &mut ParseContext::default(),
     ) {
         if matches!(
             ast,
@@ -3145,7 +3538,7 @@ fn try_parse_for_each_effect(text: &str) -> Option<ParsedEffectClause> {
     // CR 120.1: "[subject] deals N damage to [target] for each X" → DealDamage.
     // Delegates to try_parse_damage, which already handles amount extraction, target parsing,
     // and damage source variants. Replace the fixed amount with the for-each quantity.
-    if let Some(effect) = try_parse_damage(base_tp.lower, base_tp.original) {
+    if let Some(effect) = try_parse_damage(base_tp.lower, base_tp.original, ctx) {
         let effect = match effect {
             Effect::DealDamage {
                 amount,
@@ -3180,7 +3573,7 @@ fn try_parse_for_each_effect(text: &str) -> Option<ParsedEffectClause> {
     // CR 111.11: "create [token description] for each X" → Token with dynamic count.
     // Delegates to try_parse_token, which handles token description parsing (name, P/T,
     // types, colors, keywords). Replace the embedded count with the for-each quantity.
-    if let Some(effect) = token::try_parse_token(base_tp.lower, base_tp.original) {
+    if let Some(effect) = token::try_parse_token(base_tp.lower, base_tp.original, ctx) {
         let effect = match effect {
             Effect::Token {
                 name,
@@ -3220,12 +3613,11 @@ fn try_parse_for_each_effect(text: &str) -> Option<ParsedEffectClause> {
 
     // "put a [counter type] counter on [target] for each X" → PutCounter with dynamic count.
     // Not a NumericImperativeAst — counter placement has its own structure.
-    if let Ok((_, before)) =
-        take_until::<_, _, VerboseError<&str>>("counter on").parse(base_tp.lower)
+    if let Ok((_, before)) = take_until::<_, _, OracleError<'_>>("counter on").parse(base_tp.lower)
     {
         // before = "put a +1/+1 " — strip "put a[n] " prefix then parse counter type.
         let ct_start = alt((
-            value((), tag::<_, _, VerboseError<&str>>("put a ")),
+            value((), tag::<_, _, OracleError<'_>>("put a ")),
             value((), tag("put an ")),
             value((), tag("put ")),
         ))
@@ -3246,19 +3638,20 @@ fn try_parse_for_each_effect(text: &str) -> Option<ParsedEffectClause> {
         // Strip clause separators (", then") that leak into the counter target text.
         let after_counter_on_lower = after_counter_on.to_lowercase();
         let counter_target_text = if let Ok((_, before_sep)) =
-            take_until::<_, _, VerboseError<&str>>(", then").parse(after_counter_on_lower.as_str())
+            take_until::<_, _, OracleError<'_>>(", then").parse(after_counter_on_lower.as_str())
         {
             &after_counter_on[..before_sep.len()]
         } else {
             after_counter_on
         };
-        let target = parse_subject_application(counter_target_text, &ParseContext::default())
+        let target = parse_subject_application(counter_target_text, &mut ParseContext::default())
             .map(|app| app.affected)
             .unwrap_or_else(|| {
-                push_warning(format!(
-                    "target-fallback: unrecognized counter target '{}'",
-                    after_counter_on
-                ));
+                ctx.push_diagnostic(OracleDiagnostic::TargetFallback {
+                    context: "unrecognized counter target".into(),
+                    text: after_counter_on.trim().into(),
+                    line_index: 0,
+                });
                 TargetFilter::Any
             });
         return Some(parsed_clause(Effect::PutCounter {
@@ -3322,14 +3715,14 @@ fn parsed_for_each_quantity_effect(
     }
 }
 
-fn try_parse_gain_energy(tp: TextPair<'_>, ctx: &ParseContext) -> Option<ParsedEffectClause> {
-    let (rest, _) = alt((tag::<_, _, VerboseError<&str>>("you get "), tag("get ")))
+fn try_parse_gain_energy(tp: TextPair<'_>, ctx: &mut ParseContext) -> Option<ParsedEffectClause> {
+    let (rest, _) = alt((tag::<_, _, OracleError<'_>>("you get "), tag("get ")))
         .parse(tp.lower)
         .ok()?;
     let rest = rest.trim_start();
 
     if let Ok((qty_text, _)) = (
-        tag::<_, _, VerboseError<&str>>("an amount of {e}"),
+        tag::<_, _, OracleError<'_>>("an amount of {e}"),
         multispace1,
         tag("equal to "),
     )
@@ -3352,18 +3745,17 @@ fn try_parse_gain_energy(tp: TextPair<'_>, ctx: &ParseContext) -> Option<ParsedE
         return Some(clause);
     }
     if let Some(continuation) = parse_energy_gain_continuation(rest) {
-        clause.sub_ability = Some(Box::new(parse_effect_chain_impl(
-            continuation,
-            AbilityKind::Spell,
-            ctx,
-        )));
+        clause.sub_ability = Some(Box::new({
+            let ir = parse_effect_chain_ir(continuation, AbilityKind::Spell, ctx);
+            lower_effect_chain_ir(&ir)
+        }));
         return Some(clause);
     }
     None
 }
 
 fn parse_energy_gain_base(input: &str, multiplier: QuantityExpr) -> Option<Effect> {
-    let (rest, _) = alt((tag::<_, _, VerboseError<&str>>("you get "), tag("get ")))
+    let (rest, _) = alt((tag::<_, _, OracleError<'_>>("you get "), tag("get ")))
         .parse(input)
         .ok()?;
     parse_energy_symbols_gain(rest, multiplier)
@@ -3432,7 +3824,7 @@ fn parse_energy_symbols_gain_with_rest(
     let input = input.trim_start();
 
     if let Ok((after_that_many, _)) = (
-        tag::<_, _, VerboseError<&str>>("that many"),
+        tag::<_, _, OracleError<'_>>("that many"),
         multispace1,
         tag("{e}"),
     )
@@ -3448,12 +3840,8 @@ fn parse_energy_symbols_gain_with_rest(
         ));
     }
 
-    if let Ok((after_x, _)) = (
-        tag::<_, _, VerboseError<&str>>("x"),
-        multispace1,
-        tag("{e}"),
-    )
-        .parse(input)
+    if let Ok((after_x, _)) =
+        (tag::<_, _, OracleError<'_>>("x"), multispace1, tag("{e}")).parse(input)
     {
         return Some((
             after_x,
@@ -3469,7 +3857,7 @@ fn parse_energy_symbols_gain_with_rest(
 
     if let Ok((after_number, value)) = nom_primitives::parse_number.parse(input) {
         if let Ok((after_energy, _)) =
-            (multispace1, tag::<_, _, VerboseError<&str>>("{e}")).parse(after_number)
+            (multispace1, tag::<_, _, OracleError<'_>>("{e}")).parse(after_number)
         {
             return Some((
                 after_energy,
@@ -3482,7 +3870,7 @@ fn parse_energy_symbols_gain_with_rest(
         }
     }
 
-    let (after_symbols, symbols) = many1(tag::<_, _, VerboseError<&str>>("{e}"))
+    let (after_symbols, symbols) = many1(tag::<_, _, OracleError<'_>>("{e}"))
         .parse(input)
         .ok()?;
     let symbol_count = symbols.len() as i32;
@@ -3500,7 +3888,7 @@ fn parse_energy_symbols_gain_with_rest(
 fn parse_energy_gain_continuation(rest: &str) -> Option<&str> {
     let rest = rest.trim();
     let (continuation, _) = alt((
-        tag::<_, _, VerboseError<&str>>(", then "),
+        tag::<_, _, OracleError<'_>>(", then "),
         tag("then "),
         tag(", and "),
         tag("and "),
@@ -3514,7 +3902,7 @@ fn parse_energy_gain_continuation(rest: &str) -> Option<&str> {
 /// Thread subject through for-each effects that carry a `target` field.
 /// Locates the predicate verb, extracts subject text before it, and replaces
 /// default targets (Any/Controller) with the parsed subject filter.
-fn thread_for_each_subject(effect: Effect, original: &str) -> Effect {
+fn for_each_subject_application(original: &str) -> Option<SubjectApplication> {
     let lower = original.to_lowercase();
     // Predicate verbs that the for-each base parsers recognize — find the earliest one.
     // Note: uses str::find (not nom) because this is positional splitting on already-dispatched
@@ -3547,17 +3935,45 @@ fn thread_for_each_subject(effect: Effect, original: &str) -> Effect {
 
     let subject_text = match verb_pos {
         Some(pos) if pos > 0 => original[..pos].trim(),
-        _ => return effect,
+        _ => return None,
     };
     if subject_text.is_empty() {
-        return effect;
+        return None;
     }
 
-    let (target, is_targeted) =
-        match parse_subject_application(subject_text, &ParseContext::default()) {
-            Some(app) => (app.affected, app.target.is_some()),
-            None => return effect,
-        };
+    parse_subject_application(subject_text, &mut ParseContext::default())
+}
+
+fn for_each_quantity_context(original: &str, ctx: &ParseContext) -> ParseContext {
+    let mut quantity_ctx = ctx.clone();
+    if quantity_ctx.third_person_player_controller_ref().is_none()
+        && for_each_subject_application(original)
+            .is_some_and(|app| app.target.is_some() && is_player_filter(&app.affected))
+    {
+        quantity_ctx.relative_player_scope = Some(ControllerRef::TargetPlayer);
+    }
+    quantity_ctx
+}
+
+fn is_player_filter(filter: &TargetFilter) -> bool {
+    matches!(filter, TargetFilter::Player)
+        || matches!(
+            filter,
+            TargetFilter::Typed(TypedFilter {
+                type_filters,
+                controller: Some(_),
+                ..
+            }) if type_filters.is_empty()
+        )
+}
+
+fn thread_for_each_subject(effect: Effect, original: &str) -> Effect {
+    let application = match for_each_subject_application(original) {
+        Some(application) => application,
+        None => return effect,
+    };
+    let target = application.affected;
+    let is_targeted = application.target.is_some();
 
     // Only replace default/placeholder targets — leave already-resolved targets alone.
     match effect {
@@ -3623,7 +4039,7 @@ fn thread_for_each_subject(effect: Effect, original: &str) -> Effect {
 }
 
 #[tracing::instrument(level = "trace")]
-fn parse_clause_ast(text: &str, ctx: &ParseContext) -> ClauseAst {
+fn parse_clause_ast(text: &str, ctx: &mut ParseContext) -> ClauseAst {
     let text = text.trim();
 
     // Mirror the CubeArtisan grammar's high-level sentence shapes:
@@ -3638,7 +4054,7 @@ fn parse_clause_ast(text: &str, ctx: &ParseContext) -> ClauseAst {
         .map(|((), rest)| rest)
         .unwrap_or(&condition_text)
         .trim();
-        let condition = try_nom_condition_as_ability_condition(cond_body);
+        let condition = try_nom_condition_as_ability_condition(cond_body, ctx);
         return ClauseAst::Conditional {
             condition,
             clause: Box::new(parse_clause_ast(&remainder, ctx)),
@@ -3687,7 +4103,7 @@ fn parse_clause_ast(text: &str, ctx: &ParseContext) -> ClauseAst {
 /// level, not by this patcher).
 fn peel_put_at_library_count(input: &str) -> Option<(Option<QuantityExpr>, &str)> {
     // "x " — variable quantity bound to the spell's chosen X.
-    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("x ").parse(input) {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("x ").parse(input) {
         return Some((
             Some(QuantityExpr::Ref {
                 qty: QuantityRef::Variable {
@@ -3700,14 +4116,14 @@ fn peel_put_at_library_count(input: &str) -> Option<(Option<QuantityExpr>, &str)
     // Numeric ("two ", "three ", "1 ", …). `parse_number` accepts both English
     // number words and digits per the oracle-parser SKILL.
     if let Ok((after_num, n)) = nom_primitives::parse_number.parse(input) {
-        if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>(" ").parse(after_num) {
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(" ").parse(after_num) {
             return Some((Some(QuantityExpr::Fixed { value: n as i32 }), rest));
         }
     }
     Some((None, input))
 }
 
-fn lower_clause_ast(ast: ClauseAst, ctx: &ParseContext) -> ParsedEffectClause {
+fn lower_clause_ast(ast: ClauseAst, ctx: &mut ParseContext) -> ParsedEffectClause {
     match ast {
         ClauseAst::Imperative { text } => {
             let mut clause = lower_imperative_clause(&text, ctx);
@@ -3729,14 +4145,14 @@ fn lower_clause_ast(ast: ClauseAst, ctx: &ParseContext) -> ParsedEffectClause {
             {
                 let extracted = (|| -> Option<(Option<TargetFilter>, Option<QuantityExpr>)> {
                     let lower = text.to_lowercase();
-                    let (after_put, _) = tag::<_, _, VerboseError<&str>>("put ")
+                    let (after_put, _) = tag::<_, _, OracleError<'_>>("put ")
                         .parse(lower.as_str())
                         .ok()?;
                     // Isolate the noun phrase before the first positional terminator.
                     let before = [" on top of", " on the bottom of", " into "]
                         .iter()
                         .find_map(|term| {
-                            take_until::<_, _, VerboseError<&str>>(*term)
+                            take_until::<_, _, OracleError<'_>>(*term)
                                 .parse(after_put)
                                 .ok()
                                 .map(|(_, before)| before)
@@ -3787,7 +4203,11 @@ fn lower_clause_ast(ast: ClauseAst, ctx: &ParseContext) -> ParsedEffectClause {
 }
 
 #[tracing::instrument(level = "debug")]
-fn lower_imperative_clause(text: &str, ctx: &ParseContext) -> ParsedEffectClause {
+fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectClause {
+    if let Some(effect) = try_parse_drawn_this_turn_choice(text) {
+        return parsed_clause(effect);
+    }
+
     // CR 106.1 + CR 109.1: "For each color among [X], add one mana of that color"
     // (Faeburrow Elder). Must run before the generic for-each-prefix strip path,
     // because "that color" anaphors a per-iteration color rather than the
@@ -3825,6 +4245,9 @@ fn lower_imperative_clause(text: &str, ctx: &ParseContext) -> ParsedEffectClause
 
     // Compound targeted actions: "tap target creature and put a stun counter on it"
     // Split on " and " when the primary clause is a targeted verb.
+    if let Some(clause) = try_parse_tap_goad_compound(text, ctx) {
+        return clause;
+    }
     if let Some(clause) = try_split_targeted_compound(text, ctx) {
         return clause;
     }
@@ -3878,6 +4301,41 @@ fn lower_imperative_clause(text: &str, ctx: &ParseContext) -> ParsedEffectClause
     clause
 }
 
+fn try_parse_drawn_this_turn_choice(text: &str) -> Option<Effect> {
+    let lower = text.to_lowercase();
+    let count = nom_on_lower(text, &lower, |input| {
+        let (input, _) = tag("choose ").parse(input)?;
+        let (input, count) = nom_primitives::parse_number(input)?;
+        let (input, _) = tag(" card").parse(input)?;
+        let (input, _) = opt(tag("s")).parse(input)?;
+        let (input, _) = tag(" in your hand drawn this turn").parse(input)?;
+        let (input, _) = eof.parse(input)?;
+        Ok((input, count))
+    })
+    .map(|(count, _)| count)?;
+    Some(Effect::ChooseDrawnThisTurnPayOrTopdeck {
+        count: QuantityExpr::Fixed {
+            value: count as i32,
+        },
+        life_payment: QuantityExpr::Fixed { value: 4 },
+        player: TargetFilter::Controller,
+    })
+}
+
+fn try_parse_drawn_this_turn_pay_or_topdeck_followup(text: &str) -> Option<QuantityExpr> {
+    let lower = text.to_lowercase();
+    nom_on_lower(text, &lower, |input| {
+        let (input, _) = tag("for each of those cards, pay ").parse(input)?;
+        let (input, life_payment) = nom_primitives::parse_number(input)?;
+        let (input, _) = tag(" life or put the card on top of your library").parse(input)?;
+        let (input, _) = eof.parse(input)?;
+        Ok((input, life_payment))
+    })
+    .map(|(life_payment, _)| QuantityExpr::Fixed {
+        value: life_payment as i32,
+    })
+}
+
 /// Parse a verb prefix and its target, returning the AST and `parse_target`'s unconsumed
 /// remainder. Used by `try_split_targeted_compound` to determine compound boundaries
 /// semantically — `parse_target` correctly consumes compound filter phrases like
@@ -3892,30 +4350,30 @@ fn lower_imperative_clause(text: &str, ctx: &ParseContext) -> ParsedEffectClause
 fn try_parse_verb_and_target<'a>(
     text: &'a str,
     lower: &str,
-    ctx: &ParseContext,
+    ctx: &mut ParseContext,
 ) -> Option<(TargetedImperativeAst, &'a str)> {
     // CR 701.26a/b: Tap/untap all — mass variants must be checked before single-target
     if let Some((_, rest)) = nom_on_lower(text, lower, |i| {
         value((), alt((tag("tap all "), tag("tap each ")))).parse(i)
     }) {
-        let (target, rem) = parse_target(rest);
+        let (target, rem) = parse_target_with_ctx(rest, ctx);
         return Some((TargetedImperativeAst::TapAll { target }, rem));
     }
     if let Some((_, rest)) = nom_on_lower(text, lower, |i| {
         value((), alt((tag("untap all "), tag("untap each ")))).parse(i)
     }) {
-        let (target, rem) = parse_target(rest);
+        let (target, rem) = parse_target_with_ctx(rest, ctx);
         return Some((TargetedImperativeAst::UntapAll { target }, rem));
     }
     // Simple targeted verbs: parse_target on text after the verb prefix
     if let Some((_, rest)) = nom_on_lower(text, lower, |i| value((), tag("tap ")).parse(i)) {
         let (target_text, _) = strip_optional_target_prefix(rest);
-        let (target, rem) = parse_target(target_text);
+        let (target, rem) = parse_target_with_ctx(target_text, ctx);
         return Some((TargetedImperativeAst::Tap { target }, rem));
     }
     if let Some((_, rest)) = nom_on_lower(text, lower, |i| value((), tag("untap ")).parse(i)) {
         let (target_text, _) = strip_optional_target_prefix(rest);
-        let (target, rem) = parse_target(target_text);
+        let (target, rem) = parse_target_with_ctx(target_text, ctx);
         return Some((TargetedImperativeAst::Untap { target }, rem));
     }
     if let Some((_, rest)) = nom_on_lower(text, lower, |i| value((), tag("sacrifice ")).parse(i)) {
@@ -3924,30 +4382,28 @@ fn try_parse_verb_and_target<'a>(
             rest,
         ));
         let (target_text, _) = strip_optional_target_prefix(after_count.trim_start());
-        let (target, rem) = parse_target(target_text);
+        let (target, rem) = parse_target_with_ctx(target_text, ctx);
         return Some((TargetedImperativeAst::Sacrifice { target, count }, rem));
     }
     if let Some((_, rest)) = nom_on_lower(text, lower, |i| value((), tag("fight ")).parse(i)) {
         let (target_text, _) = strip_optional_target_prefix(rest);
-        let (target, rem) = parse_target(target_text);
+        let (target, rem) = parse_target_with_ctx(target_text, ctx);
         return Some((TargetedImperativeAst::Fight { target }, rem));
     }
     if let Some((_, rest)) =
         nom_on_lower(text, lower, |i| value((), tag("gain control of ")).parse(i))
     {
         let (target_text, _) = strip_optional_target_prefix(rest);
-        let (target, rem) = parse_target(target_text);
+        let (target, rem) = parse_target_with_ctx(target_text, ctx);
         let rem_lower = rem.to_ascii_lowercase();
-        if tag::<_, _, VerboseError<&str>>(" during that player's next turn")
+        if tag::<_, _, OracleError<'_>>(" during that player's next turn")
             .parse(rem_lower.as_str())
             .is_ok()
         {
             let rem = &rem[" during that player's next turn".len()..];
             let rem_lower = rem.to_ascii_lowercase();
             let (rem, grant_extra_turn_after) = if let Ok((rest, _)) = alt((
-                tag::<_, _, VerboseError<&str>>(
-                    ". after that turn, that player takes an extra turn",
-                ),
+                tag::<_, _, OracleError<'_>>(". after that turn, that player takes an extra turn"),
                 tag(" after that turn, that player takes an extra turn"),
                 tag("after that turn, that player takes an extra turn"),
             ))
@@ -3968,7 +4424,7 @@ fn try_parse_verb_and_target<'a>(
         return Some((TargetedImperativeAst::GainControl { target }, rem));
     }
     // Earthbend: "earthbend [N] [target <type>]"
-    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("earthbend ").parse(lower) {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("earthbend ").parse(lower) {
         let (target, power, toughness) = imperative::parse_earthbend_params(text, rest);
         return Some((
             TargetedImperativeAst::Earthbend {
@@ -3980,10 +4436,10 @@ fn try_parse_verb_and_target<'a>(
         ));
     }
     // Airbend: "airbend target <type> <mana_cost>" → GrantCastingPermission(ExileWithAltCost)
-    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("airbend ").parse(lower) {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("airbend ").parse(lower) {
         let original_rest = &text[text.len() - rest.len()..];
         let (target_text, _) = strip_optional_target_prefix(original_rest);
-        let (target, after_target) = parse_target(target_text);
+        let (target, after_target) = parse_target_with_ctx(target_text, ctx);
         let (cost, rem) = parse_mana_symbols(after_target.trim_start()).unwrap_or((
             crate::types::mana::ManaCost::Cost {
                 generic: 2,
@@ -3998,7 +4454,7 @@ fn try_parse_verb_and_target<'a>(
     if let Some((_, rest)) = nom_on_lower(text, lower, |i| {
         value((), alt((tag("destroy all "), tag("destroy each ")))).parse(i)
     }) {
-        let (target, rem) = parse_target(rest);
+        let (target, rem) = parse_target_with_ctx(rest, ctx);
         return Some((
             TargetedImperativeAst::ZoneCounterProxy(Box::new(ZoneCounterImperativeAst::Destroy {
                 target,
@@ -4008,7 +4464,7 @@ fn try_parse_verb_and_target<'a>(
         ));
     }
     if let Some((_, rest)) = nom_on_lower(text, lower, |i| value((), tag("destroy ")).parse(i)) {
-        let (target, rem) = parse_target(rest);
+        let (target, rem) = parse_target_with_ctx(rest, ctx);
         return Some((
             TargetedImperativeAst::ZoneCounterProxy(Box::new(ZoneCounterImperativeAst::Destroy {
                 target,
@@ -4024,7 +4480,7 @@ fn try_parse_verb_and_target<'a>(
         value((), alt((tag("exile all "), tag("exile each ")))).parse(i)
     }) {
         let rest_lower = &lower[lower.len() - rest.len()..];
-        let (parsed_target, rem) = parse_target(rest);
+        let (parsed_target, rem) = parse_target_with_ctx(rest, ctx);
         // CR 701.5a: "exile all spells" must constrain to the stack.
         let target = if scan_contains_phrase(rest_lower, "spell") {
             constrain_filter_to_stack(parsed_target)
@@ -4043,7 +4499,7 @@ fn try_parse_verb_and_target<'a>(
     }
     if let Some((_, rest)) = nom_on_lower(text, lower, |i| value((), tag("exile ")).parse(i)) {
         let rest_lower = &lower[lower.len() - rest.len()..];
-        let (parsed_target, rem) = parse_target(rest);
+        let (parsed_target, rem) = parse_target_with_ctx(rest, ctx);
         // CR 701.5a: "exile target spell" must constrain targeting to the stack,
         // mirroring the counter-spell parser at line 1036-1037.
         let target = if scan_contains_phrase(rest_lower, "spell") {
@@ -4071,13 +4527,13 @@ fn try_parse_verb_and_target<'a>(
         value((), alt((tag("counter all "), tag("counter each ")))).parse(i)
     }) {
         let rest_lower = &lower[lower.len() - rest.len()..];
-        let (parsed_target, rem) = parse_target(rest);
+        let (parsed_target, rem) = parse_target_with_ctx(rest, ctx);
         // CR 113.3: Bare "abilities" (no intervening type phrase) ⇒ stack-
         // ability filter. Mass mode is loose enough to accept this form
         // because the mass keyword has already disambiguated the verb sense.
         // Bare "abilities" head: nom tag-match (skipping leading whitespace)
         // so the dispatch is a combinator, not a string starts_with.
-        fn abilities_head(i: &str) -> nom::IResult<&str, &str, VerboseError<&str>> {
+        fn abilities_head(i: &str) -> nom::IResult<&str, &str, OracleError<'_>> {
             preceded(nom::character::complete::multispace0, tag("abilities")).parse(i)
         }
         let target = if scan_contains_phrase(rest_lower, "activated or triggered ability")
@@ -4104,7 +4560,7 @@ fn try_parse_verb_and_target<'a>(
     // CR 701.6: Counter a spell or ability on the stack.
     if let Some((_, rest)) = nom_on_lower(text, lower, |i| value((), tag("counter ")).parse(i)) {
         let rest_lower = &lower[lower.len() - rest.len()..];
-        let (parsed_target, rem) = parse_target(rest);
+        let (parsed_target, rem) = parse_target_with_ctx(rest, ctx);
         let target = if scan_contains_phrase(rest_lower, "activated or triggered ability") {
             // CR 701.6: "activated or triggered ability" is a special-case target
             // that maps to StackAbility. We still use parse_target's remainder to
@@ -4132,7 +4588,7 @@ fn try_parse_verb_and_target<'a>(
     if let Some((_, rest)) = nom_on_lower(text, lower, |i| value((), tag("return ")).parse(i)) {
         let rest_lower = &lower[lower.len() - rest.len()..];
         let (_, dest) = strip_return_destination_ext(rest);
-        let (target, rem) = parse_target(rest);
+        let (target, rem) = parse_target_with_ctx(rest, ctx);
         let origin = infer_origin_zone(rest_lower);
         return match dest {
             Some(d) if d.zone == Zone::Battlefield => Some((
@@ -4142,6 +4598,7 @@ fn try_parse_verb_and_target<'a>(
                     enter_transformed: d.transformed,
                     under_your_control: d.under_your_control,
                     enter_tapped: d.enter_tapped,
+                    enter_with_counters: d.enter_with_counters,
                 },
                 rem,
             )),
@@ -4161,7 +4618,7 @@ fn try_parse_verb_and_target<'a>(
     }
 
     // Put counter: use refactored try_parse_put_counter that returns remainder
-    if tag::<_, _, VerboseError<&str>>("put ").parse(lower).is_ok()
+    if tag::<_, _, OracleError<'_>>("put ").parse(lower).is_ok()
         && scan_contains_phrase(lower, "counter")
     {
         if let Some((
@@ -4202,7 +4659,7 @@ fn try_parse_verb_and_target<'a>(
 /// When the remainder references "it"/"that creature"/"them" (via `contains_object_pronoun`),
 /// the sub_ability's target is set to `TargetFilter::ParentTarget` so it inherits the
 /// parent's resolved targets at resolution time.
-fn try_split_targeted_compound(text: &str, ctx: &ParseContext) -> Option<ParsedEffectClause> {
+fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<ParsedEffectClause> {
     let lower = text.to_lowercase();
 
     // Quick bail: no "and" means no compound connector possible
@@ -4221,7 +4678,7 @@ fn try_split_targeted_compound(text: &str, ctx: &ParseContext) -> Option<ParsedE
 
     // The remainder must start with " and " to be a compound connector.
     // Do NOT trim — the leading space is the boundary marker.
-    let (after_and, _) = tag::<_, _, VerboseError<&str>>(" and ")
+    let (after_and, _) = tag::<_, _, OracleError<'_>>(" and ")
         .parse(remainder)
         .ok()?;
 
@@ -4238,7 +4695,7 @@ fn try_split_targeted_compound(text: &str, ctx: &ParseContext) -> Option<ParsedE
 
     let sub_lower = sub_text.to_lowercase();
     let uses_parent_target_reference = has_anaphoric_reference(&sub_lower);
-    let continuation_ctx = if uses_parent_target_reference {
+    let mut continuation_ctx = if uses_parent_target_reference {
         ParseContext {
             card_name: ctx.card_name.clone(),
             ..Default::default()
@@ -4248,20 +4705,20 @@ fn try_split_targeted_compound(text: &str, ctx: &ParseContext) -> Option<ParsedE
     };
 
     // Parse the sub-effect
-    let mut sub_clause = parse_imperative_effect(sub_text, &continuation_ctx);
+    let mut sub_clause = parse_imperative_effect(sub_text, &mut continuation_ctx);
 
     // CR 608.2c: Verb carry-forward for bare "target X" clauses in compound actions.
     // When the sub-text starts with "target" and parsed as Unimplemented, prepend
     // the verb from the primary effect and re-parse. Handles "exile target creature
     // and target artifact" where "target artifact" lacks a verb.
     if matches!(sub_clause.effect, Effect::Unimplemented { .. })
-        && tag::<_, _, VerboseError<&str>>("target ")
+        && tag::<_, _, OracleError<'_>>("target ")
             .parse(sub_lower.as_str())
             .is_ok()
     {
         if let Some(verb) = extract_effect_verb(&primary_effect) {
             let reparsed_text = format!("{verb} {sub_text}");
-            let reparsed = parse_imperative_effect(&reparsed_text, &continuation_ctx);
+            let reparsed = parse_imperative_effect(&reparsed_text, &mut continuation_ctx);
             if !matches!(reparsed.effect, Effect::Unimplemented { .. }) {
                 sub_clause = reparsed;
             }
@@ -4278,7 +4735,7 @@ fn try_split_targeted_compound(text: &str, ctx: &ParseContext) -> Option<ParsedE
     {
         if let Some(verb) = extract_effect_verb(&primary_effect) {
             let reparsed_text = format!("{verb} {sub_text}");
-            let reparsed = parse_imperative_effect(&reparsed_text, &continuation_ctx);
+            let reparsed = parse_imperative_effect(&reparsed_text, &mut continuation_ctx);
             if !matches!(reparsed.effect, Effect::Unimplemented { .. }) {
                 sub_clause = reparsed;
             }
@@ -4291,13 +4748,13 @@ fn try_split_targeted_compound(text: &str, ctx: &ParseContext) -> Option<ParsedE
     // your library" which lacks a verb. Prepend the primary verb so it
     // becomes "exile the top card of your library" — parsed as ExileTop.
     if matches!(sub_clause.effect, Effect::Unimplemented { .. })
-        && tag::<_, _, VerboseError<&str>>("the top ")
+        && tag::<_, _, OracleError<'_>>("the top ")
             .parse(sub_lower.as_str())
             .is_ok()
     {
         if let Some(verb) = extract_effect_verb(&primary_effect) {
             let reparsed_text = format!("{verb} {sub_text}");
-            let reparsed = parse_imperative_effect(&reparsed_text, &continuation_ctx);
+            let reparsed = parse_imperative_effect(&reparsed_text, &mut continuation_ctx);
             if !matches!(reparsed.effect, Effect::Unimplemented { .. }) {
                 sub_clause = reparsed;
             }
@@ -4315,6 +4772,42 @@ fn try_split_targeted_compound(text: &str, ctx: &ParseContext) -> Option<ParsedE
 
     Some(ParsedEffectClause {
         effect: primary_effect,
+        duration: None,
+        sub_ability: Some(Box::new(sub_ability)),
+        distribute: None,
+        multi_target: None,
+        condition: None,
+        optional: false,
+    })
+}
+
+fn try_parse_tap_goad_compound(text: &str, ctx: &mut ParseContext) -> Option<ParsedEffectClause> {
+    let lower = text.to_lowercase();
+    let (target_lower, untap) = alt((
+        value(false, tag::<_, _, OracleError<'_>>("tap and goad ")),
+        value(true, tag("untap and goad ")),
+    ))
+    .parse(lower.as_str())
+    .ok()?;
+    let target_text = &text[text.len() - target_lower.len()..];
+    let (target, rem) = parse_target_with_ctx(target_text, ctx);
+    if !rem.trim().is_empty() {
+        return None;
+    }
+
+    let primary = if untap {
+        Effect::Untap {
+            target: target.clone(),
+        }
+    } else {
+        Effect::Tap {
+            target: target.clone(),
+        }
+    };
+    let sub_ability = AbilityDefinition::new(AbilityKind::Spell, Effect::Goad { target });
+
+    Some(ParsedEffectClause {
+        effect: primary,
         duration: None,
         sub_ability: Some(Box::new(sub_ability)),
         distribute: None,
@@ -4350,7 +4843,7 @@ fn try_parse_compound_player_object_damage(lower: &str) -> Option<ParsedEffectCl
     // Extract the damage verb + amount using the same entry logic as try_parse_damage_with_remainder.
     // structural: not dispatch — positional search for verb in variable-length subject prefix
     let pos = lower.find("deals ").or_else(|| lower.find("deal "))?;
-    let verb_len = if tag::<_, _, VerboseError<&str>>("deals ")
+    let verb_len = if tag::<_, _, OracleError<'_>>("deals ")
         .parse(&lower[pos..])
         .is_ok()
     {
@@ -4363,20 +4856,20 @@ fn try_parse_compound_player_object_damage(lower: &str) -> Option<ParsedEffectCl
     // Parse amount: "N damage to "
     let (qty, after_amount) =
         super::oracle_util::parse_count_expr(after_lower).and_then(|(qty, rest)| {
-            let (rest, _) = tag::<_, _, VerboseError<&str>>("damage").parse(rest).ok()?;
+            let (rest, _) = tag::<_, _, OracleError<'_>>("damage").parse(rest).ok()?;
             let rest = rest.trim_start();
-            let (rest, _) = tag::<_, _, VerboseError<&str>>("to ").parse(rest).ok()?;
+            let (rest, _) = tag::<_, _, OracleError<'_>>("to ").parse(rest).ok()?;
             Some((qty, rest))
         })?;
 
     // Match: "each [opponent/player] and each [type phrase] {they control | you don't control | your opponents control}"
-    let (after_each, _) = tag::<_, _, VerboseError<&str>>("each ")
+    let (after_each, _) = tag::<_, _, OracleError<'_>>("each ")
         .parse(after_amount)
         .ok()?;
     let (after_player, player_filter) = parse_damage_player_scope(after_each).ok()?;
 
     // " and each " connector
-    let (after_and_each, _) = tag::<_, _, VerboseError<&str>>(" and each ")
+    let (after_and_each, _) = tag::<_, _, OracleError<'_>>(" and each ")
         .parse(after_player)
         .ok()?;
 
@@ -4397,15 +4890,15 @@ fn try_parse_compound_player_object_damage(lower: &str) -> Option<ParsedEffectCl
     // we hand the full slice to parse_target below for native consumption.
     let mut probe = alt((
         preceded(
-            take_until::<_, _, VerboseError<&str>>(" they control"),
+            take_until::<_, _, OracleError<'_>>(" they control"),
             tag(" they control"),
         ),
         preceded(
-            take_until::<_, _, VerboseError<&str>>(" you don't control"),
+            take_until::<_, _, OracleError<'_>>(" you don't control"),
             tag(" you don't control"),
         ),
         preceded(
-            take_until::<_, _, VerboseError<&str>>(" your opponents control"),
+            take_until::<_, _, OracleError<'_>>(" your opponents control"),
             tag(" your opponents control"),
         ),
     ));
@@ -4480,7 +4973,7 @@ fn try_parse_compound_player_object_damage(lower: &str) -> Option<ParsedEffectCl
 fn try_parse_compound_object_player_damage(lower: &str) -> Option<ParsedEffectClause> {
     // Reuse the same verb+amount entry logic as the player-first variant.
     let pos = lower.find("deals ").or_else(|| lower.find("deal "))?; // allow-noncombinator: positional verb search inside a variable-length subject prefix; tag("deals ") below is the actual dispatch.
-    let verb_len = if tag::<_, _, VerboseError<&str>>("deals ")
+    let verb_len = if tag::<_, _, OracleError<'_>>("deals ")
         .parse(&lower[pos..])
         .is_ok()
     {
@@ -4493,14 +4986,14 @@ fn try_parse_compound_object_player_damage(lower: &str) -> Option<ParsedEffectCl
     // Parse amount: "N damage to "
     let (qty, after_amount) =
         super::oracle_util::parse_count_expr(after_lower).and_then(|(qty, rest)| {
-            let (rest, _) = tag::<_, _, VerboseError<&str>>("damage").parse(rest).ok()?;
+            let (rest, _) = tag::<_, _, OracleError<'_>>("damage").parse(rest).ok()?;
             let rest = rest.trim_start();
-            let (rest, _) = tag::<_, _, VerboseError<&str>>("to ").parse(rest).ok()?;
+            let (rest, _) = tag::<_, _, OracleError<'_>>("to ").parse(rest).ok()?;
             Some((qty, rest))
         })?;
 
     // Must start with "each " (the object half of the conjunction).
-    let (after_each, _) = tag::<_, _, VerboseError<&str>>("each ")
+    let (after_each, _) = tag::<_, _, OracleError<'_>>("each ")
         .parse(after_amount)
         .ok()?;
 
@@ -4511,10 +5004,10 @@ fn try_parse_compound_object_player_damage(lower: &str) -> Option<ParsedEffectCl
     // tag, the next char must be a clause boundary — anything else (e.g.,
     // " who controls a white creature" on Disorder, " equal to ..." on Pompeii)
     // means "each player" is a QUALIFIED player set, not the universal scope.
-    let (after_player, type_phrase) = take_until::<_, _, VerboseError<&str>>(" and each player")
+    let (after_player, type_phrase) = take_until::<_, _, OracleError<'_>>(" and each player")
         .parse(after_each)
         .ok()?;
-    let (after_player_tag, _) = tag::<_, _, VerboseError<&str>>(" and each player")
+    let (after_player_tag, _) = tag::<_, _, OracleError<'_>>(" and each player")
         .parse(after_player)
         .ok()?;
 
@@ -4536,7 +5029,7 @@ fn try_parse_compound_object_player_damage(lower: &str) -> Option<ParsedEffectCl
             // started by punctuation), or the empty tail. We approximate with a tag
             // probe over the known qualifier words.
             let mut qualifier = alt((
-                tag::<_, _, VerboseError<&str>>("who "),
+                tag::<_, _, OracleError<'_>>("who "),
                 tag("whose "),
                 tag("that "),
                 tag("equal "),
@@ -4588,7 +5081,7 @@ fn try_parse_compound_object_player_damage(lower: &str) -> Option<ParsedEffectCl
     })
 }
 
-fn try_split_damage_compound(text: &str, ctx: &ParseContext) -> Option<ParsedEffectClause> {
+fn try_split_damage_compound(text: &str, ctx: &mut ParseContext) -> Option<ParsedEffectClause> {
     let lower = text.to_lowercase();
     if !scan_contains_phrase(&lower, "and") {
         return None;
@@ -4608,7 +5101,7 @@ fn try_split_damage_compound(text: &str, ctx: &ParseContext) -> Option<ParsedEff
         return Some(clause);
     }
 
-    let (primary_effect, remainder) = try_parse_damage_with_remainder(text, &lower)?;
+    let (primary_effect, remainder) = try_parse_damage_with_remainder(text, &lower, ctx)?;
 
     if remainder.is_empty() {
         return None;
@@ -4616,7 +5109,7 @@ fn try_split_damage_compound(text: &str, ctx: &ParseContext) -> Option<ParsedEff
 
     // The remainder must start with " and " to be a compound connector.
     // Do NOT trim — the leading space is the boundary marker.
-    let (after_and, _) = tag::<_, _, VerboseError<&str>>(" and ")
+    let (after_and, _) = tag::<_, _, OracleError<'_>>(" and ")
         .parse(remainder)
         .ok()?;
     let sub_text = after_and.trim();
@@ -4725,7 +5218,7 @@ fn try_split_compound_subject(text: &str) -> Option<(TargetFilter, TargetFilter,
 /// for the second subject, both with owner_library: true.
 fn try_parse_compound_shuffle(text: &str) -> Option<ParsedEffectClause> {
     let lower = text.to_lowercase();
-    tag::<_, _, VerboseError<&str>>("shuffle ")
+    tag::<_, _, OracleError<'_>>("shuffle ")
         .parse(lower.as_str())
         .ok()?;
 
@@ -4879,7 +5372,7 @@ fn replace_fight_subject_with_parent_if_anaphoric_subject(
     effect: &mut Effect,
 ) -> bool {
     let is_anaphoric_subject = alt((
-        tag::<_, _, VerboseError<&str>>("it fights "),
+        tag::<_, _, OracleError<'_>>("it fights "),
         tag("that creature fights "),
         tag("that permanent fights "),
     ))
@@ -4945,7 +5438,7 @@ fn has_typed_target(effect: &Effect) -> bool {
 fn lower_subject_predicate_ast(
     subject: SubjectPhraseAst,
     predicate: PredicateAst,
-    ctx: &ParseContext,
+    ctx: &mut ParseContext,
 ) -> ParsedEffectClause {
     // CR 115.1d: Propagate multi_target from the subject phrase (e.g., "any number of
     // target creatures", "up to two target artifacts") into the lowered clause so the
@@ -5013,7 +5506,7 @@ fn lower_subject_predicate_ast(
                 }
             }
             // CR 701.20a: "<player> reveals the top [N] card(s) of their library"
-            if alt((tag::<_, _, VerboseError<&str>>("reveal "), tag("reveals ")))
+            if alt((tag::<_, _, OracleError<'_>>("reveal "), tag("reveals ")))
                 .parse(pred_lower.as_str())
                 .is_ok()
                 && scan_contains_phrase(&pred_lower, "top")
@@ -5034,29 +5527,13 @@ fn lower_subject_predicate_ast(
                 });
             }
             // CR 701.10a: "<player> exiles the top [N] card(s) of their library"
-            if alt((tag::<_, _, VerboseError<&str>>("exile "), tag("exiles ")))
+            if alt((tag::<_, _, OracleError<'_>>("exile "), tag("exiles ")))
                 .parse(pred_lower.as_str())
                 .is_ok()
                 && scan_contains_phrase(&pred_lower, "top")
                 && scan_contains_phrase(&pred_lower, "library")
             {
-                let count = if let Some(after_top) = strip_after(&pred_lower, "top ") {
-                    // CR 107.1a: "half of their library, rounded up/down" composes
-                    // over `TargetZoneCardCount` via the shared quantity combinator.
-                    if let Ok((_, expr)) =
-                        super::oracle_nom::quantity::parse_half_rounded(after_top)
-                    {
-                        expr
-                    } else {
-                        let n = nom_primitives::parse_number
-                            .parse(after_top)
-                            .map(|(_, n)| n as i32)
-                            .unwrap_or(1);
-                        QuantityExpr::Fixed { value: n }
-                    }
-                } else {
-                    QuantityExpr::Fixed { value: 1 }
-                };
+                let count = parse_subject_exile_top_count(&pred_lower);
                 return parsed_clause(Effect::ExileTop {
                     player: subject.affected,
                     count,
@@ -5067,12 +5544,9 @@ fn lower_subject_predicate_ast(
             // card of their library" routes through this arm so the acting
             // player is bound to `subject.affected` (e.g., ParentTargetController)
             // rather than the default Controller.
-            if alt((
-                tag::<_, _, VerboseError<&str>>("manifest "),
-                tag("manifests "),
-            ))
-            .parse(pred_lower.as_str())
-            .is_ok()
+            if alt((tag::<_, _, OracleError<'_>>("manifest "), tag("manifests ")))
+                .parse(pred_lower.as_str())
+                .is_ok()
                 && scan_contains_phrase(&pred_lower, "top")
                 && scan_contains_phrase(&pred_lower, "library")
             {
@@ -5158,6 +5632,9 @@ fn lower_subject_predicate_ast(
             }
             // CR 608.2c: Inject the subject's target into targeted effects that were
             // parsed via the imperative path (connive, phase out, force block, suspect).
+            if let Some(wrapped) = wrap_target_subject_damage(clause.clone(), &subject) {
+                return wrapped;
+            }
             inject_subject_target(&mut clause.effect, &subject);
             if let Effect::PayCost { payer, .. } = &mut clause.effect {
                 if matches!(
@@ -5170,6 +5647,7 @@ fn lower_subject_predicate_ast(
                         | TargetFilter::TriggeringSpellOwner
                         | TargetFilter::DefendingPlayer
                         | TargetFilter::PostReplacementSourceController
+                        | TargetFilter::PostReplacementDamageTarget
                         | TargetFilter::Owner
                         | TargetFilter::SpecificPlayer { .. }
                 ) {
@@ -5248,7 +5726,7 @@ fn is_player_applicable_keyword(keyword: &crate::types::keywords::Keyword) -> bo
 }
 
 /// CR 608.2c + CR 117.3a: Extract a non-caster player anchor from an effect's
-/// own subject. Used by `parse_effect_chain_impl` to remember "who is acting"
+/// own subject. Used by `parse_effect_chain_ir` to remember "who is acting"
 /// when a later clause in the same chain has a caster-defaulted player target
 /// that should inherit the earlier subject (Assassin's Trophy's "then
 /// shuffle" inheriting "its controller" from the preceding search clause).
@@ -5304,13 +5782,15 @@ fn apply_anchor_subject(effect: &mut Effect, anchor: &TargetFilter) {
 
 /// CR 109.4: Map a player-reference `TargetFilter` to the `ControllerRef`
 /// variant a typed object filter should adopt to match "permanents that player
-/// controls". Only the two anaphoric variants used in trigger effects
-/// (`TriggeringPlayer`, `TargetPlayer`) produce a result — caster-scoped
-/// filters (`Controller`, `You`) should not rewrite an object filter because
-/// they reference the ability controller, not an acting player target.
+/// controls". `TriggeringPlayer` is event-contextual and must not create a
+/// target slot; explicit targeted subjects still use `TargetPlayer` in
+/// `inject_subject_target` below. Caster-scoped filters (`Controller`, `You`)
+/// should not rewrite an object filter because they reference the ability
+/// controller, not an acting player target.
 fn player_filter_as_controller_ref(filter: &TargetFilter) -> Option<ControllerRef> {
     match filter {
-        TargetFilter::TriggeringPlayer => Some(ControllerRef::TargetPlayer),
+        TargetFilter::ScopedPlayer => Some(ControllerRef::ScopedPlayer),
+        TargetFilter::TriggeringPlayer => Some(ControllerRef::ScopedPlayer),
         TargetFilter::Typed(tf)
             if tf.type_filters.is_empty()
                 && tf.controller.is_some()
@@ -5319,6 +5799,89 @@ fn player_filter_as_controller_ref(filter: &TargetFilter) -> Option<ControllerRe
             tf.controller.clone()
         }
         _ => None,
+    }
+}
+
+/// CR 701.16a + CR 115.1: Unconditionally set the controller constraint on a
+/// typed object filter, overwriting any existing value. Used when a targeted
+/// subject ("target opponent sacrifices...") must override a pre-parsed "they
+/// control" → `ControllerRef::You` with `ControllerRef::TargetPlayer`.
+fn force_controller(filter: &mut TargetFilter, ctrl: ControllerRef) {
+    match filter {
+        TargetFilter::Typed(tf) => {
+            tf.controller = Some(ctrl);
+        }
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            for inner in filters.iter_mut() {
+                force_controller(inner, ctrl.clone());
+            }
+        }
+        TargetFilter::Not { filter } => force_controller(filter, ctrl),
+        _ => {}
+    }
+}
+
+/// Rewrite all occurrences of `from` controller inside a `QuantityExpr`'s
+/// embedded filters to `to`. Walks DivideRounded/Multiply/Offset/Sum wrappers
+/// and rewrites ObjectCount filter controllers.
+fn rewrite_quantity_controller(expr: &mut QuantityExpr, from: ControllerRef, to: ControllerRef) {
+    match expr {
+        QuantityExpr::Ref { qty } => {
+            if let QuantityRef::ObjectCount { filter } = qty {
+                rewrite_filter_controller(filter, &from, &to);
+            }
+        }
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::UpTo { max: inner } => {
+            rewrite_quantity_controller(inner, from, to);
+        }
+        QuantityExpr::Sum { exprs } => {
+            for inner in exprs {
+                rewrite_quantity_controller(inner, from.clone(), to.clone());
+            }
+        }
+        QuantityExpr::Fixed { .. } => {}
+    }
+}
+
+fn rewrite_event_source_power_to_object_power(expr: &mut QuantityExpr, scope: ObjectScope) {
+    match expr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::EventContextSourcePower,
+        } => {
+            *expr = QuantityExpr::Ref {
+                qty: QuantityRef::Power { scope },
+            };
+        }
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::UpTo { max: inner } => {
+            rewrite_event_source_power_to_object_power(inner, scope);
+        }
+        QuantityExpr::Sum { exprs } => {
+            for inner in exprs {
+                rewrite_event_source_power_to_object_power(inner, scope);
+            }
+        }
+        QuantityExpr::Fixed { .. } | QuantityExpr::Ref { .. } => {}
+    }
+}
+
+fn rewrite_filter_controller(filter: &mut TargetFilter, from: &ControllerRef, to: &ControllerRef) {
+    match filter {
+        TargetFilter::Typed(tf) if tf.controller.as_ref() == Some(from) => {
+            tf.controller = Some(to.clone());
+        }
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            for inner in filters.iter_mut() {
+                rewrite_filter_controller(inner, from, to);
+            }
+        }
+        TargetFilter::Not { filter } => rewrite_filter_controller(filter, from, to),
+        _ => {}
     }
 }
 
@@ -5346,6 +5909,7 @@ fn target_filter_can_target_player(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Player
         | TargetFilter::Controller
+        | TargetFilter::ScopedPlayer
         | TargetFilter::TriggeringSpellController
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
@@ -5357,6 +5921,76 @@ fn target_filter_can_target_player(filter: &TargetFilter) -> bool {
         }
         TargetFilter::Not { filter } => target_filter_can_target_player(filter),
         _ => false,
+    }
+}
+
+fn wrap_target_subject_damage(
+    mut clause: ParsedEffectClause,
+    subject: &SubjectPhraseAst,
+) -> Option<ParsedEffectClause> {
+    let subject_target = subject.target.as_ref()?;
+    let Effect::DealDamage {
+        amount,
+        damage_source,
+        ..
+    } = &mut clause.effect
+    else {
+        return None;
+    };
+
+    // CR 608.2c + CR 120.3: "target creature deals damage equal to its
+    // power..." makes the chosen source object, not the spell card, deal the
+    // damage. "Its power" is therefore the first target's current power.
+    rewrite_event_source_power_to_object_power(amount, ObjectScope::Target);
+    *damage_source = Some(DamageSource::Target);
+
+    let mut damage_ability = AbilityDefinition::new(AbilityKind::Spell, clause.effect);
+    damage_ability.sub_ability = clause.sub_ability;
+    damage_ability.duration = clause.duration.clone();
+    damage_ability.condition = clause.condition.clone();
+    damage_ability.optional = clause.optional;
+    damage_ability.multi_target = clause.multi_target;
+    damage_ability.distribute = clause.distribute;
+
+    Some(ParsedEffectClause {
+        effect: Effect::TargetOnly {
+            target: subject_target.clone(),
+        },
+        duration: clause.duration,
+        sub_ability: Some(Box::new(damage_ability)),
+        distribute: None,
+        multi_target: subject.multi_target.clone(),
+        condition: None,
+        optional: subject.is_optional,
+    })
+}
+
+fn parse_subject_exile_top_count(pred_lower: &str) -> QuantityExpr {
+    if let Ok((_, qty_text)) = preceded(
+        alt((tag::<_, _, OracleError<'_>>("exile "), tag("exiles "))),
+        take_until(" from the top"),
+    )
+    .parse(pred_lower)
+    {
+        if let Some(expr) = parse_event_context_quantity(qty_text.trim()) {
+            return expr;
+        }
+    }
+
+    if let Some(after_top) = strip_after(pred_lower, "top ") {
+        // CR 107.1a: "half of their library, rounded up/down" composes over
+        // `TargetZoneCardCount` via the shared quantity combinator.
+        if let Ok((_, expr)) = super::oracle_nom::quantity::parse_half_rounded(after_top) {
+            expr
+        } else {
+            let n = nom_primitives::parse_number
+                .parse(after_top)
+                .map(|(_, n)| n as i32)
+                .unwrap_or(1);
+            QuantityExpr::Fixed { value: n }
+        }
+    } else {
+        QuantityExpr::Fixed { value: 1 }
     }
 }
 
@@ -5401,7 +6035,7 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
             *target = subject_filter;
         }
         // CR 500.8: "target player gets an additional combat phase" — inject subject target
-        Effect::AdditionalCombatPhase { target, .. } if *target == TargetFilter::Controller => {
+        Effect::AdditionalPhase { target, .. } if *target == TargetFilter::Controller => {
             *target = subject_filter;
         }
         // CR 400.7: "shuffle [subject]'s graveyard into their library" — inject
@@ -5473,18 +6107,28 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
         // CR 608.2k + CR 109.4: "that player sacrifices a non-Elf creature" /
         // "each opponent sacrifices a creature they control". When the subject
         // is a player reference (TriggeringPlayer / TargetPlayer / etc.) and
-        // the effect targets a TYPED object filter that has not been scoped to
-        // a controller, inject the controller constraint so the filter matches
-        // only permanents controlled by the acting player. Without this, a
-        // phase trigger like Ruthless Winnower's "that player sacrifices a
-        // non-Elf creature" would match any player's non-Elf creature instead
-        // of the sacrificing player's. Reached only when the earlier Any-only
-        // arm did not fire (target is a typed filter, not `Any`).
-        Effect::Sacrifice { target, .. }
+        // CR 115.1 + CR 701.16a: Sacrifice with a typed object filter —
+        // inject the subject's controller constraint. For non-targeted subjects
+        // ("each player sacrifices a non-Elf creature"), this scopes the filter
+        // to the acting player's permanents. For targeted subjects ("target
+        // opponent sacrifices..."), use ControllerRef::TargetPlayer so the
+        // engine surfaces a player target slot and resolve_sacrifice_scope
+        // reads the chosen player from ability.targets at resolution time.
+        // Also rewrite "they control" refs inside the count expression so
+        // the dynamic count resolves against the targeted player's board.
+        Effect::Sacrifice { target, count }
             if player_filter_as_controller_ref(&subject_filter).is_some() =>
         {
             if let Some(ctrl) = player_filter_as_controller_ref(&subject_filter) {
-                attach_controller_if_absent(target, ctrl);
+                let effective_ctrl = if subject.target.is_some() {
+                    ControllerRef::TargetPlayer
+                } else {
+                    ctrl
+                };
+                force_controller(target, effective_ctrl.clone());
+                if subject.target.is_some() {
+                    rewrite_quantity_controller(count, ControllerRef::ScopedPlayer, effective_ctrl);
+                }
             }
         }
         // CR 119.3 + CR 115.1d: "they lose N life" — inject subject's player reference.
@@ -5492,6 +6136,12 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
         // Guard on is_none() to only inject when no target was explicitly parsed.
         Effect::LoseLife { ref mut target, .. } if target.is_none() => {
             *target = Some(subject_filter);
+        }
+        // CR 608.2c + CR 120.3: When the stripped subject is the source object
+        // ("~ deals damage equal to its power..."), "its power" is the ability
+        // source's current power, not a triggering event's source power.
+        Effect::DealDamage { amount, .. } if subject_filter == TargetFilter::SelfRef => {
+            rewrite_event_source_power_to_object_power(amount, ObjectScope::Source);
         }
         // CR 701.23a: "Its controller may search their library..." — the subject
         // names the library owner (and, when the subject is a context-ref, the
@@ -5589,7 +6239,7 @@ fn try_parse_emblem_creation(lower: &str, original: &str) -> Option<Effect> {
 ///    origin-zone inference. CR 118.9 + CR 601.2a + CR 120.3.
 /// 3. Bare — fallback `TargetFilter::Any`.
 fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
-    type E<'a> = VerboseError<&'a str>;
+    type E<'a> = OracleError<'a>;
 
     // CR 305.1: "play" means cast if spell, play as land if land.
     let (rest, mode) = alt((
@@ -5719,7 +6369,7 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
 /// parser will accept other `AbilityCost` shapes naturally as they are
 /// added.
 pub(crate) fn try_parse_alt_cost_rider(text: &str) -> Option<crate::types::ability::AbilityCost> {
-    type Vbe<'a> = VerboseError<&'a str>;
+    type Vbe<'a> = OracleError<'a>;
     let lower = text.to_lowercase();
     let trimmed_lower = lower.trim_end_matches('.').trim();
     // Accept the rider with or without an "if you cast a spell this way,"
@@ -5796,13 +6446,13 @@ fn attach_alt_cost_to_prior_cast_from_zone(
 }
 
 #[tracing::instrument(level = "debug")]
-fn parse_imperative_effect(text: &str, ctx: &ParseContext) -> ParsedEffectClause {
+fn parse_imperative_effect(text: &str, ctx: &mut ParseContext) -> ParsedEffectClause {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
     parse_imperative_effect_inner(tp, ctx)
 }
 
-fn parse_imperative_effect_inner(tp: TextPair, ctx: &ParseContext) -> ParsedEffectClause {
+fn parse_imperative_effect_inner(tp: TextPair, ctx: &mut ParseContext) -> ParsedEffectClause {
     if let Some(ast) = parse_imperative_family_ast(tp.original, tp.lower, ctx) {
         return lower_imperative_family_ast(ast);
     }
@@ -5863,9 +6513,7 @@ fn is_choose_as_targeting(rest: &str) -> bool {
 
     // "choose up to N" without "target" (e.g. "choose up to two creatures"),
     // but NOT "choose up to N of them/those" which is anaphoric (handled separately).
-    if tag::<_, _, VerboseError<&str>>("up to ")
-        .parse(rest)
-        .is_ok()
+    if tag::<_, _, OracleError<'_>>("up to ").parse(rest).is_ok()
         && !scan_contains_phrase(rest, "of them")
         && !scan_contains_phrase(rest, "of those")
     {
@@ -5880,7 +6528,7 @@ fn is_choose_as_targeting(rest: &str) -> bool {
     {
         // Exclude patterns not yet in try_parse_named_choice but still not targeting
         if alt((
-            tag::<_, _, VerboseError<&str>>("nonbasic land type"),
+            tag::<_, _, OracleError<'_>>("nonbasic land type"),
             tag("number"),
         ))
         .parse(after_article)
@@ -5921,12 +6569,12 @@ fn is_choose_as_targeting(rest: &str) -> bool {
 /// "choose a basic land type", "choose a card type" from lowercased Oracle text.
 pub(crate) fn try_parse_named_choice(lower: &str) -> Option<ChoiceType> {
     let (rest, _) = alt((
-        tag::<_, _, VerboseError<&str>>("choose "),
+        tag::<_, _, OracleError<'_>>("choose "),
         nom::sequence::preceded(tag("secretly "), tag("choose ")),
     ))
     .parse(lower)
     .ok()?;
-    type E<'a> = VerboseError<&'a str>;
+    type E<'a> = OracleError<'a>;
     if tag::<_, _, E>("a creature type").parse(rest).is_ok() {
         Some(ChoiceType::CreatureType)
     } else if tag::<_, _, E>("a color").parse(rest).is_ok() {
@@ -6033,14 +6681,14 @@ fn try_parse_binary_choice(rest: &str) -> Option<Vec<String>> {
 fn refine_damage_target_remainder(target: TargetFilter, remainder: &str) -> (TargetFilter, &str) {
     let trimmed = remainder.trim();
     // CR 608.2c: "'s controller" — redirect damage to the controller of the target
-    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("'s controller").parse(trimmed) {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("'s controller").parse(trimmed) {
         return (TargetFilter::ParentTargetController, rest);
     }
     // "or <target>" — expand target to union: "creature or planeswalker",
     // "creature or blocking creature", "~ or enchanted creature", etc.
     // Uses parse_target (not parse_type_phrase) to handle special patterns
     // like "enchanted creature" that aren't plain type phrases.
-    if let Ok((after_or, _)) = tag::<_, _, VerboseError<&str>>("or ").parse(trimmed) {
+    if let Ok((after_or, _)) = tag::<_, _, OracleError<'_>>("or ").parse(trimmed) {
         let (additional, type_rem) = parse_target(after_or);
         if !matches!(additional, TargetFilter::Any) {
             return (
@@ -6054,11 +6702,11 @@ fn refine_damage_target_remainder(target: TargetFilter, remainder: &str) -> (Tar
     (target, remainder)
 }
 
-fn parse_choose_filter(lower: &str) -> TargetFilter {
+fn parse_choose_filter(lower: &str, ctx: &mut ParseContext) -> TargetFilter {
     // Extract type info between "choose" and "card from it"
     // Handle both "choose X" and "you choose X" forms
     let after_choose = alt((
-        tag::<_, _, VerboseError<&str>>("you choose "),
+        tag::<_, _, OracleError<'_>>("you choose "),
         tag("you may choose "),
         tag("choose "),
     ))
@@ -6067,7 +6715,7 @@ fn parse_choose_filter(lower: &str) -> TargetFilter {
     .unwrap_or(lower);
 
     // "one of them/those [cards]" — selection reference to parent target set
-    if tag::<_, _, VerboseError<&str>>("one of th")
+    if tag::<_, _, OracleError<'_>>("one of th")
         .parse(after_choose)
         .is_ok()
     {
@@ -6136,10 +6784,11 @@ fn parse_choose_filter(lower: &str) -> TargetFilter {
     if let Some(f) = type_str_to_target_filter(cleaned) {
         return f;
     }
-    push_warning(format!(
-        "target-fallback: unrecognized type string '{}'",
-        cleaned
-    ));
+    ctx.push_diagnostic(OracleDiagnostic::TargetFallback {
+        context: "unrecognized type string".into(),
+        text: cleaned.into(),
+        line_index: 0,
+    });
     TargetFilter::Any
 }
 
@@ -6245,17 +6894,18 @@ fn type_str_to_target_filter(s: &str) -> Option<TargetFilter> {
 
 /// Extract card type filter from a sub-ability sentence containing "card from it/among".
 /// Handles forms like "exile a nonland card from it", "discard a creature card from it".
-fn parse_choose_filter_from_sentence(lower: &str) -> TargetFilter {
-    let before_card = match take_until::<_, _, VerboseError<&str>>("card from")
+fn parse_choose_filter_from_sentence(lower: &str, ctx: &mut ParseContext) -> TargetFilter {
+    let before_card = match take_until::<_, _, OracleError<'_>>("card from")
         .parse(lower)
         .ok()
     {
         Some((_, before)) => before,
         None => {
-            push_warning(format!(
-                "target-fallback: choose-from-sentence missing 'card from' in '{}'",
-                lower.trim()
-            ));
+            ctx.push_diagnostic(OracleDiagnostic::TargetFallback {
+                context: "choose-from-sentence missing 'card from'".into(),
+                text: lower.trim().into(),
+                line_index: 0,
+            });
             return TargetFilter::Any;
         }
     };
@@ -6271,10 +6921,11 @@ fn parse_choose_filter_from_sentence(lower: &str) -> TargetFilter {
         }
     }
     type_str_to_target_filter(word).unwrap_or_else(|| {
-        push_warning(format!(
-            "target-fallback: unrecognized choose-from-sentence type '{}'",
-            word
-        ));
+        ctx.push_diagnostic(OracleDiagnostic::TargetFallback {
+            context: "unrecognized choose-from-sentence type".into(),
+            text: word.into(),
+            line_index: 0,
+        });
         TargetFilter::Any
     })
 }
@@ -6315,7 +6966,7 @@ fn contains_explicit_tracked_set_pronoun(lower: &str) -> bool {
 /// `lower` must be the pre-lowered version of the text.
 fn contains_implicit_tracked_set_pronoun(lower: &str) -> bool {
     alt((
-        tag::<_, _, VerboseError<&str>>("return it "),
+        tag::<_, _, OracleError<'_>>("return it "),
         tag("return them "),
     ))
     .parse(lower)
@@ -6361,10 +7012,10 @@ fn intrinsic_continuation_effect(def: &AbilityDefinition) -> &Effect {
 
 /// CR 107.1a: Strip a trailing "Round down each time" / "Round up each time"
 /// sentence from a chain of Oracle text, returning the stripped text and the
-/// captured rounding mode. Used by `parse_effect_chain_impl` to consume the
+/// captured rounding mode. Used by `parse_effect_chain_ir` to consume the
 /// chain-level rounding annotation (Pox Plague) before chunk splitting so
 /// the phrase doesn't become an Unimplemented chunk. The captured mode is
-/// re-applied to every `HalfRounded` in the built chain via
+/// re-applied to every `DivideRounded` in the built chain via
 /// `rewrite_rounding_mode`.
 fn strip_trailing_rounding_annotation(text: &str) -> (String, Option<RoundingMode>) {
     let trimmed = text.trim_end();
@@ -6450,7 +7101,11 @@ pub(crate) fn each_target_filter_mut(effect: &mut Effect, f: &mut impl FnMut(&mu
         | Effect::Discard { target, .. }
         | Effect::Mill { target, .. }
         | Effect::Scry { target, .. }
-        | Effect::Surveil { target, .. } => f(target),
+        | Effect::Surveil { target, .. }
+        | Effect::RevealTop { player: target, .. }
+        | Effect::ExileTop { player: target, .. }
+        | Effect::Manifest { target, .. }
+        | Effect::TargetOnly { target, .. } => f(target),
         Effect::PutCounter { target, .. }
         | Effect::AddCounter { target, .. }
         | Effect::RemoveCounter { target, .. } => f(target),
@@ -6483,6 +7138,76 @@ pub(crate) fn each_target_filter_mut(effect: &mut Effect, f: &mut impl FnMut(&mu
 /// rewrite uniformly. Only reached when the top-level `def.player_scope` is
 /// set, so non-scoped abilities keep the target-scoped resolution path.
 fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
+    fn rewrite_filter_controller_to_scoped(filter: &mut TargetFilter) {
+        match filter {
+            TargetFilter::Typed(typed) if typed.controller == Some(ControllerRef::You) => {
+                typed.controller = Some(ControllerRef::ScopedPlayer);
+            }
+            TargetFilter::Not { filter } => rewrite_filter_controller_to_scoped(filter),
+            TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+                for filter in filters {
+                    rewrite_filter_controller_to_scoped(filter);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn rewrite_condition_quantity_expr(expr: &mut QuantityExpr) {
+        match expr {
+            QuantityExpr::Ref { qty } => match qty {
+                QuantityRef::LifeTotal { player }
+                | QuantityRef::HandSize { player }
+                | QuantityRef::LifeLostThisTurn { player }
+                | QuantityRef::LifeGainedThisTurn { player }
+                | QuantityRef::PartySize { player }
+                    if *player == PlayerScope::Controller =>
+                {
+                    *player = PlayerScope::ScopedPlayer;
+                }
+                QuantityRef::ObjectCount { filter } => rewrite_filter_controller_to_scoped(filter),
+                _ => {}
+            },
+            QuantityExpr::DivideRounded { inner, .. }
+            | QuantityExpr::Multiply { inner, .. }
+            | QuantityExpr::Offset { inner, .. } => rewrite_condition_quantity_expr(inner),
+            QuantityExpr::Sum { exprs } => {
+                for inner in exprs {
+                    rewrite_condition_quantity_expr(inner);
+                }
+            }
+            QuantityExpr::UpTo { max } => rewrite_condition_quantity_expr(max),
+            QuantityExpr::Fixed { .. } => {}
+        }
+    }
+
+    fn rewrite_condition(condition: &mut AbilityCondition) {
+        match condition {
+            AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
+                rewrite_condition_quantity_expr(lhs);
+                rewrite_condition_quantity_expr(rhs);
+            }
+            AbilityCondition::TargetMatchesFilter { filter, .. }
+            | AbilityCondition::SourceMatchesFilter { filter }
+            | AbilityCondition::ZoneChangeObjectMatchesFilter { filter, .. }
+            | AbilityCondition::ControllerControlsMatching { filter }
+            | AbilityCondition::ZoneChangedThisWay { filter }
+            | AbilityCondition::CostPaidObjectMatchesFilter { filter } => {
+                rewrite_filter_controller_to_scoped(filter);
+            }
+            AbilityCondition::Not { condition }
+            | AbilityCondition::ConditionInstead { inner: condition } => {
+                rewrite_condition(condition)
+            }
+            AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+                for condition in conditions {
+                    rewrite_condition(condition);
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn rewrite_quantity_expr(expr: &mut QuantityExpr) {
         match expr {
             QuantityExpr::Ref { qty } => match qty {
@@ -6490,16 +7215,15 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
                     player: PlayerScope::Target,
                 } => {
                     *qty = QuantityRef::LifeTotal {
-                        player: PlayerScope::Controller,
+                        player: PlayerScope::ScopedPlayer,
                     }
                 }
                 QuantityRef::TargetZoneCardCount { zone } => match zone {
                     crate::types::ability::ZoneRef::Hand => {
                         *qty = QuantityRef::HandSize {
-                            player: PlayerScope::Controller,
+                            player: PlayerScope::ScopedPlayer,
                         }
                     }
-                    crate::types::ability::ZoneRef::Graveyard => *qty = QuantityRef::GraveyardSize,
                     crate::types::ability::ZoneRef::Library => {
                         *qty = QuantityRef::ZoneCardCount {
                             zone: crate::types::ability::ZoneRef::Library,
@@ -6507,6 +7231,10 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
                             scope: crate::types::ability::CountScope::Controller,
                         };
                     }
+                    // GraveyardSize / ZoneCardCount are still controller-based;
+                    // leave target-scoped graveyard/exile counts unchanged until
+                    // CountScope has a scoped-player axis.
+                    crate::types::ability::ZoneRef::Graveyard => {}
                     // Exile has no clean controller-scoped equivalent in the
                     // current `QuantityRef` set. Leave untouched — the
                     // scoped-controller resolver path does not exist for
@@ -6517,7 +7245,7 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
                 },
                 _ => {}
             },
-            QuantityExpr::HalfRounded { inner, .. }
+            QuantityExpr::DivideRounded { inner, .. }
             | QuantityExpr::Multiply { inner, .. }
             | QuantityExpr::Offset { inner, .. } => rewrite_quantity_expr(inner),
             QuantityExpr::Sum { exprs } => {
@@ -6531,6 +7259,9 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
     }
 
     each_quantity_expr_mut(&mut def.effect, &mut rewrite_quantity_expr);
+    if let Some(condition) = def.condition.as_mut() {
+        rewrite_condition(condition);
+    }
     if let Some(sub) = def.sub_ability.as_mut() {
         rewrite_player_scope_refs(sub);
     }
@@ -6539,8 +7270,8 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
     }
 }
 
-/// CR 107.1a: Back-apply a rounding mode to every `HalfRounded` in an ability
-/// tree. Used by `parse_effect_chain_impl` after stripping a trailing
+/// CR 107.1a: Back-apply a rounding mode to every `DivideRounded` in an ability
+/// tree. Used by `parse_effect_chain_ir` after stripping a trailing
 /// "Round down each time" / "Round up each time" sentence (Pox Plague), so
 /// earlier chunks that defaulted to `RoundingMode::Down` pick up an explicit
 /// `Up` annotation that Oracle grammar places in a separate closing
@@ -6550,7 +7281,11 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
 fn rewrite_rounding_mode(def: &mut AbilityDefinition, mode: RoundingMode) {
     fn rewrite_quantity_expr(expr: &mut QuantityExpr, mode: RoundingMode) {
         match expr {
-            QuantityExpr::HalfRounded { inner, rounding } => {
+            QuantityExpr::DivideRounded {
+                inner,
+                divisor: _,
+                rounding,
+            } => {
                 *rounding = mode;
                 rewrite_quantity_expr(inner, mode);
             }
@@ -6578,6 +7313,36 @@ fn rewrite_rounding_mode(def: &mut AbilityDefinition, mode: RoundingMode) {
     }
 }
 
+fn collapse_ephemeral_color_choice_mana(def: &mut AbilityDefinition) {
+    if matches!(
+        &*def.effect,
+        Effect::Choose {
+            choice_type: ChoiceType::Color,
+            persist: false,
+        }
+    ) {
+        let can_collapse = def.sub_ability.as_ref().is_some_and(|sub| {
+            matches!(
+                &*sub.effect,
+                Effect::Mana {
+                    produced: ManaProduction::ChosenColor { .. },
+                    target: None,
+                    ..
+                }
+            )
+        });
+        if can_collapse {
+            let mut mana = *def.sub_ability.take().expect("sub_ability checked above");
+            def.effect = mana.effect;
+            def.sub_ability = mana.sub_ability.take();
+        }
+    }
+
+    if let Some(sub) = def.sub_ability.as_mut() {
+        collapse_ephemeral_color_choice_mana(sub);
+    }
+}
+
 /// Parse a compound effect chain into an `AbilityDefinition` sub-ability chain.
 ///
 /// Phase 1 keeps the existing clause/effect semantics but replaces the fragile
@@ -6592,7 +7357,8 @@ fn rewrite_rounding_mode(def: &mut AbilityDefinition, mode: RoundingMode) {
 /// that invoke `normalize_card_name_refs` internally. External test callers
 /// must pre-normalize via `normalize_card_name_refs` before invoking.
 pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
-    parse_effect_chain_impl(text, kind, &ParseContext::default())
+    let ir = parse_effect_chain_ir(text, kind, &mut ParseContext::default());
+    lower_effect_chain_ir(&ir)
 }
 
 /// Parse a compound effect chain with subject context for pronoun resolution.
@@ -6601,15 +7367,27 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
 pub(crate) fn parse_effect_chain_with_context(
     text: &str,
     kind: AbilityKind,
-    ctx: &ParseContext,
+    ctx: &mut ParseContext,
 ) -> AbilityDefinition {
-    parse_effect_chain_impl(text, kind, ctx)
+    let ir = parse_effect_chain_ir(text, kind, ctx);
+    lower_effect_chain_ir(&ir)
 }
 
-fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) -> AbilityDefinition {
+/// Produce an intermediate representation of an effect chain from Oracle text.
+///
+/// This is the IR-production half of the parse/lower split (Phase 48).
+/// It runs the chunk loop — text splitting, strip cascade, per-chunk effect
+/// parsing, continuation recognition — producing a flat `Vec<AbilityDefinition>`
+/// (pre-assembled defs). Post-loop assembly (demoting Dig, sub_ability chaining,
+/// anaphoric resolution, etc.) is handled by [`lower_effect_chain_ir`].
+pub(crate) fn parse_effect_chain_ir(
+    text: &str,
+    kind: AbilityKind,
+    ctx: &mut ParseContext,
+) -> EffectChainIr {
     // CR 107.1a: Strip a trailing "Round down each time" / "Round up each time"
     // sentence before chain splitting — it is a chain-level rounding annotation
-    // (Pox Plague) that back-applies to every `HalfRounded` the chain contains.
+    // (Pox Plague) that back-applies to every `DivideRounded` the chain contains.
     // Stripped here so it doesn't become an Unimplemented chunk; the captured
     // mode is re-applied to the built chain via `rewrite_rounding_mode`.
     let (text, chain_rounding) = strip_trailing_rounding_annotation(text);
@@ -6622,7 +7400,7 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
     // sibling clauses in the same sentence ("Target player loses X life")
     // substitute X with the same expression. Delimited by ClauseBoundary::Sentence.
     let sentence_where_x = compute_sentence_where_x(&chunks);
-    let mut defs: Vec<AbilityDefinition> = Vec::new();
+    let mut clauses: Vec<ClauseIr> = Vec::new();
 
     // CR 608.2c + CR 117.3a: "Anchor subject" for chain-level anaphoric
     // inheritance. When a clause in the chain declares an explicit player-scope
@@ -6633,6 +7411,7 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
     // player performs the action. Only propagates within a single sentence /
     // chain; the anchor is reset at each top-level call.
     let mut anchor_subject: Option<TargetFilter> = None;
+    let mut chunk_diagnostics: Vec<OracleDiagnostic> = Vec::new();
 
     for (chunk_idx, chunk) in chunks.iter().enumerate() {
         let normalized_text = strip_leading_sequence_connector(&chunk.text).trim();
@@ -6644,6 +7423,12 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
         // for 1v1. Strip the prefix so the remaining effect text is parsed normally.
         let normalized_text = {
             let temp_lower = normalized_text.to_lowercase();
+            if tag::<_, _, OracleError<'_>>("starting with you")
+                .parse(temp_lower.as_str())
+                .is_ok_and(|(rest, _)| rest.trim().is_empty())
+            {
+                continue;
+            }
             nom_on_lower(normalized_text, &temp_lower, |i| {
                 value((), tag("starting with you, ")).parse(i)
             })
@@ -6659,9 +7444,30 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
         // Sage's Scion: the granted card is cast by paying life equal to its
         // mana value instead of paying its mana cost.
         if let Some(cost) = try_parse_alt_cost_rider(normalized_text) {
-            if attach_alt_cost_to_prior_cast_from_zone(&mut defs, cost) {
-                continue;
-            }
+            clauses.push(ClauseIr {
+                parsed: parsed_clause(Effect::Unimplemented {
+                    name: "alt_cost_rider_placeholder".to_string(),
+                    description: None,
+                }),
+                boundary: chunk.boundary_after,
+                condition: None,
+                is_optional: false,
+                opponent_may_scope: None,
+                repeat_for: None,
+                player_scope: None,
+                delayed_condition: None,
+                prefix_delayed_condition: None,
+                intrinsic_continuation: None,
+                followup_continuation: None,
+                absorbed_by_followup: false,
+                multi_target: None,
+                where_x_expression: None,
+                is_otherwise: false,
+                unless_pay: None,
+                special: Some(SpecialClause::AltCostRider(cost)),
+                source_text: normalized_text.to_string(),
+            });
+            continue;
         }
 
         // CR 608.2c: "Otherwise, [effect]" — attach as else_ability on the
@@ -6681,27 +7487,40 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
             .parse(i)
         });
         if let Some((_, else_text)) = otherwise_rest {
-            let else_def = parse_effect_chain_impl(else_text, kind, ctx);
-            // Walk defs backward to find the most recent conditional
-            let has_condition = defs.iter().any(|d| d.condition.is_some());
-            if has_condition {
-                for d in defs.iter_mut().rev() {
-                    if d.condition.is_some() {
-                        d.else_ability = Some(Box::new(else_def));
-                        break;
-                    }
-                }
+            let else_def = {
+                let ir = parse_effect_chain_ir(else_text, kind, ctx);
+                lower_effect_chain_ir(&ir)
+            };
+            // Check whether a prior clause has a condition — lowering will attach as else_ability
+            let has_condition = clauses.iter().any(|c| c.condition.is_some());
+            let special = if has_condition {
+                SpecialClause::Otherwise(Box::new(else_def))
             } else {
-                // Fallback: no IfYouDo found — emit as Unimplemented to preserve coverage
-                defs.push(AbilityDefinition::new(
-                    kind,
-                    Effect::Unimplemented {
-                        name: "otherwise".to_string(),
-                        description: Some("Otherwise".to_string()),
-                    },
-                ));
-                defs.push(else_def);
-            }
+                SpecialClause::OtherwiseFallback(Box::new(else_def))
+            };
+            clauses.push(ClauseIr {
+                parsed: parsed_clause(Effect::Unimplemented {
+                    name: "otherwise_placeholder".to_string(),
+                    description: None,
+                }),
+                boundary: chunk.boundary_after,
+                condition: None,
+                is_optional: false,
+                opponent_may_scope: None,
+                repeat_for: None,
+                player_scope: None,
+                delayed_condition: None,
+                prefix_delayed_condition: None,
+                intrinsic_continuation: None,
+                followup_continuation: None,
+                absorbed_by_followup: false,
+                multi_target: None,
+                where_x_expression: None,
+                is_otherwise: true,
+                unless_pay: None,
+                special: Some(special),
+                source_text: normalized_text.to_string(),
+            });
             continue;
         }
 
@@ -6713,7 +7532,7 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
         // Also handles "you may repeat this process" and "if you do, repeat this process".
         if nom_on_lower(normalized_text, &lower_check, |i| {
             let (i, _) = nom::combinator::opt(alt((
-                tag::<_, _, VerboseError<&str>>("you may "),
+                tag::<_, _, OracleError<'_>>("you may "),
                 tag("if you do, "),
                 tag("if you do "),
             )))
@@ -6737,8 +7556,61 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
         if let Some(rider_def) =
             try_parse_die_exile_rider(rider_lower.trim_end_matches('.').trim(), kind)
         {
-            if let Some(last_def) = defs.last_mut() {
-                last_def.sub_ability = Some(Box::new(rider_def));
+            if !clauses.is_empty() {
+                clauses.push(ClauseIr {
+                    parsed: parsed_clause(Effect::Unimplemented {
+                        name: "die_exile_rider_placeholder".to_string(),
+                        description: None,
+                    }),
+                    boundary: chunk.boundary_after,
+                    condition: None,
+                    is_optional: false,
+                    opponent_may_scope: None,
+                    repeat_for: None,
+                    player_scope: None,
+                    delayed_condition: None,
+                    prefix_delayed_condition: None,
+                    intrinsic_continuation: None,
+                    followup_continuation: None,
+                    absorbed_by_followup: false,
+                    multi_target: None,
+                    where_x_expression: None,
+                    is_otherwise: false,
+                    unless_pay: None,
+                    special: Some(SpecialClause::DieExileRider(Box::new(rider_def))),
+                    source_text: normalized_text.to_string(),
+                });
+                continue;
+            }
+        }
+
+        if let Some(life_payment) =
+            try_parse_drawn_this_turn_pay_or_topdeck_followup(normalized_text)
+        {
+            if !clauses.is_empty() {
+                clauses.push(ClauseIr {
+                    parsed: parsed_clause(Effect::Unimplemented {
+                        name: "drawn_this_turn_pay_or_topdeck_placeholder".to_string(),
+                        description: None,
+                    }),
+                    boundary: chunk.boundary_after,
+                    condition: None,
+                    is_optional: false,
+                    opponent_may_scope: None,
+                    repeat_for: None,
+                    player_scope: None,
+                    delayed_condition: None,
+                    prefix_delayed_condition: None,
+                    intrinsic_continuation: None,
+                    followup_continuation: None,
+                    absorbed_by_followup: false,
+                    multi_target: None,
+                    where_x_expression: None,
+                    is_otherwise: false,
+                    unless_pay: None,
+                    special: Some(SpecialClause::DrawnThisTurnPayOrTopdeck { life_payment }),
+                    source_text: normalized_text.to_string(),
+                });
                 continue;
             }
         }
@@ -6749,55 +7621,143 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
         // Checked before the generic "instead" clause because the body starts with
         // "you may instead ..." rather than a bare "instead ..." prefix/suffix and
         // carries no standalone effect — it patches the preceding Dig.
-        if let Some(alt_def) = try_parse_dig_instead_alternative(normalized_text, defs.last(), kind)
         {
-            if let Some(last_def) = defs.pop() {
-                let mut new_def = alt_def;
-                new_def.else_ability = Some(Box::new(last_def));
-                defs.push(new_def);
-                continue;
+            // Build a temporary AbilityDefinition from the last non-absorbed clause's
+            // effect to pass to try_parse_dig_instead_alternative (which inspects the
+            // previous effect to check it's a Dig). Must skip absorbed clauses — in the
+            // old code, absorbed chunks are not in `defs`, so `defs.last()` is the Dig.
+            let prev_temp = clauses
+                .iter()
+                .rev()
+                .find(|c| !c.absorbed_by_followup)
+                .map(|c| AbilityDefinition::new(kind, c.parsed.effect.clone()));
+            if let Some(alt_def) =
+                try_parse_dig_instead_alternative(normalized_text, prev_temp.as_ref(), kind, ctx)
+            {
+                if !clauses.is_empty() {
+                    // Store the alt_def's effect as `parsed.effect` so followup continuation
+                    // matching (e.g., PutRest for "put the rest on the bottom") can see that
+                    // the effective last clause is a Dig. In the old code, `defs.last()` was
+                    // the alt_def (a Dig) after the DigInsteadAlt was processed.
+                    clauses.push(ClauseIr {
+                        parsed: parsed_clause((*alt_def.effect).clone()),
+                        boundary: chunk.boundary_after,
+                        condition: None,
+                        is_optional: false,
+                        opponent_may_scope: None,
+                        repeat_for: None,
+                        player_scope: None,
+                        delayed_condition: None,
+                        prefix_delayed_condition: None,
+                        intrinsic_continuation: None,
+                        followup_continuation: None,
+                        absorbed_by_followup: false,
+                        multi_target: None,
+                        where_x_expression: None,
+                        is_otherwise: false,
+                        unless_pay: None,
+                        special: Some(SpecialClause::DigInsteadAlt(Box::new(alt_def))),
+                        source_text: normalized_text.to_string(),
+                    });
+                    continue;
+                }
             }
         }
 
         if let Some((is_win, effect_text)) = imperative::try_parse_coin_flip_branch(normalized_text)
         {
-            let branch_def = parse_effect_chain_impl(effect_text, kind, ctx);
-            defs.push(AbilityDefinition::new(
-                kind,
-                if is_win {
-                    Effect::FlipCoin {
-                        win_effect: Some(Box::new(branch_def)),
-                        lose_effect: None,
-                    }
-                } else {
-                    Effect::FlipCoin {
-                        win_effect: None,
-                        lose_effect: Some(Box::new(branch_def)),
-                    }
-                },
-            ));
+            let branch_def = {
+                let ir = parse_effect_chain_ir(effect_text, kind, ctx);
+                lower_effect_chain_ir(&ir)
+            };
+            let flip_effect = if is_win {
+                Effect::FlipCoin {
+                    win_effect: Some(Box::new(branch_def)),
+                    lose_effect: None,
+                }
+            } else {
+                Effect::FlipCoin {
+                    win_effect: None,
+                    lose_effect: Some(Box::new(branch_def)),
+                }
+            };
+            clauses.push(ClauseIr {
+                parsed: parsed_clause(flip_effect),
+                boundary: chunk.boundary_after,
+                condition: None,
+                is_optional: false,
+                opponent_may_scope: None,
+                repeat_for: None,
+                player_scope: None,
+                delayed_condition: None,
+                prefix_delayed_condition: None,
+                intrinsic_continuation: None,
+                followup_continuation: None,
+                absorbed_by_followup: false,
+                multi_target: None,
+                where_x_expression: None,
+                is_otherwise: false,
+                unless_pay: None,
+                special: None,
+                source_text: normalized_text.to_string(),
+            });
             continue;
         }
 
         if let Some(effect) =
             try_parse_next_time_source_damage_replacement(&normalized_text.to_lowercase())
         {
-            defs.push(AbilityDefinition::new(kind, effect));
+            clauses.push(ClauseIr {
+                parsed: parsed_clause(effect),
+                boundary: chunk.boundary_after,
+                condition: None,
+                is_optional: false,
+                opponent_may_scope: None,
+                repeat_for: None,
+                player_scope: None,
+                delayed_condition: None,
+                prefix_delayed_condition: None,
+                intrinsic_continuation: None,
+                followup_continuation: None,
+                absorbed_by_followup: false,
+                multi_target: None,
+                where_x_expression: None,
+                is_otherwise: false,
+                unless_pay: None,
+                special: None,
+                source_text: normalized_text.to_string(),
+            });
             continue;
         }
 
         // CR 608.2e: "if [condition], [effect] instead" — the preceding ability's effect
         // is replaced when the condition holds. Keep the base effect as the root so
         // target collection stays anchored on the printed target-bearing clause.
-        if let Some(mut instead_def) = try_parse_generic_instead_clause(normalized_text, kind) {
-            if let Some(mut last_def) = defs.pop() {
-                // CR 702.33d + CR 707.10: Resolve "create N of those tokens" anaphor
-                // against the fallback (else_ability) effect before composition, since
-                // the instead clause was parsed in isolation by the nested chain call
-                // and could not see its antecedent.
-                rewrite_those_tokens_from_antecedent(&mut instead_def.effect, &last_def.effect);
-                last_def.sub_ability = Some(Box::new(instead_def));
-                defs.push(last_def);
+        if let Some(instead_def) = try_parse_generic_instead_clause(normalized_text, kind, ctx) {
+            if !clauses.is_empty() {
+                clauses.push(ClauseIr {
+                    parsed: parsed_clause(Effect::Unimplemented {
+                        name: "instead_clause_placeholder".to_string(),
+                        description: None,
+                    }),
+                    boundary: chunk.boundary_after,
+                    condition: None,
+                    is_optional: false,
+                    opponent_may_scope: None,
+                    repeat_for: None,
+                    player_scope: None,
+                    delayed_condition: None,
+                    prefix_delayed_condition: None,
+                    intrinsic_continuation: None,
+                    followup_continuation: None,
+                    absorbed_by_followup: false,
+                    multi_target: None,
+                    where_x_expression: None,
+                    is_otherwise: false,
+                    unless_pay: None,
+                    special: Some(SpecialClause::InsteadClause(Box::new(instead_def))),
+                    source_text: normalized_text.to_string(),
+                });
                 continue;
             }
         }
@@ -6807,7 +7767,7 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
         // Runs only when no dedicated leading stripper matched. Handles patterns like
         // "if you control 3 or more creatures, draw a card".
         let (leading_cond, text) = if condition.is_none() {
-            strip_leading_general_conditional(&text)
+            strip_leading_general_conditional(&text, ctx)
         } else {
             (None, text)
         };
@@ -6901,7 +7861,7 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
             && turn_cond.is_none()
             && keyword_instead_cond.is_none()
         {
-            strip_suffix_conditional(&text)
+            strip_suffix_conditional(&text, ctx)
         } else {
             (None, text)
         };
@@ -6919,7 +7879,7 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
         // CR 608.2c + CR 400.7: "unless ~ entered this turn" — strip suffix and
         // replace condition with SourceDidNotEnterThisTurn. The IfYouDo condition
         // is redundant when the parent is optional (optional already gates the sub).
-        let (unless_entered, text) = strip_unless_entered_suffix(&text);
+        let (unless_entered, text) = strip_unless_entered_suffix(&text, ctx);
         let condition = if unless_entered.is_some() {
             unless_entered
         } else {
@@ -6933,89 +7893,67 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
         } else {
             text
         };
+        // CR 608.2c: A leading "if [condition], ..." scopes over the whole
+        // conditional instruction, including comma/then subclauses in the body.
+        // Split the stripped body recursively so "If ..., exile it, then put it
+        // ..." emits both guarded zone-change effects instead of letting the
+        // first imperative parser swallow the tail.
+        if let Some(ref outer_condition) = condition {
+            let body_chunks = split_clause_sequence(&text);
+            if body_chunks.len() > 1 {
+                let mut body_ir = parse_effect_chain_ir(&text, kind, ctx);
+                if let Some(last) = body_ir.clauses.last_mut() {
+                    if last.boundary.is_none() {
+                        last.boundary = chunk.boundary_after;
+                    }
+                }
+                for clause in &mut body_ir.clauses {
+                    apply_outer_condition_to_clause(outer_condition, clause);
+                }
+                clauses.extend(body_ir.clauses);
+                continue;
+            }
+        }
         // CR 508.4 / CR 614.1: "If [condition], they/those tokens/it enter(s) tapped and
         // attacking" — conditional modifier on preceding Token/CopyTokenOf/ChangeZone.
         // Model as an "instead" swap: the modified Token (with tapped+attacking set)
-        // replaces the original when the condition holds.
+        // replaces the original when the condition holds. Lowering handles the patching.
         {
             let enters_lower = text.to_lowercase();
             if condition.is_some()
                 && nom_primitives::scan_contains(&enters_lower, "enter tapped and attacking")
             {
-                if let Some(prev) = defs.last() {
-                    // These are the only effects with `enters_attacking` + `tapped`/`enter_tapped` fields.
+                if let Some(prev) = clauses.last() {
                     let can_patch = matches!(
-                        &*prev.effect,
+                        prev.parsed.effect,
                         Effect::CopyTokenOf { .. }
                             | Effect::Token { .. }
                             | Effect::ChangeZone { .. }
                     );
                     if can_patch {
-                        let mut patched = defs.pop().unwrap();
-                        match &mut *patched.effect {
-                            Effect::CopyTokenOf {
-                                enters_attacking,
-                                tapped,
-                                ..
-                            } => {
-                                *enters_attacking = true;
-                                *tapped = true;
-                            }
-                            Effect::Token {
-                                enters_attacking,
-                                tapped,
-                                ..
-                            } => {
-                                *enters_attacking = true;
-                                *tapped = true;
-                            }
-                            Effect::ChangeZone {
-                                enters_attacking,
-                                enter_tapped,
-                                ..
-                            } => {
-                                *enters_attacking = true;
-                                *enter_tapped = true;
-                            }
-                            _ => {}
-                        }
-                        // Convert to "instead" swap: patched Token becomes the sub_ability
-                        // that fires when the condition holds; the original becomes else_ability
-                        // (the fallback when condition is false).
-                        let original = {
-                            let mut orig = patched.clone();
-                            match &mut *orig.effect {
-                                Effect::CopyTokenOf {
-                                    enters_attacking,
-                                    tapped,
-                                    ..
-                                } => {
-                                    *enters_attacking = false;
-                                    *tapped = false;
-                                }
-                                Effect::Token {
-                                    enters_attacking,
-                                    tapped,
-                                    ..
-                                } => {
-                                    *enters_attacking = false;
-                                    *tapped = false;
-                                }
-                                Effect::ChangeZone {
-                                    enters_attacking,
-                                    enter_tapped,
-                                    ..
-                                } => {
-                                    *enters_attacking = false;
-                                    *enter_tapped = false;
-                                }
-                                _ => {}
-                            }
-                            orig
-                        };
-                        patched.condition = condition;
-                        patched.else_ability = Some(Box::new(original));
-                        defs.push(patched);
+                        clauses.push(ClauseIr {
+                            parsed: parsed_clause(Effect::Unimplemented {
+                                name: "enters_tapped_attacking_placeholder".to_string(),
+                                description: None,
+                            }),
+                            boundary: chunk.boundary_after,
+                            condition,
+                            is_optional: false,
+                            opponent_may_scope: None,
+                            repeat_for: None,
+                            player_scope: None,
+                            delayed_condition: None,
+                            prefix_delayed_condition: None,
+                            intrinsic_continuation: None,
+                            followup_continuation: None,
+                            absorbed_by_followup: false,
+                            multi_target: None,
+                            where_x_expression: None,
+                            is_otherwise: false,
+                            unless_pay: None,
+                            special: Some(SpecialClause::EntersTappedAttacking),
+                            source_text: normalized_text.to_string(),
+                        });
                         continue;
                     }
                 }
@@ -7043,10 +7981,25 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
         };
         let repeat_for = repeat_for.or(repeat_count);
         let (player_scope, text) = strip_player_scope_subject(&text);
+        let carried_player_scope = if player_scope.is_none()
+            && !sequence::starts_clause_text(&text)
+            && sequence::starts_clause_text_or_conjugated(&text)
+        {
+            clauses
+                .iter()
+                .rev()
+                .find(|clause| !clause.absorbed_by_followup)
+                .and_then(|clause| clause.player_scope)
+        } else {
+            None
+        };
         // CR 608.2d: When the optional prefix ("each opponent may") carries an
         // implicit per-player iteration, propagate it to the ability so the
         // OptionalEffectChoice is emitted once per matching player.
-        let player_scope = player_scope.or(implicit_player_scope);
+        let mut player_scope = player_scope
+            .or(implicit_player_scope)
+            .or(carried_player_scope);
+        let (text, unless_pay) = extract_resolution_unless_pay_modifier(&text);
 
         // CR 701.21a + CR 608.2k: Derive the actor performing this chunk's effect
         // from any actor prefix that was just stripped ("you (may) ", "an
@@ -7065,12 +8018,13 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
             _ => None,
         }
         .or_else(|| ctx.actor.clone());
+        let if_you_do_anchor = if_you_do_object_anchor(&clauses, &condition);
         let chunk_subject = if condition.as_ref().is_some_and(condition_refs_source_object) {
             Some(TargetFilter::SelfRef)
         } else {
-            ctx.subject.clone()
+            if_you_do_anchor.clone().or_else(|| ctx.subject.clone())
         };
-        let chunk_ctx = ParseContext {
+        let mut chunk_ctx = ParseContext {
             subject: chunk_subject,
             card_name: ctx.card_name.clone(),
             // CR 707.9a + CR 603.1: propagate the trigger index from the parent
@@ -7081,8 +8035,16 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
             // is per-chunk (re-derived from each chunk's stripped prefix above).
             current_trigger_index: ctx.current_trigger_index,
             actor: chunk_actor,
+            // CR 109.4 + CR 115.1 + CR 506.2: propagate relative-player scope
+            // from the trigger condition so "that player controls" inside any
+            // chunk resolves to TargetPlayer rather than defaulting to You.
+            relative_player_scope: ctx
+                .relative_player_scope
+                .clone()
+                .or_else(|| player_scope.map(|_| ControllerRef::ScopedPlayer)),
+            ..Default::default()
         };
-        let ctx = &chunk_ctx;
+        let ctx = &mut chunk_ctx;
 
         // CR 603.7a: Check for temporal prefix before suffix. When present, parse the
         // inner effect through the full pipeline and wrap in CreateDelayedTrigger.
@@ -7111,7 +8073,7 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
             }
             apply_where_x_ability_expression(&mut inner_def, where_x_expression.as_deref());
             let delayed_effect = Effect::CreateDelayedTrigger {
-                condition: prefix_condition,
+                condition: prefix_condition.clone(),
                 effect: Box::new(inner_def),
                 uses_tracked_set: false,
             };
@@ -7123,7 +8085,7 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
                 player_scope: player_scope.as_ref(),
                 clause_duration: None,
             };
-            let mut def = AbilityDefinition::new(kind, delayed_effect);
+            let mut def = AbilityDefinition::new(kind, delayed_effect.clone());
             if is_optional {
                 def.optional = true;
                 def.optional_for = opponent_may_scope;
@@ -7131,8 +8093,37 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
             if let Some(ref condition) = condition {
                 def = def.condition(condition.clone());
             }
-            super::swallow_check::check_cascade_diff(&cascade_snap, std::slice::from_ref(&def));
-            defs.push(def);
+            {
+                let mut cascade_diags = Vec::new();
+                super::swallow_check::check_cascade_diff(
+                    &cascade_snap,
+                    std::slice::from_ref(&def),
+                    &mut cascade_diags,
+                );
+                for d in cascade_diags {
+                    ctx.push_diagnostic(d);
+                }
+            }
+            clauses.push(ClauseIr {
+                parsed: parsed_clause(delayed_effect),
+                boundary: chunk.boundary_after,
+                condition: condition.clone(),
+                is_optional,
+                opponent_may_scope,
+                repeat_for: repeat_for.clone(),
+                player_scope,
+                delayed_condition: None,
+                prefix_delayed_condition: Some(prefix_condition),
+                intrinsic_continuation: None,
+                followup_continuation: None,
+                absorbed_by_followup: false,
+                multi_target: None,
+                where_x_expression: where_x_expression.clone(),
+                is_otherwise: false,
+                unless_pay: None,
+                special: None,
+                source_text: normalized_text.to_string(),
+            });
             continue;
         }
 
@@ -7147,12 +8138,49 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
                 player_scope: player_scope.as_ref(),
                 clause_duration: None,
             };
-            let mut def = animate_def;
+            let mut def = animate_def.clone();
             if let Some(ref condition) = condition {
                 def = def.condition(condition.clone());
             }
-            super::swallow_check::check_cascade_diff(&cascade_snap, std::slice::from_ref(&def));
-            defs.push(def);
+            {
+                let mut cascade_diags = Vec::new();
+                super::swallow_check::check_cascade_diff(
+                    &cascade_snap,
+                    std::slice::from_ref(&def),
+                    &mut cascade_diags,
+                );
+                for d in cascade_diags {
+                    ctx.push_diagnostic(d);
+                }
+            }
+            clauses.push(ClauseIr {
+                parsed: ParsedEffectClause {
+                    effect: (*animate_def.effect).clone(),
+                    duration: animate_def.duration.clone(),
+                    sub_ability: animate_def.sub_ability.clone(),
+                    distribute: animate_def.distribute,
+                    multi_target: animate_def.multi_target.clone(),
+                    condition: animate_def.condition.clone(),
+                    optional: animate_def.optional,
+                },
+                boundary: chunk.boundary_after,
+                condition: condition.clone(),
+                is_optional,
+                opponent_may_scope,
+                repeat_for: repeat_for.clone(),
+                player_scope,
+                delayed_condition: None,
+                prefix_delayed_condition: None,
+                intrinsic_continuation: None,
+                followup_continuation: None,
+                absorbed_by_followup: false,
+                multi_target: None,
+                where_x_expression: None,
+                is_otherwise: false,
+                unless_pay: None,
+                special: None,
+                source_text: normalized_text.to_string(),
+            });
             continue;
         }
 
@@ -7174,13 +8202,13 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
         // Handles patterns like "destroy target artifact, target creature, ..." (Decimate).
         let text_no_qty_lower = text_no_qty.to_lowercase();
         let clause = if matches!(clause.effect, Effect::Unimplemented { .. })
-            && tag::<_, _, VerboseError<&str>>("target ")
+            && tag::<_, _, OracleError<'_>>("target ")
                 .parse(text_no_qty_lower.as_str())
                 .is_ok()
         {
-            if let Some(verb) = defs
+            if let Some(verb) = clauses
                 .last()
-                .and_then(|prev| extract_effect_verb(&prev.effect))
+                .and_then(|prev| extract_effect_verb(&prev.parsed.effect))
             {
                 let reparsed_text = format!("{verb} {text_no_qty}");
                 let reparsed = parse_effect_clause(&reparsed_text, ctx);
@@ -7197,166 +8225,693 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
         };
 
         // CR 608.2c + CR 117.3a: Anchor-subject inheritance. Before this chunk is
-        // lowered into an AbilityDefinition, check whether a caster-defaulted
-        // player-scope effect should inherit a previously-declared subject
-        // (e.g., "then shuffle" after "its controller may search their library"
-        // → Shuffle inherits the ParentTargetController anchor). Only
-        // overrides when the effect still carries the caster default (Controller).
+        // stored in the IR, check whether a caster-defaulted player-scope effect
+        // should inherit a previously-declared subject (e.g., "then shuffle" after
+        // "its controller may search their library" → Shuffle inherits the
+        // ParentTargetController anchor). Only overrides when the effect still
+        // carries the caster default (Controller). Per D-04, this is parse-time
+        // pronoun resolution that belongs in IR production.
         let mut clause = clause;
+        if nom_primitives::scan_contains(&text.to_lowercase(), "villainous choice") {
+            if let (Effect::ChooseOneOf { chooser, .. }, Some(scope)) =
+                (&mut clause.effect, player_scope)
+            {
+                *chooser = scope;
+                player_scope = None;
+            }
+        }
         if let Some(ref anchor) = anchor_subject {
             apply_anchor_subject(&mut clause.effect, anchor);
         }
 
-        // CR 608.2c: TargetOnly is a structural wrapper — its sub_ability is the action
-        // to perform on the target. Preserve this relationship rather than flattening.
-        let is_target_only = matches!(clause.effect, Effect::TargetOnly { .. });
         // Update anchor from this clause's subject (e.g., SearchLibrary.target_player
         // set to a non-caster player-scope filter).
         if let Some(extracted) = extract_player_anchor(&clause.effect) {
             anchor_subject = Some(extracted);
         }
-        let mut def = AbilityDefinition::new(kind, clause.effect);
-        let clause_sub = if is_target_only {
-            def.sub_ability = clause.sub_ability;
-            None
-        } else {
-            clause.sub_ability
-        };
-        if is_optional {
-            def.optional = true;
-            def.optional_for = opponent_may_scope;
-        }
-        // CR 117.3a + CR 608.2c: Propagate subject-phrase "may" modal from the
-        // parsed clause (e.g., "its controller may search their library").
-        if clause.optional {
-            def.optional = true;
-        }
-        if let Some(qty) = repeat_for.clone() {
-            if matches!(*def.effect, Effect::TargetOnly { .. }) {
-                if let Some(sub) = def.sub_ability.as_mut() {
-                    sub.repeat_for = Some(qty);
-                } else {
-                    def.repeat_for = Some(qty);
-                }
-            } else {
-                def.repeat_for = Some(qty);
-            }
-        }
-        if let Some(scope) = player_scope {
-            def.player_scope = Some(scope);
-        }
-        if let Some(duration) = clause.duration.clone() {
-            def = def.duration(duration);
-        }
-        // CR 608.2c: Apply condition — chain-level takes priority over clause-level.
-        let effective_condition = condition.as_ref().or(clause.condition.as_ref());
-        if let Some(cond) = effective_condition {
-            def = def.condition(cond.clone());
-        }
-        // CR 115.1d: Apply multi-target spec — prefer strip_any_number_quantifier result,
-        // fall back to clause-level spec (distribute parsers return early before the strip runs).
-        if let Some(ref spec) = multi_target {
-            def = def.multi_target(spec.clone());
-        } else if let Some(spec) = clause.multi_target {
-            def = def.multi_target(spec);
-        }
-        // CR 601.2d: Propagate distribute flag from parsed clause to definition.
-        if let Some(unit) = clause.distribute {
-            def = def.distribute(unit);
-        }
 
-        // Kicker clauses referencing "that creature"/"it" inherit the parent's target.
-        // Scoped to conditional sub-abilities only — "it"/"its" appears in possessive
-        // forms on many cards and would incorrectly replace targets if applied generally.
+        // Anaphoric resolution: parse-time pronoun→parent-target rewrites.
+        // These modify the parsed effect based on text analysis and previous
+        // clause context — parse-time work that belongs in IR production.
         let text_lower = text.to_lowercase();
+        // Kicker clauses referencing "that creature"/"it" inherit the parent's target.
         if condition.is_some()
             && !condition.as_ref().is_some_and(condition_refs_source_object)
-            && !defs.is_empty()
+            && !clauses.is_empty()
             && has_anaphoric_reference(&text_lower)
-            && !replace_fight_subject_with_parent_if_anaphoric_subject(&text_lower, &mut def.effect)
+            && !matches!(if_you_do_anchor, Some(TargetFilter::SelfRef))
+            && !replace_fight_subject_with_parent_if_anaphoric_subject(
+                &text_lower,
+                &mut clause.effect,
+            )
         {
-            replace_target_with_parent(&mut def.effect);
+            replace_target_with_parent(&mut clause.effect);
         }
         // CR 608.2c: Pronoun clause following a conditional targeted effect.
-        // "It gains trample" after "[condition] put a +1/+1 counter on target creature"
-        // — the "it" refers to the same target creature, not the ability source.
         if condition.is_none()
-            && defs
-                .last()
-                .is_some_and(|prev| prev.condition.is_some() && has_typed_target(&prev.effect))
+            && clauses.last().is_some_and(|prev| {
+                prev.condition.is_some() && has_typed_target(&prev.parsed.effect)
+            })
             && has_anaphoric_reference(&text_lower)
-            && !replace_fight_subject_with_parent_if_anaphoric_subject(&text_lower, &mut def.effect)
+            && !replace_fight_subject_with_parent_if_anaphoric_subject(
+                &text_lower,
+                &mut clause.effect,
+            )
         {
-            replace_target_with_parent(&mut def.effect);
+            replace_target_with_parent(&mut clause.effect);
         }
         // CR 608.2c: Pronoun clause following an unconditional targeted effect.
-        // "Tap target creature. Put two stun counters on it." — "it" refers to the
-        // tapped creature from the previous sentence, not the ability source.
         if condition.is_none()
-            && defs
-                .last()
-                .is_some_and(|prev| prev.condition.is_none() && has_typed_target(&prev.effect))
+            && clauses.last().is_some_and(|prev| {
+                prev.condition.is_none() && has_typed_target(&prev.parsed.effect)
+            })
             && has_anaphoric_reference(&text_lower)
-            && !replace_fight_subject_with_parent_if_anaphoric_subject(&text_lower, &mut def.effect)
+            && !replace_fight_subject_with_parent_if_anaphoric_subject(
+                &text_lower,
+                &mut clause.effect,
+            )
         {
-            replace_target_with_parent(&mut def.effect);
+            replace_target_with_parent(&mut clause.effect);
         }
 
-        // CR 608.2e: "Instead" overrides — attach as sub_ability on the previous def,
-        // not as a standalone def. The Cow swap in effects/mod.rs handles the resolution.
+        if condition
+            .as_ref()
+            .is_some_and(condition_refs_cost_paid_object)
+        {
+            rewrite_cost_paid_object_quantities(&mut clause.effect);
+        }
+
+        // CR 608.2e: "Instead" overrides — marker for lowering to attach as
+        // sub_ability on the previous def.
         if matches!(
             condition,
             Some(AbilityCondition::TargetHasKeywordInstead { .. })
         ) {
-            if let Some(prev) = defs.last_mut() {
-                prev.sub_ability = Some(Box::new(def));
+            // Build the def that lowering will attach — apply condition + effect
+            let mut instead_def = AbilityDefinition::new(kind, clause.effect.clone());
+            if let Some(ref cond) = condition {
+                instead_def = instead_def.condition(cond.clone());
+            }
+            clauses.push(ClauseIr {
+                parsed: clause,
+                boundary: chunk.boundary_after,
+                condition,
+                is_optional,
+                opponent_may_scope,
+                repeat_for,
+                player_scope,
+                delayed_condition: None,
+                prefix_delayed_condition: None,
+                intrinsic_continuation: None,
+                followup_continuation: None,
+                absorbed_by_followup: false,
+                multi_target,
+                where_x_expression,
+                is_otherwise: false,
+                unless_pay: None,
+                special: Some(SpecialClause::KeywordInsteadOverride),
+                source_text: normalized_text.to_string(),
+            });
+            continue;
+        }
+
+        // CR 608.2e: AdditionalCostPaidInstead + SearchLibrary pattern.
+        // In the old code, the trailing ChangeZone was an explicit def produced by the
+        // SearchDestination intrinsic continuation. In the IR, the ChangeZone is implicit
+        // in the SearchLibrary clause's intrinsic_continuation field. We check for either:
+        // (a) a separate ChangeZone clause (shouldn't happen in new code), or
+        // (b) a SearchLibrary clause with a SearchDestination { destination: Hand } continuation.
+        let effective_condition = condition.as_ref().or(clause.condition.as_ref());
+        if matches!(
+            effective_condition,
+            Some(AbilityCondition::AdditionalCostPaidInstead)
+        ) && matches!(clause.effect, Effect::SearchLibrary { .. })
+            && !clauses.is_empty()
+        {
+            // Find the last non-absorbed clause — it should be a SearchLibrary with
+            // a SearchDestination(Hand) intrinsic continuation.
+            let prev_non_absorbed = clauses.iter().rev().find(|c| !c.absorbed_by_followup);
+            let previous_is_search_with_hand_dest = prev_non_absorbed.is_some_and(|c| {
+                matches!(c.parsed.effect, Effect::SearchLibrary { .. })
+                    && matches!(
+                        c.intrinsic_continuation,
+                        Some(ContinuationAst::SearchDestination {
+                            destination: Zone::Hand,
+                            ..
+                        })
+                    )
+            });
+            if previous_is_search_with_hand_dest {
+                // Compute intrinsic continuation for this SearchLibrary too —
+                // it needs its own SearchDestination.
+                let temp_def = AbilityDefinition::new(kind, clause.effect.clone());
+                let ic = parse_intrinsic_continuation_ast(
+                    normalized_text,
+                    intrinsic_continuation_effect(&temp_def),
+                    full_text,
+                );
+                clauses.push(ClauseIr {
+                    parsed: clause,
+                    boundary: chunk.boundary_after,
+                    condition,
+                    is_optional,
+                    opponent_may_scope,
+                    repeat_for,
+                    player_scope,
+                    delayed_condition: None,
+                    prefix_delayed_condition: None,
+                    intrinsic_continuation: ic,
+                    followup_continuation: None,
+                    absorbed_by_followup: false,
+                    multi_target,
+                    where_x_expression,
+                    is_otherwise: false,
+                    unless_pay: None,
+                    special: Some(SpecialClause::AdditionalCostInsteadSearch),
+                    source_text: normalized_text.to_string(),
+                });
+                continue;
+            }
+        }
+
+        // CR 603.7: Cross-clause pronoun → mark uses_tracked_set flag.
+        // This needs to check the PREVIOUS clause's effect for exile/token-creating.
+        let needs_tracked_set = clauses
+            .iter()
+            .rev()
+            .find(|c| !c.absorbed_by_followup)
+            .is_some_and(|previous| {
+                (is_exile_effect(&previous.parsed.effect)
+                    || is_token_creating_effect(&previous.parsed.effect))
+                    && (contains_explicit_tracked_set_pronoun(&lower_check)
+                        || contains_implicit_tracked_set_pronoun(&lower_check))
+            });
+
+        // Continuation recognition — store on ClauseIr, application moves to lowering.
+        //
+        // The followup continuation check needs the "effective last effect" — i.e., what
+        // `defs.last()` would look like in the old code after intrinsic/followup continuation
+        // application. Two adjustments are needed vs. simply using `clauses.last().parsed.effect`:
+        //
+        // 1. Skip absorbed clauses: in the old code, absorbed chunks are not pushed to `defs`,
+        //    so `defs.last()` remains the clause that absorbed them. In our IR, absorbed clauses
+        //    ARE stored (for lowering), so we must skip them when finding the "effective previous."
+        //
+        // 2. Simulate intrinsic continuation: when the previous clause has an intrinsic
+        //    continuation (e.g., SearchDestination), the continuation adds new defs (e.g.,
+        //    ChangeZone) that become `defs.last()`. We must simulate this to match followup
+        //    patterns that absorb paraphrase chunks (e.g., "put it onto the battlefield"
+        //    after SearchLibrary).
+        let effective_prev = clauses.iter().rev().find(|c| !c.absorbed_by_followup);
+        let effective_prev_effect = effective_prev.map(|previous| {
+            if let Some(ref ic) = previous.intrinsic_continuation {
+                // Build a temporary defs list, apply the continuation, and use the last effect.
+                let mut temp_defs =
+                    vec![AbilityDefinition::new(kind, previous.parsed.effect.clone())];
+                apply_clause_continuation(&mut temp_defs, ic.clone(), kind);
+                (*temp_defs.last().unwrap().effect).clone()
+            } else if let Some(ref _fc) = previous.followup_continuation {
+                // A non-absorbed clause with a followup continuation means the continuation
+                // was applied to the clause BEFORE it. Simulate to get patched effect.
+                // Find the clause before `previous` (skip absorbed), apply the followup.
+                // However, the simple case: the continuation patches the previous in place
+                // (e.g., DigFromAmong patches the Dig), so the effective last is still the
+                // previous effect type. For now, just return the raw effect.
+                previous.parsed.effect.clone()
+            } else {
+                previous.parsed.effect.clone()
+            }
+        });
+        let followup_continuation = effective_prev_effect
+            .as_ref()
+            .and_then(|eff| parse_followup_continuation_ast(normalized_text, eff, ctx));
+        let absorb_followup = followup_continuation
+            .as_ref()
+            .is_some_and(|continuation| continuation_absorbs_current(continuation, &clause.effect));
+
+        // Build a temporary def for intrinsic continuation detection and cascade check.
+        // The intrinsic continuation parser needs the assembled effect to determine
+        // what continuation pattern applies.
+        let mut temp_def = AbilityDefinition::new(kind, clause.effect.clone());
+        // Wire sub_ability for TargetOnly unwrapping in intrinsic_continuation_effect.
+        if matches!(clause.effect, Effect::TargetOnly { .. }) {
+            temp_def.sub_ability = clause.sub_ability.clone();
+        }
+        let intrinsic_continuation = parse_intrinsic_continuation_ast(
+            normalized_text,
+            intrinsic_continuation_effect(&temp_def),
+            full_text,
+        );
+
+        // Phase 1.5: cascade-vs-AST structural diff.
+        {
+            let cascade_snap = super::swallow_check::CascadeSnapshot {
+                is_optional,
+                opponent_may_scope: opponent_may_scope.as_ref(),
+                condition: condition.as_ref().or(clause.condition.as_ref()),
+                repeat_for: repeat_for.as_ref(),
+                player_scope: player_scope.as_ref(),
+                clause_duration: clause.duration.as_ref(),
+            };
+            // Build temporary defs for the cascade check
+            let mut check_def = AbilityDefinition::new(kind, clause.effect.clone());
+            if is_optional {
+                check_def.optional = true;
+                check_def.optional_for = opponent_may_scope;
+            }
+            if clause.optional {
+                check_def.optional = true;
+            }
+            if let Some(ref qty) = repeat_for {
+                check_def.repeat_for = Some(qty.clone());
+            }
+            if let Some(ref scope) = player_scope {
+                check_def.player_scope = Some(*scope);
+            }
+            if let Some(ref duration) = clause.duration {
+                check_def = check_def.duration(duration.clone());
+            }
+            if let Some(cond) = condition.as_ref().or(clause.condition.as_ref()) {
+                check_def = check_def.condition(cond.clone());
+            }
+            if let Some(ref spec) = multi_target {
+                check_def = check_def.multi_target(spec.clone());
+            } else if let Some(ref spec) = clause.multi_target {
+                check_def = check_def.multi_target(spec.clone());
+            }
+            if let Some(ref unit) = clause.distribute {
+                check_def = check_def.distribute(unit.clone());
+            }
+            if let Some(ref modifier) = unless_pay {
+                check_def = check_def.unless_pay(modifier.clone());
+            }
+            // Include delayed_condition wrapping for accurate cascade check
+            if let Some(ref delayed_cond) = delayed_condition {
+                let inner = check_def;
+                let lifted_condition = inner.condition.clone();
+                let lifted_optional = inner.optional;
+                let lifted_optional_for = inner.optional_for;
+                let lifted_repeat_for = inner.repeat_for.clone();
+                let lifted_player_scope = inner.player_scope;
+                check_def = AbilityDefinition::new(
+                    kind,
+                    Effect::CreateDelayedTrigger {
+                        condition: delayed_cond.clone(),
+                        effect: Box::new(inner),
+                        uses_tracked_set: needs_tracked_set,
+                    },
+                );
+                check_def.condition = lifted_condition;
+                check_def.optional = lifted_optional;
+                check_def.optional_for = lifted_optional_for;
+                check_def.repeat_for = lifted_repeat_for;
+                check_def.player_scope = lifted_player_scope;
+            }
+            let mut check_defs = vec![check_def];
+            let is_target_only = matches!(clause.effect, Effect::TargetOnly { .. });
+            if !is_target_only {
+                if let Some(ref sub) = clause.sub_ability {
+                    check_defs.push(*sub.clone());
+                }
+            }
+            {
+                let mut cascade_diags = Vec::new();
+                super::swallow_check::check_cascade_diff(
+                    &cascade_snap,
+                    &check_defs,
+                    &mut cascade_diags,
+                );
+                for d in cascade_diags {
+                    ctx.push_diagnostic(d);
+                }
+            }
+        }
+
+        // If this clause is absorbed by a followup continuation from the previous
+        // clause, mark it and store the continuation on the PREVIOUS clause.
+        if absorb_followup {
+            // Store the followup continuation — it applies to the previous clause.
+            // We handle this by pushing an absorbed marker clause.
+            if let Some(continuation) = followup_continuation {
+                clauses.push(ClauseIr {
+                    parsed: clause,
+                    boundary: chunk.boundary_after,
+                    condition,
+                    is_optional,
+                    opponent_may_scope,
+                    repeat_for,
+                    player_scope,
+                    delayed_condition: None,
+                    prefix_delayed_condition: None,
+                    intrinsic_continuation: None,
+                    followup_continuation: Some(continuation),
+                    absorbed_by_followup: true,
+                    multi_target,
+                    where_x_expression,
+                    is_otherwise: false,
+                    unless_pay: None,
+                    special: None,
+                    source_text: normalized_text.to_string(),
+                });
             }
             continue;
         }
 
-        if matches!(
-            def.condition,
-            Some(AbilityCondition::AdditionalCostPaidInstead)
-        ) && matches!(&*def.effect, Effect::SearchLibrary { .. })
-            && defs.len() >= 2
-        {
-            let previous_is_search =
-                matches!(&*defs[defs.len() - 2].effect, Effect::SearchLibrary { .. });
-            let trailing_is_search_destination = matches!(
-                &*defs[defs.len() - 1].effect,
-                Effect::ChangeZone {
-                    origin: Some(Zone::Library),
-                    destination: Zone::Hand,
-                    ..
+        // Non-absorbed followup continuation — store on the current clause
+        // (it applies to the PREVIOUS clause in lowering).
+        let followup_for_this = if followup_continuation.is_some() && !absorb_followup {
+            followup_continuation
+        } else {
+            None
+        };
+
+        clauses.push(ClauseIr {
+            parsed: clause,
+            boundary: chunk.boundary_after,
+            condition,
+            is_optional,
+            opponent_may_scope,
+            repeat_for,
+            player_scope,
+            delayed_condition,
+            prefix_delayed_condition: None,
+            intrinsic_continuation,
+            followup_continuation: followup_for_this,
+            absorbed_by_followup: false,
+            multi_target,
+            where_x_expression,
+            is_otherwise: false,
+            unless_pay,
+            special: None,
+            source_text: normalized_text.to_string(),
+        });
+
+        // Drain chunk-ctx diagnostics into the accumulator (the outer `ctx` is
+        // shadowed inside the loop, so we collect here and extend after the loop).
+        chunk_diagnostics.append(&mut chunk_ctx.diagnostics);
+    }
+
+    // Merge per-chunk diagnostics and any pre-loop diagnostics into the outer ctx.
+    ctx.diagnostics.extend(chunk_diagnostics);
+
+    EffectChainIr {
+        clauses,
+        kind,
+        chain_rounding,
+        actor: ctx.actor.clone(),
+    }
+}
+
+/// Lower an effect chain IR into a fully-assembled `AbilityDefinition`.
+///
+/// This is the assembly half of the parse/lower split (Phase 48).
+/// Phase 1 converts the flat `Vec<ClauseIr>` into `Vec<AbilityDefinition>`,
+/// applying per-clause assembly (condition lifting, delayed-trigger wrapping,
+/// continuation patching, special-clause attachment). Phase 2 performs post-loop
+/// transforms: Dig demotion, conditional peek marking, anaphor resolution,
+/// die/coin consolidation, sub_ability chain assembly, player_scope rewriting,
+/// chain-level rounding, and forward_result wiring.
+///
+/// Pure function of `&EffectChainIr` — no `ParseContext` dependency (D-08).
+pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
+    let kind = ir.kind;
+
+    // ── Phase 1: ClauseIr → AbilityDefinition ──────────────────────────
+    let mut defs: Vec<AbilityDefinition> = Vec::new();
+    for clause_ir in &ir.clauses {
+        // Skip absorbed clauses — their followup continuation is applied below.
+        if clause_ir.absorbed_by_followup {
+            // Apply the followup continuation to the defs built so far.
+            if let Some(ref continuation) = clause_ir.followup_continuation {
+                apply_clause_continuation(&mut defs, continuation.clone(), kind);
+            }
+            continue;
+        }
+
+        // Handle special clauses that modify previous defs rather than emitting new ones.
+        if let Some(ref special) = clause_ir.special {
+            match special {
+                SpecialClause::AltCostRider(cost) => {
+                    attach_alt_cost_to_prior_cast_from_zone(&mut defs, cost.clone());
+                    continue;
                 }
-            );
-            if previous_is_search && trailing_is_search_destination {
-                def.else_ability = Some(Box::new(defs.pop().unwrap()));
+                SpecialClause::Otherwise(else_def) => {
+                    // Walk defs backward to find the most recent conditional
+                    for d in defs.iter_mut().rev() {
+                        if d.condition.is_some() {
+                            d.else_ability = Some(else_def.clone());
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                SpecialClause::OtherwiseFallback(else_def) => {
+                    defs.push(AbilityDefinition::new(
+                        kind,
+                        Effect::Unimplemented {
+                            name: "otherwise".to_string(),
+                            description: Some("Otherwise".to_string()),
+                        },
+                    ));
+                    defs.push(*else_def.clone());
+                    continue;
+                }
+                SpecialClause::DieExileRider(rider_def) => {
+                    if let Some(last_def) = defs.last_mut() {
+                        last_def.sub_ability = Some(rider_def.clone());
+                    }
+                    continue;
+                }
+                SpecialClause::DigInsteadAlt(alt_def) => {
+                    if let Some(last_def) = defs.pop() {
+                        let mut new_def = *alt_def.clone();
+                        new_def.else_ability = Some(Box::new(last_def));
+                        defs.push(new_def);
+                    }
+                    continue;
+                }
+                SpecialClause::InsteadClause(instead_def) => {
+                    if let Some(mut last_def) = defs.pop() {
+                        let mut instead = *instead_def.clone();
+                        // CR 702.33d + CR 707.10: Resolve "create N of those tokens" anaphor
+                        rewrite_those_tokens_from_antecedent(&mut instead.effect, &last_def.effect);
+                        last_def.sub_ability = Some(Box::new(instead));
+                        defs.push(last_def);
+                    }
+                    continue;
+                }
+                SpecialClause::EntersTappedAttacking => {
+                    // CR 508.4 / CR 614.1: Conditional enters-tapped-attacking modifier
+                    if let Some(prev) = defs.last() {
+                        let can_patch = matches!(
+                            &*prev.effect,
+                            Effect::CopyTokenOf { .. }
+                                | Effect::Token { .. }
+                                | Effect::ChangeZone { .. }
+                        );
+                        if can_patch {
+                            let mut patched = defs.pop().unwrap();
+                            match &mut *patched.effect {
+                                Effect::CopyTokenOf {
+                                    enters_attacking,
+                                    tapped,
+                                    ..
+                                } => {
+                                    *enters_attacking = true;
+                                    *tapped = true;
+                                }
+                                Effect::Token {
+                                    enters_attacking,
+                                    tapped,
+                                    ..
+                                } => {
+                                    *enters_attacking = true;
+                                    *tapped = true;
+                                }
+                                Effect::ChangeZone {
+                                    enters_attacking,
+                                    enter_tapped,
+                                    ..
+                                } => {
+                                    *enters_attacking = true;
+                                    *enter_tapped = true;
+                                }
+                                _ => {}
+                            }
+                            let original = {
+                                let mut orig = patched.clone();
+                                match &mut *orig.effect {
+                                    Effect::CopyTokenOf {
+                                        enters_attacking,
+                                        tapped,
+                                        ..
+                                    } => {
+                                        *enters_attacking = false;
+                                        *tapped = false;
+                                    }
+                                    Effect::Token {
+                                        enters_attacking,
+                                        tapped,
+                                        ..
+                                    } => {
+                                        *enters_attacking = false;
+                                        *tapped = false;
+                                    }
+                                    Effect::ChangeZone {
+                                        enters_attacking,
+                                        enter_tapped,
+                                        ..
+                                    } => {
+                                        *enters_attacking = false;
+                                        *enter_tapped = false;
+                                    }
+                                    _ => {}
+                                }
+                                orig
+                            };
+                            patched.condition = clause_ir.condition.clone();
+                            patched.else_ability = Some(Box::new(original));
+                            defs.push(patched);
+                        }
+                    }
+                    continue;
+                }
+                SpecialClause::KeywordInsteadOverride => {
+                    // Build the def for this clause and attach to previous as sub_ability
+                    let mut def = AbilityDefinition::new(kind, clause_ir.parsed.effect.clone());
+                    let effective_cond = clause_ir
+                        .condition
+                        .as_ref()
+                        .or(clause_ir.parsed.condition.as_ref());
+                    if let Some(cond) = effective_cond {
+                        def = def.condition(cond.clone());
+                    }
+                    if let Some(prev) = defs.last_mut() {
+                        prev.sub_ability = Some(Box::new(def));
+                    }
+                    continue;
+                }
+                SpecialClause::AdditionalCostInsteadSearch => {
+                    // Build this clause's def and fold else_ability from the trailing clause.
+                    // The trailing ChangeZone was produced by the previous SearchLibrary's
+                    // intrinsic continuation (SearchDestination).
+                    let mut def = AbilityDefinition::new(kind, clause_ir.parsed.effect.clone());
+                    let effective_cond = clause_ir
+                        .condition
+                        .as_ref()
+                        .or(clause_ir.parsed.condition.as_ref());
+                    if let Some(cond) = effective_cond {
+                        def = def.condition(cond.clone());
+                    }
+                    // Pop trailing search-destination ChangeZone and attach as else_ability
+                    if defs.len() >= 2 {
+                        let trailing_is_search_destination = matches!(
+                            &*defs.last().unwrap().effect,
+                            Effect::ChangeZone {
+                                origin: Some(Zone::Library),
+                                destination: Zone::Hand,
+                                ..
+                            }
+                        );
+                        if trailing_is_search_destination {
+                            def.else_ability = Some(Box::new(defs.pop().unwrap()));
+                        }
+                    }
+                    defs.push(def);
+                    // Apply intrinsic continuation for THIS SearchLibrary (e.g., reveal flag, ChangeZone).
+                    if let Some(ref continuation) = clause_ir.intrinsic_continuation {
+                        apply_clause_continuation(&mut defs, continuation.clone(), kind);
+                    }
+                    continue;
+                }
+                SpecialClause::DrawnThisTurnPayOrTopdeck { life_payment } => {
+                    if let Some(last_def) = defs.last_mut() {
+                        if let Effect::ChooseDrawnThisTurnPayOrTopdeck {
+                            life_payment: current,
+                            ..
+                        } = &mut *last_def.effect
+                        {
+                            *current = life_payment.clone();
+                        }
+                    }
+                    continue;
+                }
             }
         }
 
+        // Non-absorbed, non-special followup continuation — apply it to the
+        // previous defs before building this clause's def.
+        if let Some(ref continuation) = clause_ir.followup_continuation {
+            apply_clause_continuation(&mut defs, continuation.clone(), kind);
+        }
+
+        // ── Build AbilityDefinition from ClauseIr ──
+        let is_target_only = matches!(clause_ir.parsed.effect, Effect::TargetOnly { .. });
+        let mut def = AbilityDefinition::new(kind, clause_ir.parsed.effect.clone());
+        let clause_sub = if is_target_only {
+            def.sub_ability = clause_ir.parsed.sub_ability.clone();
+            None
+        } else {
+            clause_ir.parsed.sub_ability.clone()
+        };
+
+        if clause_ir.is_optional {
+            def.optional = true;
+            def.optional_for = clause_ir.opponent_may_scope;
+        }
+        // CR 117.3a + CR 608.2c: Propagate subject-phrase "may" modal.
+        if clause_ir.parsed.optional {
+            def.optional = true;
+        }
+        if let Some(ref qty) = clause_ir.repeat_for {
+            if matches!(*def.effect, Effect::TargetOnly { .. }) {
+                if let Some(sub) = def.sub_ability.as_mut() {
+                    sub.repeat_for = Some(qty.clone());
+                } else {
+                    def.repeat_for = Some(qty.clone());
+                }
+            } else {
+                def.repeat_for = Some(qty.clone());
+            }
+        }
+        if let Some(scope) = clause_ir.player_scope {
+            def.player_scope = Some(scope);
+        }
+        if let Some(ref duration) = clause_ir.parsed.duration {
+            def = def.duration(duration.clone());
+        }
+        // CR 608.2c: Apply condition — chain-level takes priority over clause-level.
+        let effective_condition = clause_ir
+            .condition
+            .as_ref()
+            .or(clause_ir.parsed.condition.as_ref());
+        if let Some(cond) = effective_condition {
+            def = def.condition(cond.clone());
+        }
+        // CR 115.1d: Apply multi-target spec — prefer strip result, fall back to clause-level.
+        if let Some(ref spec) = clause_ir.multi_target {
+            def = def.multi_target(spec.clone());
+        } else if let Some(ref spec) = clause_ir.parsed.multi_target {
+            def = def.multi_target(spec.clone());
+        }
+        // CR 601.2d: Propagate distribute flag.
+        if let Some(ref unit) = clause_ir.parsed.distribute {
+            def = def.distribute(unit.clone());
+        }
+        if let Some(ref modifier) = clause_ir.unless_pay {
+            def = def.unless_pay(modifier.clone());
+        }
+
         let mut current_defs = vec![def];
-        if let Some(sub) = clause_sub {
-            current_defs.push(*sub);
+        if let Some(ref sub) = clause_sub {
+            current_defs.push(*sub.clone());
         }
         for current in &mut current_defs {
-            apply_where_x_ability_expression(current, where_x_expression.as_deref());
+            apply_where_x_ability_expression(current, clause_ir.where_x_expression.as_deref());
         }
 
         // CR 603.7: Wrap in CreateDelayedTrigger if temporal suffix was found.
-        //
-        // CR 608.2c: Lift the inner ability's `condition` onto the new outer
-        // wrapper. A conditional like "If you control a Wizard, [effect at
-        // next main phase]" scopes to the whole clause but is evaluated at
-        // SPELL RESOLUTION time, not at delayed-trigger firing. The condition
-        // must gate whether the delayed trigger is even created — not what
-        // runs when it fires. Without this lift the inner `condition` would
-        // be stranded dead metadata (the `effects::delayed_trigger::resolve`
-        // path builds a fresh `ResolvedAbility` and does not read
-        // `effect_def.condition`), silently dropping the gate. Mana Sculpt is
-        // the first card exposed to this architecture; the lift closes the
-        // latent gap for any future delayed-trigger with an inner condition.
-        if let Some(delayed_cond) = delayed_condition {
+        if let Some(ref delayed_cond) = clause_ir.delayed_condition {
             for current in &mut current_defs {
                 let inner = std::mem::replace(
                     current,
@@ -7368,14 +8923,7 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
                         },
                     ),
                 );
-                // CR 608.2c: Slots that gate trigger CREATION (not firing) must
-                // live on the outer wrapper. The delayed_trigger::resolve path
-                // builds a fresh ResolvedAbility from inner.effect alone and
-                // discards every other field on the inner def. For one-shot
-                // delayed triggers, "may create" and "may execute on fire" are
-                // observably equivalent — the controller still chooses whether
-                // the effect happens. Surfaced by the cascade-vs-AST swallow
-                // detector (Tiana CascadeOptional, Shambling Swarm CascadeRepeat).
+                // CR 608.2c: Lift condition/optional/repeat/player_scope to outer wrapper.
                 let lifted_condition = inner.condition.clone();
                 let lifted_optional = inner.optional;
                 let lifted_optional_for = inner.optional_for;
@@ -7397,61 +8945,37 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
             }
         }
 
-        // CR 603.7: Cross-clause pronoun → mark uses_tracked_set on delayed trigger
-        if let Some(previous) = defs.last() {
-            if is_exile_effect(&previous.effect) || is_token_creating_effect(&previous.effect) {
-                let has_tracked_ref = contains_explicit_tracked_set_pronoun(&lower_check)
-                    || contains_implicit_tracked_set_pronoun(&lower_check);
-                if has_tracked_ref {
-                    for current in &mut current_defs {
-                        mark_uses_tracked_set(current);
+        // CR 603.7: Cross-clause pronoun → mark uses_tracked_set on delayed trigger.
+        // Check whether the previous clause had an exile/token effect and this clause
+        // has a tracked-set pronoun reference.
+        if !current_defs.is_empty() {
+            let source_text_lower = clause_ir.source_text.to_lowercase();
+            // Find the previous non-special, non-absorbed clause
+            let prev_effect = defs.last().map(|d| &*d.effect);
+            if let Some(prev_eff) = prev_effect {
+                if is_exile_effect(prev_eff) || is_token_creating_effect(prev_eff) {
+                    let has_tracked_ref = contains_explicit_tracked_set_pronoun(&source_text_lower)
+                        || contains_implicit_tracked_set_pronoun(&source_text_lower);
+                    if has_tracked_ref {
+                        for current in &mut current_defs {
+                            mark_uses_tracked_set(current);
+                        }
                     }
                 }
             }
         }
 
-        let followup_continuation = defs.last().and_then(|previous| {
-            parse_followup_continuation_ast(normalized_text, &previous.effect)
-        });
-        let absorb_followup = followup_continuation.as_ref().is_some_and(|continuation| {
-            current_defs
-                .first()
-                .is_some_and(|current| continuation_absorbs_current(continuation, &current.effect))
-        });
-        if let Some(continuation) = followup_continuation {
-            apply_clause_continuation(&mut defs, continuation, kind);
-        }
-        if absorb_followup {
-            continue;
-        }
-
-        let intrinsic_continuation = parse_intrinsic_continuation_ast(
-            normalized_text,
-            intrinsic_continuation_effect(&current_defs[0]),
-            full_text,
-        );
-
-        // Phase 1.5: cascade-vs-AST structural diff. Captures cases where
-        // the chunk loop's linear strippers populated a slot but
-        // def-assembly silently dropped it. Complementary to the
-        // text-scanning detectors at the top of `swallow_check.rs`. See
-        // `data/parser-swallow-progress.md` for the architecture.
-        let cascade_snap = super::swallow_check::CascadeSnapshot {
-            is_optional,
-            opponent_may_scope: opponent_may_scope.as_ref(),
-            condition: condition.as_ref().or(clause.condition.as_ref()),
-            repeat_for: repeat_for.as_ref(),
-            player_scope: player_scope.as_ref(),
-            clause_duration: clause.duration.as_ref(),
-        };
-        super::swallow_check::check_cascade_diff(&cascade_snap, &current_defs);
-
         defs.extend(current_defs);
 
-        if let Some(continuation) = intrinsic_continuation {
-            apply_clause_continuation(&mut defs, continuation, kind);
+        // Apply intrinsic continuation after extending defs with current clause's defs.
+        if let Some(ref continuation) = clause_ir.intrinsic_continuation {
+            apply_clause_continuation(&mut defs, continuation.clone(), kind);
         }
     }
+
+    // ── Phase 2: Post-loop assembly (unchanged) ────────────────────────
+    let kind = ir.kind;
+    let chain_rounding = ir.chain_rounding;
 
     // CR 701.20a vs CR 701.16a: Demote reveal-Dig back to RevealTop when no DigFromAmong
     // continuation patched it. An unpatched Dig { reveal: true, keep_count: None, filter: Any }
@@ -7589,11 +9113,13 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
     }
 
     // CR 107.1a: Apply the chain-level rounding annotation (captured above)
-    // to every HalfRounded in the built tree. No-op when the sentence was
+    // to every DivideRounded in the built tree. No-op when the sentence was
     // absent (chain_rounding == None).
     if let Some(mode) = chain_rounding {
         rewrite_rounding_mode(&mut result, mode);
     }
+
+    collapse_ephemeral_color_choice_mana(&mut result);
 
     // CR 303.4f + CR 301.5b + CR 603.7d: Wire `forward_result: true` on a
     // parent zone-change to Battlefield when the chained sub-ability is an
@@ -7685,6 +9211,7 @@ fn rewrite_those_tokens_from_antecedent(cur: &mut Effect, antecedent: &Effect) {
             ..
         } => Some(Effect::CopyTokenOf {
             target: target.clone(),
+            source_filter: None,
             enters_attacking: *enters_attacking,
             tapped: *tapped,
             count: count.clone(),
@@ -8075,6 +9602,9 @@ fn strip_for_each_prefix(text: &str) -> (Option<QuantityExpr>, String) {
                 {
                     return (None, text.to_string());
                 }
+                if parse_for_each_object_copy_parts(text, &lower).is_some() {
+                    return (None, text.to_string());
+                }
                 let offset = text.len() - remainder.len();
                 return (Some(QuantityExpr::Ref { qty }), text[offset..].to_string());
             }
@@ -8088,11 +9618,11 @@ fn strip_for_each_prefix(text: &str) -> (Option<QuantityExpr>, String) {
 fn strip_for_each_repeat_suffix(text: &str) -> (Option<QuantityExpr>, String) {
     let lower = text.to_lowercase();
     let parsed = nom_on_lower(text, &lower, |input| {
-        let (rest, base) = take_until::<_, _, VerboseError<&str>>(" for each ").parse(input)?;
+        let (rest, base) = take_until::<_, _, OracleError<'_>>(" for each ").parse(input)?;
         let (rest, _) = tag(" for each ").parse(rest)?;
         let (rest, qty) = super::oracle_nom::quantity::parse_for_each_clause_ref(rest)?;
         let (rest, _) = nom::combinator::opt(tag(".")).parse(rest)?;
-        let (rest, _) = nom::combinator::eof::<_, VerboseError<&str>>(rest)?;
+        let (rest, _) = nom::combinator::eof::<_, OracleError<'_>>(rest)?;
         Ok((rest, (base.len(), qty)))
     });
     if let Some(((base_len, qty), _)) = parsed {
@@ -8141,6 +9671,7 @@ fn strip_repeat_count_suffix(text: &str) -> (Option<QuantityExpr>, String) {
 /// Strip "each player/opponent [verb]s" subject prefix.
 /// Returns the PlayerFilter scope and the predicate with deconjugated verb.
 /// "Each opponent discards a card" → (Some(Opponent), "discard a card")
+/// "Each other player sacrifices a creature" → (Some(Opponent), "sacrifice a creature")
 /// "Each player draws a card" → (Some(All), "draw a card")
 fn strip_player_scope_subject(text: &str) -> (Option<PlayerFilter>, String) {
     let (scope, stripped) = strip_linked_exile_owner_subject(text);
@@ -8158,6 +9689,7 @@ fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, String) {
                 PlayerFilter::HighestSpeed,
                 tag("each player with the highest speed among players "),
             ),
+            value(PlayerFilter::Opponent, tag("each other player ")),
             value(PlayerFilter::Opponent, tag("each opponent ")),
             value(PlayerFilter::All, tag("each player ")),
         ))
@@ -8172,7 +9704,7 @@ fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, String) {
     // Intercepting them here would produce Unimplemented instead of typed static modes.
     let rest_lower = rest.trim().to_lowercase();
     if alt((
-        tag::<_, _, VerboseError<&str>>("can't"),
+        tag::<_, _, OracleError<'_>>("can't"),
         tag("cannot"),
         tag("don't"),
         tag("may only"),
@@ -8207,7 +9739,7 @@ fn strip_linked_exile_owner_subject(text: &str) -> (Option<PlayerFilter>, String
         alt((
             value(
                 PlayerFilter::OwnersOfCardsExiledBySource,
-                tag::<_, _, VerboseError<&str>>("the exiled card's owner "),
+                tag::<_, _, OracleError<'_>>("the exiled card's owner "),
             ),
             value(
                 PlayerFilter::OwnersOfCardsExiledBySource,
@@ -8222,7 +9754,7 @@ fn strip_linked_exile_owner_subject(text: &str) -> (Option<PlayerFilter>, String
 
     let rest_lower = rest.trim().to_lowercase();
     if alt((
-        tag::<_, _, VerboseError<&str>>("can't"),
+        tag::<_, _, OracleError<'_>>("can't"),
         tag("cannot"),
         tag("don't"),
         tag("may only"),
@@ -8243,11 +9775,11 @@ fn strip_linked_exile_owner_subject(text: &str) -> (Option<PlayerFilter>, String
 /// `each opponent and each creature ...` damage clauses.
 pub(super) fn parse_damage_player_scope(
     input: &str,
-) -> nom::IResult<&str, PlayerFilter, VerboseError<&str>> {
+) -> nom::IResult<&str, PlayerFilter, OracleError<'_>> {
     alt((
         value(
             PlayerFilter::Opponent,
-            alt((tag::<_, _, VerboseError<&str>>("opponent"), tag("foe"))),
+            alt((tag::<_, _, OracleError<'_>>("opponent"), tag("foe"))),
         ),
         value(PlayerFilter::All, tag("player")),
     ))
@@ -8271,7 +9803,7 @@ pub(super) fn parse_damage_each_player_scope(text: &str) -> Option<PlayerFilter>
             value(
                 PlayerFilter::OpponentOtherThanTriggering,
                 alt((
-                    tag::<_, _, VerboseError<&str>>("other opponent"),
+                    tag::<_, _, OracleError<'_>>("other opponent"),
                     tag("other foe"),
                 )),
             ),
@@ -8310,8 +9842,7 @@ fn strip_leading_duration(text: &str) -> Option<(Duration, &str)> {
     }
 
     // CR 611.2b: "For as long as [condition], [effect]" — leading duration prefix.
-    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("for as long as ").parse(lower.as_str())
-    {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("for as long as ").parse(lower.as_str()) {
         // Find the comma that separates the condition from the effect body.
         if let Some(comma_pos) = rest.find(", ") {
             let condition_text = &rest[..comma_pos];
@@ -8421,7 +9952,7 @@ fn parse_for_as_long_as_condition(condition: &str) -> Option<Duration> {
     }
 
     // "you control ~" / "you control this creature"
-    if tag::<_, _, VerboseError<&str>>("you control ")
+    if tag::<_, _, OracleError<'_>>("you control ")
         .parse(condition)
         .is_ok()
     {
@@ -8603,7 +10134,7 @@ fn extract_put_counter_multi_target(text: &str) -> Option<MultiTargetSpec> {
 /// Strips "exile " verb via nom tag, then delegates to `strip_numeric_target_prefix`.
 fn extract_exile_multi_target(text: &str) -> Option<MultiTargetSpec> {
     let lower = text.to_lowercase();
-    let (after_verb, _) = tag::<_, _, VerboseError<&str>>("exile ")
+    let (after_verb, _) = tag::<_, _, OracleError<'_>>("exile ")
         .parse(lower.as_str())
         .ok()?;
     let (count, _) = strip_numeric_target_prefix(after_verb)?;
@@ -8628,7 +10159,7 @@ const MULTI_TARGET_VERBS: &[&str] = &[
 /// Returns None if text doesn't start with a number word followed by "target".
 fn strip_numeric_target_prefix(lower: &str) -> Option<(usize, &str)> {
     let (rest, count) = alt((
-        value(2usize, tag::<_, _, VerboseError<&str>>("two ")),
+        value(2usize, tag::<_, _, OracleError<'_>>("two ")),
         value(3, tag("three ")),
         value(4, tag("four ")),
         value(5, tag("five ")),
@@ -8636,7 +10167,7 @@ fn strip_numeric_target_prefix(lower: &str) -> Option<(usize, &str)> {
     ))
     .parse(lower)
     .ok()?;
-    if alt((tag::<_, _, VerboseError<&str>>("target "), tag("target,")))
+    if alt((tag::<_, _, OracleError<'_>>("target "), tag("target,")))
         .parse(rest)
         .is_ok()
     {
@@ -8651,8 +10182,7 @@ fn strip_numeric_target_prefix(lower: &str) -> Option<(usize, &str)> {
 /// "up to one other target creature or spell" → ("other target creature or spell", Some { ... })
 pub(super) fn strip_optional_target_prefix(text: &str) -> (&str, Option<MultiTargetSpec>) {
     let lower = text.to_ascii_lowercase();
-    let Ok((after_up_to, _)) = tag::<_, _, VerboseError<&str>>("up to ").parse(lower.as_str())
-    else {
+    let Ok((after_up_to, _)) = tag::<_, _, OracleError<'_>>("up to ").parse(lower.as_str()) else {
         return (text, None);
     };
     let Ok((remainder, max)) = parse_multi_target_count_expr(after_up_to) else {
@@ -8662,7 +10192,7 @@ pub(super) fn strip_optional_target_prefix(text: &str) -> (&str, Option<MultiTar
     let rest = text[consumed..].trim_start();
     let rest_lower = rest.to_ascii_lowercase();
     if alt((
-        tag::<_, _, VerboseError<&str>>("target "),
+        tag::<_, _, OracleError<'_>>("target "),
         tag("other target "),
         tag("another target "),
     ))
@@ -8733,6 +10263,8 @@ struct ReturnDestination {
     under_your_control: bool,
     // CR 614.1: "tapped" — enters the battlefield tapped.
     enter_tapped: bool,
+    // CR 122.1 + CR 122.6: Counters placed on the returned object as it enters.
+    enter_with_counters: Vec<(String, QuantityExpr)>,
 }
 
 /// Detect "return ... to <zone>" destination phrase, including "transformed" flag.
@@ -8911,6 +10443,7 @@ fn strip_return_destination_ext(text: &str) -> (&str, Option<ReturnDestination>)
     ];
     for (phrase, zone, transformed, under_your_control, enter_tapped) in patterns {
         if let Some(pos) = lower.rfind(phrase) {
+            let after_destination = &lower[pos + phrase.len()..];
             return (
                 text[..pos].trim(),
                 Some(ReturnDestination {
@@ -8918,11 +10451,107 @@ fn strip_return_destination_ext(text: &str) -> (&str, Option<ReturnDestination>)
                     transformed: *transformed,
                     under_your_control: *under_your_control,
                     enter_tapped: *enter_tapped,
+                    enter_with_counters: parse_with_counters_suffix(after_destination),
                 }),
             );
         }
     }
     (text, None)
+}
+
+/// Detect "return to <zone> <target>" destination phrases.
+fn strip_leading_return_destination_ext(text: &str) -> (&str, Option<ReturnDestination>) {
+    let lower = text.to_lowercase();
+    if let Ok((rest, dest)) = parse_leading_return_destination(lower.as_str()) {
+        let consumed = lower.len() - rest.len();
+        return (text[consumed..].trim(), Some(dest));
+    }
+
+    (text, None)
+}
+
+fn parse_leading_return_destination(input: &str) -> OracleResult<'_, ReturnDestination> {
+    alt((
+        parse_leading_battlefield_return_destination,
+        parse_leading_hand_return_destination,
+        parse_leading_graveyard_return_destination,
+    ))
+    .parse(input)
+}
+
+fn parse_leading_battlefield_return_destination(
+    input: &str,
+) -> OracleResult<'_, ReturnDestination> {
+    let (input, _) = alt((
+        tag::<_, _, OracleError<'_>>("to the battlefield"),
+        tag("onto the battlefield"),
+    ))
+    .parse(input)?;
+    let (input, modifier) = alt((
+        value((true, true), tag(" tapped and transformed")),
+        value((true, false), tag(" transformed")),
+        value((false, true), tag(" tapped")),
+        value((false, false), tag("")),
+    ))
+    .parse(input)?;
+    let (input, under_your_control) = alt((
+        value(true, tag::<_, _, OracleError<'_>>(" under your control")),
+        value(false, tag(" under their owners' control")),
+        value(false, tag(" under its owner's control")),
+        value(false, tag("")),
+    ))
+    .parse(input)?;
+    let (input, _) = tag(" ").parse(input)?;
+    Ok((
+        input,
+        ReturnDestination {
+            zone: Zone::Battlefield,
+            transformed: modifier.0,
+            under_your_control,
+            enter_tapped: modifier.1,
+            enter_with_counters: vec![],
+        },
+    ))
+}
+
+fn parse_leading_hand_return_destination(input: &str) -> OracleResult<'_, ReturnDestination> {
+    let (input, _) = alt((
+        tag::<_, _, OracleError<'_>>("to its owner's hand "),
+        tag("to their owner's hand "),
+        tag("to their owners' hands "),
+        tag("to your hand "),
+    ))
+    .parse(input)?;
+    Ok((
+        input,
+        ReturnDestination {
+            zone: Zone::Hand,
+            transformed: false,
+            under_your_control: false,
+            enter_tapped: false,
+            enter_with_counters: vec![],
+        },
+    ))
+}
+
+fn parse_leading_graveyard_return_destination(input: &str) -> OracleResult<'_, ReturnDestination> {
+    let (input, _) = alt((
+        tag::<_, _, OracleError<'_>>("to its owner's graveyard "),
+        tag("to their owner's graveyard "),
+        tag("to their owners' graveyards "),
+        tag("to your graveyard "),
+    ))
+    .parse(input)?;
+    Ok((
+        input,
+        ReturnDestination {
+            zone: Zone::Graveyard,
+            transformed: false,
+            under_your_control: false,
+            enter_tapped: false,
+            enter_with_counters: vec![],
+        },
+    ))
 }
 
 /// CR 601.2d: Parse "deal N damage divided as you choose among [targets]" and
@@ -8933,7 +10562,7 @@ fn strip_return_destination_ext(text: &str) -> (&str, Option<ReturnDestination>)
 fn try_parse_distribute_damage(lower: &str, text: &str) -> Option<ParsedEffectClause> {
     let tp = TextPair::new(text, lower);
     let pos = tp.find("deals ").or_else(|| tp.find("deal "))?;
-    let verb_len = if tag::<_, _, VerboseError<&str>>("deals ")
+    let verb_len = if tag::<_, _, OracleError<'_>>("deals ")
         .parse(&lower[pos..])
         .is_ok()
     {
@@ -8945,7 +10574,7 @@ fn try_parse_distribute_damage(lower: &str, text: &str) -> Option<ParsedEffectCl
 
     let (amount, rest_tp) =
         if let Some((qty, rem)) = super::oracle_util::parse_count_expr(after_tp.lower) {
-            if tag::<_, _, VerboseError<&str>>("damage").parse(rem).is_ok() {
+            if tag::<_, _, OracleError<'_>>("damage").parse(rem).is_ok() {
                 let skip = after_tp.lower.len() - rem.len() + "damage".len();
                 let (_, rest) = after_tp.split_at(skip);
                 (qty, rest)
@@ -8982,7 +10611,7 @@ fn try_parse_distribute_damage(lower: &str, text: &str) -> Option<ParsedEffectCl
     // CR 115.1d: Detect "any number of" quantifier before the target phrase.
     let target_lower = target_text.to_lowercase();
     let (stripped_target_text, multi_target) = if let Ok((rest, _)) =
-        tag::<_, _, VerboseError<&str>>("any number of ").parse(target_lower.as_str())
+        tag::<_, _, OracleError<'_>>("any number of ").parse(target_lower.as_str())
     {
         let skip = target_lower.len() - rest.len();
         (
@@ -9014,7 +10643,7 @@ fn try_parse_distribute_damage(lower: &str, text: &str) -> Option<ParsedEffectCl
 /// → Effect::PutCounter with distribute flag set.
 fn try_parse_distribute_counters(lower: &str, text: &str) -> Option<ParsedEffectClause> {
     // "distribute " is 11 bytes; Oracle text is ASCII so byte == char offsets.
-    let (after_lower, _) = tag::<_, _, VerboseError<&str>>("distribute ")
+    let (after_lower, _) = tag::<_, _, OracleError<'_>>("distribute ")
         .parse(lower)
         .ok()?;
     let (count_expr, rest_lower) = super::oracle_util::parse_count_expr(after_lower)?;
@@ -9027,12 +10656,12 @@ fn try_parse_distribute_counters(lower: &str, text: &str) -> Option<ParsedEffect
 
     // Require "counter(s)" immediately after the counter type word.
     let after_type = rest_lower[type_end..].trim_start();
-    let counter_word_len = if tag::<_, _, VerboseError<&str>>("counters")
+    let counter_word_len = if tag::<_, _, OracleError<'_>>("counters")
         .parse(after_type)
         .is_ok()
     {
         "counters".len()
-    } else if tag::<_, _, VerboseError<&str>>("counter")
+    } else if tag::<_, _, OracleError<'_>>("counter")
         .parse(after_type)
         .is_ok()
     {
@@ -9050,7 +10679,7 @@ fn try_parse_distribute_counters(lower: &str, text: &str) -> Option<ParsedEffect
     let target_text = &text[target_offset..];
     let target_text_lower = &lower[target_offset..];
     let (stripped_target, multi_target) = if let Ok((rest, _)) =
-        tag::<_, _, VerboseError<&str>>("any number of ").parse(target_text_lower)
+        tag::<_, _, OracleError<'_>>("any number of ").parse(target_text_lower)
     {
         let skip = target_text_lower.len() - rest.len();
         (
@@ -9090,8 +10719,8 @@ fn try_parse_distribute_counters(lower: &str, text: &str) -> Option<ParsedEffect
 /// need the remainder (e.g., `parse_cost_resource_ast`). The remainder is only
 /// safely discardable when `try_split_damage_compound` has already run and found
 /// no compound connector.
-fn try_parse_damage(lower: &str, text: &str) -> Option<Effect> {
-    let (effect, _remainder) = try_parse_damage_with_remainder(text, lower)?;
+fn try_parse_damage(lower: &str, text: &str, ctx: &mut ParseContext) -> Option<Effect> {
+    let (effect, _remainder) = try_parse_damage_with_remainder(text, lower, ctx)?;
     Some(effect)
 }
 
@@ -9105,12 +10734,16 @@ fn try_parse_damage(lower: &str, text: &str) -> Option<Effect> {
 /// Safety: `pos` is computed from `lower.find(...)` and used to slice both `text`
 /// and `lower` at the same byte offset. This is sound because Oracle text is ASCII
 /// and `to_lowercase()` preserves byte length for ASCII characters.
-fn try_parse_damage_with_remainder<'a>(text: &'a str, lower: &'a str) -> Option<(Effect, &'a str)> {
+fn try_parse_damage_with_remainder<'a>(
+    text: &'a str,
+    lower: &'a str,
+    ctx: &mut ParseContext,
+) -> Option<(Effect, &'a str)> {
     // Match: "~ deals N damage to {target}" / "deal N damage to {target}"
     // and variable forms like "deal that much damage" or
     // "deal damage equal to its power".
     let pos = lower.find("deals ").or_else(|| lower.find("deal "))?;
-    let verb_len = if tag::<_, _, VerboseError<&str>>("deals ")
+    let verb_len = if tag::<_, _, OracleError<'_>>("deals ")
         .parse(&lower[pos..])
         .is_ok()
     {
@@ -9124,16 +10757,13 @@ fn try_parse_damage_with_remainder<'a>(text: &'a str, lower: &'a str) -> Option<
     let (amount, after_target) = if let Some((qty, rest)) =
         super::oracle_util::parse_count_expr(after_lower)
     {
-        if tag::<_, _, VerboseError<&str>>("damage")
-            .parse(rest)
-            .is_ok()
-        {
+        if tag::<_, _, OracleError<'_>>("damage").parse(rest).is_ok() {
             (qty, &after[after.len() - rest.len() + "damage".len()..])
         } else {
             return None;
         }
     } else if let Ok((rem, _)) =
-        tag::<_, _, VerboseError<&str>>("twice that much damage").parse(after_lower)
+        tag::<_, _, OracleError<'_>>("twice that much damage").parse(after_lower)
     {
         // CR 120.8: "twice that much damage" → Multiply { factor: 2, inner: EventContextAmount }
         let consumed = after_lower.len() - rem.len();
@@ -9146,8 +10776,7 @@ fn try_parse_damage_with_remainder<'a>(text: &'a str, lower: &'a str) -> Option<
             },
             &after[consumed..],
         )
-    } else if let Ok((rem, _)) =
-        tag::<_, _, VerboseError<&str>>("that much damage").parse(after_lower)
+    } else if let Ok((rem, _)) = tag::<_, _, OracleError<'_>>("that much damage").parse(after_lower)
     {
         let consumed = after_lower.len() - rem.len();
         (
@@ -9195,7 +10824,7 @@ fn try_parse_damage_with_remainder<'a>(text: &'a str, lower: &'a str) -> Option<
                         },
                         "",
                     ));
-                } else if tag::<_, _, VerboseError<&str>>("each ")
+                } else if tag::<_, _, OracleError<'_>>("each ")
                     .parse(target_phrase)
                     .is_ok()
                 {
@@ -9211,7 +10840,7 @@ fn try_parse_damage_with_remainder<'a>(text: &'a str, lower: &'a str) -> Option<
                             "",
                         ));
                     }
-                    let (filter, remainder) = parse_target(target_phrase);
+                    let (filter, remainder) = parse_target_with_ctx(target_phrase, ctx);
                     let (filter, remainder) = refine_damage_target_remainder(filter, remainder);
                     // CR 119.5 + CR 700.4: "[N] damage to each creature and each
                     // player" — composite scope. The "each creature" parse
@@ -9221,7 +10850,7 @@ fn try_parse_damage_with_remainder<'a>(text: &'a str, lower: &'a str) -> Option<
                     // (Pompeii, Volcanic Eruption, etc.).
                     let trimmed = remainder.trim_start_matches([',', ' ']);
                     let trimmed_lower = trimmed.to_lowercase();
-                    let player_filter = tag::<_, _, VerboseError<&str>>("and ")
+                    let player_filter = tag::<_, _, OracleError<'_>>("and ")
                         .parse(trimmed_lower.as_str())
                         .ok()
                         .and_then(|(after_and, _)| parse_damage_each_player_scope(after_and));
@@ -9231,9 +10860,11 @@ fn try_parse_damage_with_remainder<'a>(text: &'a str, lower: &'a str) -> Option<
                         remainder.trim()
                     };
                     if !leftover.is_empty() {
-                        push_warning(format!(
-                            "ignored-remainder: '{leftover}' after target parse in damage-all"
-                        ));
+                        ctx.push_diagnostic(OracleDiagnostic::IgnoredRemainder {
+                            text: leftover.into(),
+                            parser: "damage-all".into(),
+                            line_index: 0,
+                        });
                     }
                     return Some((
                         Effect::DamageAll {
@@ -9243,10 +10874,12 @@ fn try_parse_damage_with_remainder<'a>(text: &'a str, lower: &'a str) -> Option<
                         },
                         "",
                     ));
-                } else if let Some((target, ecr_rem)) = parse_event_context_ref(target_phrase) {
+                } else if let Some((target, ecr_rem)) =
+                    parse_event_context_ref_with_ctx(target_phrase, ctx)
+                {
                     let (target, ecr_rem) = refine_damage_target_remainder(target, ecr_rem);
                     #[cfg(debug_assertions)]
-                    types::assert_no_compound_remainder(ecr_rem, target_phrase);
+                    assert_no_compound_remainder(ecr_rem, target_phrase);
                     return Some((
                         Effect::DealDamage {
                             amount: qty,
@@ -9259,10 +10892,11 @@ fn try_parse_damage_with_remainder<'a>(text: &'a str, lower: &'a str) -> Option<
                     let (target, remainder) = parse_target(target_phrase);
                     let (target, remainder) = refine_damage_target_remainder(target, remainder);
                     if !remainder.trim().is_empty() {
-                        push_warning(format!(
-                            "ignored-remainder: '{}' after target parse in deal-damage",
-                            remainder.trim()
-                        ));
+                        ctx.push_diagnostic(OracleDiagnostic::IgnoredRemainder {
+                            text: remainder.trim().into(),
+                            parser: "deal-damage".into(),
+                            line_index: 0,
+                        });
                     }
                     return Some((
                         Effect::DealDamage {
@@ -9276,13 +10910,12 @@ fn try_parse_damage_with_remainder<'a>(text: &'a str, lower: &'a str) -> Option<
             }
         }
         return None;
-    } else if let Ok((rem, _)) =
-        tag::<_, _, VerboseError<&str>>("damage equal to ").parse(after_lower)
+    } else if let Ok((rem, _)) = tag::<_, _, OracleError<'_>>("damage equal to ").parse(after_lower)
     {
         let consumed = after_lower.len() - rem.len();
         let amount_text = &after[consumed..];
         let amount_lower = amount_text.to_lowercase();
-        let (_, before_to) = take_until::<_, _, VerboseError<&str>>(" to ")
+        let (_, before_to) = take_until::<_, _, OracleError<'_>>(" to ")
             .parse(amount_lower.as_str())
             .ok()?;
         let qty_text = amount_text[..before_to.len()].trim();
@@ -9320,7 +10953,7 @@ fn try_parse_damage_with_remainder<'a>(text: &'a str, lower: &'a str) -> Option<
         // `after_to` by the stripped length to keep the outer lifetime.
         &after_to[..stripped.original.len()]
     };
-    if tag::<_, _, VerboseError<&str>>("each ")
+    if tag::<_, _, OracleError<'_>>("each ")
         .parse(after_to_for_classification)
         .is_ok()
     {
@@ -9333,7 +10966,7 @@ fn try_parse_damage_with_remainder<'a>(text: &'a str, lower: &'a str) -> Option<
                 "",
             ));
         }
-        let (target, rem) = parse_target(after_to_for_classification);
+        let (target, rem) = parse_target_with_ctx(after_to_for_classification, ctx);
         return Some((
             Effect::DamageAll {
                 amount,
@@ -9347,7 +10980,7 @@ fn try_parse_damage_with_remainder<'a>(text: &'a str, lower: &'a str) -> Option<
     // CR 120.3: "itself" — the source creature is both damage source and recipient.
     let after_to_lower = after_to.to_lowercase();
     if after_to_lower == "itself"
-        || tag::<_, _, VerboseError<&str>>("itself ")
+        || tag::<_, _, OracleError<'_>>("itself ")
             .parse(after_to_lower.as_str())
             .is_ok()
     {
@@ -9362,7 +10995,7 @@ fn try_parse_damage_with_remainder<'a>(text: &'a str, lower: &'a str) -> Option<
     }
 
     // CR 608.2k: Check for event-context references before standard target parsing.
-    if let Some((target, ecr_rem)) = parse_event_context_ref(after_to) {
+    if let Some((target, ecr_rem)) = parse_event_context_ref_with_ctx(after_to, ctx) {
         let (target, ecr_rem) = refine_damage_target_remainder(target, ecr_rem);
         return Some((
             Effect::DealDamage {
@@ -9403,7 +11036,7 @@ fn try_parse_pump(lower: &str, text: &str) -> Option<Effect> {
     // Match "+N/+M", "+X/+0", "-X/-X", etc.
     let tp = TextPair::new(text, lower);
     let re_pos = tp.find("gets ").or_else(|| tp.find("get "))?;
-    let offset = if tag::<_, _, VerboseError<&str>>("gets ")
+    let offset = if tag::<_, _, OracleError<'_>>("gets ")
         .parse(&lower[re_pos..])
         .is_ok()
     {
@@ -9562,7 +11195,7 @@ fn strip_leading_sequence_connector(text: &str) -> &str {
     // Try to strip a leading sequence connector using nom alt().
     // Mixed case requires explicit variants since nom tag() is exact-match.
     match alt((
-        tag::<_, _, VerboseError<&str>>("Then, "),
+        tag::<_, _, OracleError<'_>>("Then, "),
         tag("Then "),
         tag("then, "),
         tag("then "),
@@ -9603,7 +11236,7 @@ fn parse_where_x_quantity_expression(where_x_expression: &str) -> Option<Quantit
     if let Ok((rest_lower, (n, sign))) = (
         nom_primitives::parse_number,
         alt((
-            value(1i32, tag::<_, _, VerboseError<&str>>(" plus ")),
+            value(1i32, tag::<_, _, OracleError<'_>>(" plus ")),
             value(-1i32, tag(" minus ")),
         )),
     )
@@ -9632,7 +11265,7 @@ fn parse_where_x_quantity_expression(where_x_expression: &str) -> Option<Quantit
         return Some(expr);
     }
     let lower = expression.to_ascii_lowercase();
-    if tag::<_, _, VerboseError<&str>>("the number of times ")
+    if tag::<_, _, OracleError<'_>>("the number of times ")
         .parse(lower.as_str())
         .is_ok()
     {
@@ -9644,15 +11277,15 @@ fn parse_where_x_quantity_expression(where_x_expression: &str) -> Option<Quantit
 fn parse_where_x_cards_named_in_all_graveyards(where_x_expression: &str) -> Option<QuantityExpr> {
     let lower = where_x_expression.to_ascii_lowercase();
     let (rest, name_lower) = preceded(
-        tag::<_, _, VerboseError<&str>>("the number of cards named "),
+        tag::<_, _, OracleError<'_>>("the number of cards named "),
         take_until(" in all graveyards"),
     )
     .parse(lower.as_str())
     .ok()?;
-    let (rest, _) = tag::<_, _, VerboseError<&str>>(" in all graveyards")
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" in all graveyards")
         .parse(rest)
         .ok()?;
-    let (rest, _) = opt(tag::<_, _, VerboseError<&str>>(" as you cast this spell"))
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>(" as you cast this spell"))
         .parse(rest)
         .ok()?;
     if !rest.is_empty() || name_lower.trim().is_empty() {
@@ -9680,16 +11313,16 @@ fn parse_where_x_cards_named_in_all_graveyards(where_x_expression: &str) -> Opti
 
 fn parse_where_x_kicker_count(where_x_expression: &str) -> Option<QuantityExpr> {
     let lower = where_x_expression.to_ascii_lowercase();
-    let (rest, _) = tag::<_, _, VerboseError<&str>>("the number of times ")
+    let (rest, _) = tag::<_, _, OracleError<'_>>("the number of times ")
         .parse(lower.as_str())
         .ok()?;
     let rest = alt((
         preceded(
-            take_until::<_, _, VerboseError<&str>>(" was kicked"),
+            take_until::<_, _, OracleError<'_>>(" was kicked"),
             tag(" was kicked"),
         ),
         preceded(
-            take_until::<_, _, VerboseError<&str>>(" kicked"),
+            take_until::<_, _, OracleError<'_>>(" kicked"),
             tag(" kicked"),
         ),
     ))
@@ -9730,11 +11363,16 @@ fn apply_where_x_quantity_expression(
                 where_x_expression,
             )),
         },
-        QuantityExpr::HalfRounded { inner, rounding } => QuantityExpr::HalfRounded {
+        QuantityExpr::DivideRounded {
+            inner,
+            divisor,
+            rounding,
+        } => QuantityExpr::DivideRounded {
             inner: Box::new(apply_where_x_quantity_expression(
                 *inner,
                 where_x_expression,
             )),
+            divisor,
             rounding,
         },
         other => other,
@@ -9756,6 +11394,9 @@ fn apply_where_x_effect_expression(effect: &mut Effect, where_x_expression: Opti
         | Effect::Token { count: amount, .. }
         | Effect::Dig { count: amount, .. }
         | Effect::ExileTop { count: amount, .. }
+        | Effect::Discover {
+            mana_value_limit: amount,
+        }
         | Effect::Incubate { count: amount } => {
             *amount = apply_where_x_quantity_expression(amount.clone(), where_x_expression);
         }
@@ -9810,9 +11451,9 @@ fn parse_signed_pt_component(text: &str) -> Option<PtValue> {
         return None;
     }
 
-    let (sign, body) = if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("+").parse(text) {
+    let (sign, body) = if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("+").parse(text) {
         (1, rest.trim())
-    } else if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("-").parse(text) {
+    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("-").parse(text) {
         (-1, rest.trim())
     } else {
         (1, text)
@@ -9851,7 +11492,7 @@ fn parse_signed_pt_component(text: &str) -> Option<PtValue> {
 /// `parse_counter_suffix_body`.
 fn parse_with_counters_suffix(lower: &str) -> Vec<(String, QuantityExpr)> {
     nom_primitives::scan_preceded(lower, |i| {
-        let (i, _) = tag::<_, _, VerboseError<&str>>("with ").parse(i)?;
+        let (i, _) = tag::<_, _, OracleError<'_>>("with ").parse(i)?;
         parse_counter_suffix_body_combinator(i)
     })
     .map(|(_, val, _)| vec![val])
@@ -9866,14 +11507,14 @@ fn parse_with_counters_suffix(lower: &str) -> Vec<(String, QuantityExpr)> {
 /// Returns the parsed `(counter_type, count)` pair on success.
 pub(crate) fn parse_counter_suffix_body_combinator(
     input: &str,
-) -> nom::IResult<&str, (String, QuantityExpr), VerboseError<&str>> {
+) -> nom::IResult<&str, (String, QuantityExpr), OracleError<'_>> {
     // Count: digits, English word, or article ("a"/"an").
     let (rest, count) = nom_primitives::parse_number.parse(input)?;
     let (rest, _) = tag(" ").parse(rest)?;
 
     // Optional "additional " — a synonym in this grammatical position.
     let (rest, _) =
-        nom::combinator::opt(tag::<_, _, VerboseError<&str>>("additional ")).parse(rest)?;
+        nom::combinator::opt(tag::<_, _, OracleError<'_>>("additional ")).parse(rest)?;
 
     // Counter type: parse the token up to " counter" / " counters". The body
     // accepts any non-whitespace name (including "+1/+1") followed by inline
@@ -9884,7 +11525,7 @@ pub(crate) fn parse_counter_suffix_body_combinator(
         .to_string();
     let (rest, _) = tag(" counter").parse(rest)?;
     // Optional plural "s".
-    let (rest, _) = nom::combinator::opt(tag::<_, _, VerboseError<&str>>("s")).parse(rest)?;
+    let (rest, _) = nom::combinator::opt(tag::<_, _, OracleError<'_>>("s")).parse(rest)?;
     let (rest, _) = tag(" on it").parse(rest)?;
 
     Ok((
@@ -9968,12 +11609,14 @@ fn try_parse_put_zone_change(lower: &str, text: &str) -> Option<Effect> {
             } else {
                 (false, false)
             };
+            let enter_transformed = destination == Zone::Battlefield
+                && parse_battlefield_transformed_qualifier(after.lower);
             return Some(Effect::ChangeZone {
                 origin: infer_origin_zone(after_put_tp.lower),
                 destination,
                 target,
                 owner_library: false,
-                enter_transformed: false,
+                enter_transformed,
                 under_your_control,
                 enter_tapped,
                 enters_attacking,
@@ -9984,6 +11627,27 @@ fn try_parse_put_zone_change(lower: &str, text: &str) -> Option<Effect> {
     }
 
     None
+}
+
+fn parse_battlefield_transformed_qualifier(tail_lower: &str) -> bool {
+    fn transformed_boundary(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
+        alt((
+            value((), nom::combinator::eof),
+            value((), tag(" ")),
+            value((), tag(",")),
+            value((), tag(".")),
+        ))
+        .parse(input)
+    }
+
+    fn transformed_clause(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
+        preceded(tag(" transformed"), transformed_boundary).parse(input)
+    }
+
+    (0..tail_lower.len()).any(|pos| {
+        tail_lower.as_bytes().get(pos) == Some(&b' ')
+            && transformed_clause(&tail_lower[pos..]).is_ok()
+    })
 }
 
 /// CR 508.4 + CR 614.1: Detect inline entry-qualifier clauses ("tapped" or
@@ -10010,7 +11674,7 @@ fn parse_battlefield_entry_qualifiers(tail_lower: &str) -> (bool, bool) {
     // Word-boundary anchor for the qualifier clause: the qualifier must end at
     // a real boundary so " tapped" doesn't accidentally consume " tappedly".
     // EOF, whitespace, or sentence punctuation all qualify.
-    fn qualifier_boundary(input: &str) -> nom::IResult<&str, (), VerboseError<&str>> {
+    fn qualifier_boundary(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
         alt((
             value((), nom::combinator::eof),
             value((), tag(" ")),
@@ -10023,14 +11687,14 @@ fn parse_battlefield_entry_qualifiers(tail_lower: &str) -> (bool, bool) {
     // Combinator for the most-specific "tapped and attacking" form. The
     // boundary check absorbs the trailing player phrase ("that opponent",
     // "defending player ...") or sentence terminator without consuming it.
-    fn tapped_and_attacking_clause(input: &str) -> nom::IResult<&str, (), VerboseError<&str>> {
+    fn tapped_and_attacking_clause(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
         preceded(tag(" tapped and attacking"), qualifier_boundary).parse(input)
     }
 
     // Combinator for the bare "tapped" form (no "and attacking"). Preserves
     // existing tutor / reanimation behavior (Coming Attraction, Dance of the
     // Dead, Hunting Wilds, etc.).
-    fn tapped_clause(input: &str) -> nom::IResult<&str, (), VerboseError<&str>> {
+    fn tapped_clause(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
         preceded(tag(" tapped"), qualifier_boundary).parse(input)
     }
 
@@ -10043,7 +11707,7 @@ fn parse_battlefield_entry_qualifiers(tail_lower: &str) -> (bool, bool) {
     // which scans byte positions for the first leading-space match. Try the
     // more-specific "tapped and attacking" combinator at every boundary
     // first; if no boundary matches, fall back to the bare "tapped" form.
-    let scan_at_boundaries = |clause: fn(&str) -> nom::IResult<&str, (), VerboseError<&str>>| {
+    let scan_at_boundaries = |clause: fn(&str) -> nom::IResult<&str, (), OracleError<'_>>| {
         (0..tail_lower.len()).any(|pos| {
             tail_lower.as_bytes().get(pos) == Some(&b' ') && clause(&tail_lower[pos..]).is_ok()
         })
@@ -10092,6 +11756,74 @@ fn parse_unless_payment(lower: &str) -> Option<UnlessCost> {
     Some(UnlessCost::Fixed { cost })
 }
 
+fn extract_resolution_unless_pay_modifier(text: &str) -> (String, Option<UnlessPayModifier>) {
+    let lower = text.to_lowercase();
+    if tag::<_, _, OracleError<'_>>("counter ")
+        .parse(lower.trim_start())
+        .is_ok()
+    {
+        return (text.to_string(), None);
+    }
+    let Some((before, payer, cost_text)) =
+        nom_primitives::scan_preceded(&lower, parse_resolution_unless_payer)
+    else {
+        return (text.to_string(), None);
+    };
+
+    let Some(cost) = parse_resolution_unless_cost(cost_text) else {
+        return (text.to_string(), None);
+    };
+
+    let cleaned = text[..before.trim_end().len()].trim().to_string();
+    (cleaned, Some(UnlessPayModifier { cost, payer }))
+}
+
+fn parse_resolution_unless_payer(input: &str) -> OracleResult<'_, TargetFilter> {
+    preceded(
+        tag("unless "),
+        alt((
+            value(
+                TargetFilter::ParentTargetController,
+                (
+                    alt((
+                        tag("its controller "),
+                        tag("that artifact's controller "),
+                        tag("that creature's controller "),
+                        tag("that permanent's controller "),
+                        tag("that spell's controller "),
+                    )),
+                    tag("pays "),
+                ),
+            ),
+            value(TargetFilter::Controller, tag("you pay ")),
+        )),
+    )
+    .parse(input)
+}
+
+fn parse_resolution_unless_cost(cost_text: &str) -> Option<UnlessCost> {
+    if let Ok((rest, cost)) = nom_primitives::parse_mana_cost(cost_text.trim_start()) {
+        if let Some(unless_cost) = parse_unless_for_each_payment(rest, &cost) {
+            return Some(unless_cost);
+        }
+        if cost != ManaCost::NoCost && cost != ManaCost::zero() {
+            return Some(UnlessCost::Fixed { cost });
+        }
+    }
+
+    let (amount, after_amount) = parse_number(cost_text.trim_start())?;
+    if tag::<_, _, OracleError<'_>>("life")
+        .parse(after_amount.trim_start())
+        .is_ok()
+    {
+        return Some(UnlessCost::PayLife {
+            amount: amount as i32,
+        });
+    }
+
+    None
+}
+
 fn parse_unless_for_each_payment(after_cost: &str, cost: &ManaCost) -> Option<UnlessCost> {
     let ManaCost::Cost { shards, generic } = cost else {
         return None;
@@ -10101,7 +11833,7 @@ fn parse_unless_for_each_payment(after_cost: &str, cost: &ManaCost) -> Option<Un
     }
 
     let (_, clause) = preceded(
-        tag::<_, _, VerboseError<&str>>(" for each "),
+        tag::<_, _, OracleError<'_>>(" for each "),
         nom::combinator::rest,
     )
     .parse(after_cost)
@@ -10121,7 +11853,7 @@ fn parse_unless_for_each_payment(after_cost: &str, cost: &ManaCost) -> Option<Un
 /// Parse "where X is this creature's power" and similar dynamic quantity clauses.
 fn parse_where_x_is(text: &str) -> Option<QuantityExpr> {
     let trimmed = text.trim().trim_start_matches(',').trim();
-    let (rest, _) = tag::<_, _, VerboseError<&str>>("where x is ")
+    let (rest, _) = tag::<_, _, OracleError<'_>>("where x is ")
         .parse(trimmed)
         .ok()?;
     let qty_text = rest.trim_end_matches('.').trim();
@@ -10253,7 +11985,7 @@ fn constrain_filter_to_stack(filter: TargetFilter) -> TargetFilter {
 ///
 /// An optional trailing "to [target phrase]" sets `forced_to`.
 fn try_parse_change_targets(lower: &str) -> Option<Effect> {
-    type E<'a> = VerboseError<&'a str>;
+    type E<'a> = OracleError<'a>;
 
     let (rest, scope) = alt((
         value(
@@ -10369,10 +12101,10 @@ fn extract_effect_verb(effect: &Effect) -> Option<&'static str> {
 mod tests {
     use super::*;
     use crate::types::ability::{
-        CardTypeSetSource, CastVariantPaid, ChoiceType, Comparator, ContinuousModification,
-        ControllerRef, CountScope, DoublePTMode, Duration, FilterProp, GainLifePlayer,
-        LinkedExileScope, ManaContribution, ManaProduction, ObjectScope, PaymentCost, QuantityExpr,
-        QuantityRef, TypeFilter, ZoneRef,
+        AbilityCondition, CardTypeSetSource, CastVariantPaid, ChoiceType, Comparator,
+        ContinuousModification, ControllerRef, CountScope, DoublePTMode, Duration, FilterProp,
+        GainLifePlayer, LinkedExileScope, ManaContribution, ManaProduction, ObjectScope,
+        PaymentCost, QuantityExpr, QuantityRef, TypeFilter, ZoneRef,
     };
     use crate::types::card_type::Supertype;
     use crate::types::keywords::Keyword;
@@ -10781,6 +12513,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn effect_damage_all_that_player_controls_uses_relative_player_scope() {
+        let mut ctx = ParseContext {
+            relative_player_scope: Some(ControllerRef::TargetPlayer),
+            ..ParseContext::default()
+        };
+        let ability = parse_effect_chain_with_context(
+            "~ deals that much damage to each creature controlled by that player",
+            AbilityKind::Spell,
+            &mut ctx,
+        );
+        match &*ability.effect {
+            Effect::DamageAll {
+                amount:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount,
+                    },
+                target: TargetFilter::Typed(tf),
+                player_filter: None,
+            } => {
+                assert_eq!(tf.controller, Some(ControllerRef::TargetPlayer));
+                assert!(tf
+                    .type_filters
+                    .iter()
+                    .any(|t| matches!(t, TypeFilter::Creature)));
+            }
+            other => panic!("expected DamageAll against target player's creatures, got {other:?}"),
+        }
+    }
+
     /// CR 120.3: Composite "each opponent and each [type] you don't control"
     /// routes to `DamageAll` with the typed object filter populated and the
     /// `player_filter` set to Opponent. Omnath, Locus of Creation 3rd-branch class.
@@ -10962,6 +12724,7 @@ mod tests {
         let e = try_parse_damage(
             "deal damage to itself equal to its power",
             "deal damage to itself equal to its power",
+            &mut ParseContext::default(),
         );
         let e = e.expect("should parse damage to itself");
         assert!(
@@ -10986,7 +12749,7 @@ mod tests {
         // Full pipeline: subject stripping + imperative → should produce DealDamage
         let clause = parse_effect_clause(
             "~ deals damage to itself equal to its power",
-            &ParseContext::default(),
+            &mut ParseContext::default(),
         );
         assert!(
             matches!(
@@ -11007,10 +12770,73 @@ mod tests {
     }
 
     #[test]
+    fn self_subject_damage_equal_to_its_power_uses_source_power() {
+        let clause = parse_effect_clause(
+            "~ deals damage equal to its power to target creature with flying",
+            &mut ParseContext::default(),
+        );
+
+        assert!(
+            matches!(
+                clause.effect,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: ObjectScope::Source
+                        },
+                    },
+                    target: TargetFilter::Typed(_),
+                    damage_source: None,
+                }
+            ),
+            "expected source-power DealDamage, got: {:?}",
+            clause.effect
+        );
+    }
+
+    #[test]
+    fn target_subject_damage_equal_to_its_power_uses_target_source_power() {
+        let clause = parse_effect_clause(
+            "target creature you control deals damage equal to its power to target creature or planeswalker you don't control",
+            &mut ParseContext::default(),
+        );
+
+        let Effect::TargetOnly { target } = &clause.effect else {
+            panic!(
+                "expected TargetOnly source wrapper, got {:?}",
+                clause.effect
+            );
+        };
+        assert!(matches!(target, TargetFilter::Typed(_)));
+        let sub = clause
+            .sub_ability
+            .as_ref()
+            .expect("damage should be in sub-ability after source target");
+        assert!(
+            matches!(
+                sub.effect.as_ref(),
+                Effect::DealDamage {
+                    amount: QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: ObjectScope::Target
+                        },
+                    },
+                    target: TargetFilter::Or { .. },
+                    damage_source: Some(DamageSource::Target),
+                }
+            ),
+            "expected target-source-power damage, got {:?}",
+            sub.effect
+        );
+    }
+
+    #[test]
     fn try_split_damage_compound_lightning_helix() {
-        let ctx = ParseContext::default();
-        let clause =
-            try_split_damage_compound("~ deals 3 damage to any target and you gain 3 life", &ctx);
+        let mut ctx = ParseContext::default();
+        let clause = try_split_damage_compound(
+            "~ deals 3 damage to any target and you gain 3 life",
+            &mut ctx,
+        );
         let clause = clause.expect("should split damage + life gain compound");
         assert!(
             matches!(
@@ -11042,8 +12868,8 @@ mod tests {
 
     #[test]
     fn try_split_damage_compound_no_compound() {
-        let ctx = ParseContext::default();
-        let result = try_split_damage_compound("~ deals 3 damage to target creature", &ctx);
+        let mut ctx = ParseContext::default();
+        let result = try_split_damage_compound("~ deals 3 damage to target creature", &mut ctx);
         assert!(
             result.is_none(),
             "no compound connector — should return None"
@@ -11052,10 +12878,10 @@ mod tests {
 
     #[test]
     fn try_split_damage_compound_false_and_in_filter() {
-        let ctx = ParseContext::default();
+        let mut ctx = ParseContext::default();
         let result = try_split_damage_compound(
             "~ deals 3 damage to target creature you own and control",
-            &ctx,
+            &mut ctx,
         );
         // parse_target consumes "you own and control" as part of the filter,
         // leaving empty remainder — no false split.
@@ -11068,8 +12894,8 @@ mod tests {
     #[test]
     fn debug_that_creature_pump_only() {
         // Isolated test: parse sub-text directly through parse_effect_clause
-        let ctx = ParseContext::default();
-        let clause = parse_effect_clause("that creature gets -2/-2 until end of turn", &ctx);
+        let mut ctx = ParseContext::default();
+        let clause = parse_effect_clause("that creature gets -2/-2 until end of turn", &mut ctx);
         assert!(
             !matches!(clause.effect, Effect::Unimplemented { .. }),
             "should parse, got: {:?}",
@@ -11114,10 +12940,10 @@ mod tests {
         // resolver treats the full recipient set as one simultaneous damage event
         // from one source. Splitting into two effects would break replacement
         // effects like Awe Strike that watch damage from a single source.
-        let ctx = ParseContext::default();
+        let mut ctx = ParseContext::default();
         let result = try_split_damage_compound(
             "deal 1 damage to each opponent and each creature and planeswalker they control",
-            &ctx,
+            &mut ctx,
         );
         let clause = result.expect("compound player+object damage should parse");
         assert!(
@@ -11159,10 +12985,10 @@ mod tests {
     fn try_split_damage_compound_player_and_planeswalker() {
         // CR 120.3: Kumano Faces Kakkazan — "deals 1 damage to each opponent and
         // each planeswalker they control" — same class, single planeswalker type.
-        let ctx = ParseContext::default();
+        let mut ctx = ParseContext::default();
         let result = try_split_damage_compound(
             "deal 1 damage to each opponent and each planeswalker they control",
-            &ctx,
+            &mut ctx,
         );
         let clause = result.expect("compound player+object damage should parse");
         assert!(clause.sub_ability.is_none());
@@ -11188,9 +13014,9 @@ mod tests {
     #[test]
     fn try_split_damage_compound_deconjugated() {
         // Subject-stripped form: "deals" → "deal" after deconjugation
-        let ctx = ParseContext::default();
+        let mut ctx = ParseContext::default();
         let clause =
-            try_split_damage_compound("deal 3 damage to any target and you gain 3 life", &ctx);
+            try_split_damage_compound("deal 3 damage to any target and you gain 3 life", &mut ctx);
         let clause = clause.expect("deconjugated form should work");
         assert!(matches!(
             clause.effect,
@@ -11242,10 +13068,12 @@ mod tests {
     #[test]
     fn try_split_damage_compound_event_context_oath_of_kaya() {
         // CR 608.2k: "that player" event-context ref with compound remainder
-        let ctx = ParseContext::default();
-        let clause =
-            try_split_damage_compound("~ deals 2 damage to that player and you gain 2 life", &ctx)
-                .expect("should split event-context compound");
+        let mut ctx = ParseContext::default();
+        let clause = try_split_damage_compound(
+            "~ deals 2 damage to that player and you gain 2 life",
+            &mut ctx,
+        )
+        .expect("should split event-context compound");
         assert!(
             matches!(
                 clause.effect,
@@ -11278,10 +13106,12 @@ mod tests {
     #[test]
     fn try_split_damage_compound_event_context_torch_the_tower() {
         // CR 608.2k: "that permanent" event-context ref with compound remainder
-        let ctx = ParseContext::default();
-        let clause =
-            try_split_damage_compound("~ deals 3 damage to that permanent and you scry 1", &ctx)
-                .expect("should split event-context compound");
+        let mut ctx = ParseContext::default();
+        let clause = try_split_damage_compound(
+            "~ deals 3 damage to that permanent and you scry 1",
+            &mut ctx,
+        )
+        .expect("should split event-context compound");
         assert!(
             matches!(
                 clause.effect,
@@ -11314,8 +13144,8 @@ mod tests {
     #[test]
     fn try_split_damage_compound_event_context_no_compound() {
         // No compound — should return None and fall through to normal path
-        let ctx = ParseContext::default();
-        let result = try_split_damage_compound("~ deals 2 damage to that player", &ctx);
+        let mut ctx = ParseContext::default();
+        let result = try_split_damage_compound("~ deals 2 damage to that player", &mut ctx);
         assert!(result.is_none(), "no compound should return None");
     }
 
@@ -11446,6 +13276,42 @@ mod tests {
         } else {
             panic!("expected Counter effect, got {e:?}");
         }
+    }
+
+    #[test]
+    fn effect_chain_unless_target_controller_pays_mana() {
+        use crate::types::mana::ManaCost;
+
+        let def = parse_effect_chain(
+            "Tap target creature unless its controller pays {1}",
+            AbilityKind::Activated,
+        );
+
+        assert!(matches!(*def.effect, Effect::Tap { .. }));
+        let unless_pay = def.unless_pay.expect("should attach unless_pay");
+        assert_eq!(unless_pay.payer, TargetFilter::ParentTargetController);
+        assert_eq!(
+            unless_pay.cost,
+            UnlessCost::Fixed {
+                cost: ManaCost::Cost {
+                    shards: vec![],
+                    generic: 1,
+                },
+            },
+        );
+    }
+
+    #[test]
+    fn effect_chain_unless_target_controller_pays_life() {
+        let def = parse_effect_chain(
+            "Tap target creature unless its controller pays 2 life",
+            AbilityKind::Activated,
+        );
+
+        assert!(matches!(*def.effect, Effect::Tap { .. }));
+        let unless_pay = def.unless_pay.expect("should attach unless_pay");
+        assert_eq!(unless_pay.payer, TargetFilter::ParentTargetController);
+        assert_eq!(unless_pay.cost, UnlessCost::PayLife { amount: 2 });
     }
 
     #[test]
@@ -11666,7 +13532,7 @@ mod tests {
     fn effect_compound_exile_creature_and_possessive_graveyard() {
         let clause = parse_effect_clause(
             "exile a creature they control and their graveyard",
-            &Default::default(),
+            &mut Default::default(),
         );
         assert!(
             matches!(clause.effect, Effect::ChangeZone { .. }),
@@ -11871,6 +13737,7 @@ mod tests {
     fn for_each_token_count_keeps_counter_history_this_turn_clause() {
         let clause = try_parse_for_each_effect(
             "create a 1/1 green Insect creature token for each +1/+1 counter you've put on creatures under your control this turn",
+            &mut ParseContext::default(),
         )
         .expect("for-each token parser should match");
         match clause.effect {
@@ -12390,6 +14257,14 @@ mod tests {
     }
 
     #[test]
+    fn strip_leading_return_destination_your_hand() {
+        let (target, dest) =
+            strip_leading_return_destination_ext("to your hand target artifact card");
+        assert_eq!(target, "target artifact card");
+        assert_eq!(dest.unwrap().zone, Zone::Hand);
+    }
+
+    #[test]
     fn strip_return_destination_graveyard() {
         let (target, dest) = strip_return_destination_ext("it to its owner's graveyard");
         assert_eq!(target, "it");
@@ -12410,6 +14285,37 @@ mod tests {
             "Expected ChangeZone to Graveyard, got {:?}",
             e
         );
+    }
+
+    #[test]
+    fn return_leading_destination_to_battlefield_parses_target() {
+        let e = parse_effect(
+            "Return to the battlefield target creature card in your graveyard that was put there from the battlefield this turn",
+        );
+        match e {
+            Effect::ChangeZone {
+                destination,
+                target,
+                ..
+            } => {
+                assert_eq!(destination, Zone::Battlefield);
+                assert!(matches!(target, TargetFilter::Typed(_)), "got {target:?}");
+            }
+            other => panic!("expected ChangeZone, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn return_leading_destination_all_exiled_with_source() {
+        let e = parse_effect("Return to the battlefield all cards they own exiled with it");
+        assert!(matches!(
+            e,
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                target: TargetFilter::ExiledBySource,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -12592,6 +14498,63 @@ mod tests {
     }
 
     #[test]
+    fn effect_for_each_object_copy_token_uses_source_filter_not_repeat() {
+        let def = parse_effect_chain(
+            "For each token you control that entered the battlefield this turn, create a token that's a copy of it",
+            AbilityKind::Spell,
+        );
+        assert!(
+            def.repeat_for.is_none(),
+            "copy-source set should not be lowered to repeat_for"
+        );
+        match &*def.effect {
+            Effect::CopyTokenOf {
+                target,
+                source_filter: Some(TargetFilter::Typed(tf)),
+                ..
+            } => {
+                assert_eq!(*target, TargetFilter::None);
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(tf.properties.iter().any(|p| matches!(p, FilterProp::Token)));
+                assert!(tf
+                    .properties
+                    .iter()
+                    .any(|p| matches!(p, FilterProp::EnteredThisTurn)));
+            }
+            other => panic!("expected CopyTokenOf with typed source_filter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn effect_for_each_chosen_type_copy_token_uses_source_filter() {
+        let def = parse_effect_chain(
+            "For each token you control of the chosen type that entered this turn, create a token that's a copy of it",
+            AbilityKind::Spell,
+        );
+        assert!(def.repeat_for.is_none());
+        match &*def.effect {
+            Effect::CopyTokenOf {
+                target,
+                source_filter: Some(TargetFilter::Typed(tf)),
+                ..
+            } => {
+                assert_eq!(*target, TargetFilter::None);
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(tf.properties.iter().any(|p| matches!(p, FilterProp::Token)));
+                assert!(tf
+                    .properties
+                    .iter()
+                    .any(|p| matches!(p, FilterProp::IsChosenCreatureType)));
+                assert!(tf
+                    .properties
+                    .iter()
+                    .any(|p| matches!(p, FilterProp::EnteredThisTurn)));
+            }
+            other => panic!("expected CopyTokenOf with typed source_filter, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn effect_copy_it_for_each_commander_cast_sets_repeat_for() {
         let def = parse_effect_chain(
             "Copy it for each time you've cast your commander from the command zone this game",
@@ -12653,6 +14616,30 @@ mod tests {
                 }
             ),
             "expected Manifest {{ Controller, count: 2 }}, got: {e:?}"
+        );
+    }
+
+    #[test]
+    fn effect_manifest_that_players_library_uses_relative_player_scope() {
+        let mut ctx = ParseContext {
+            relative_player_scope: Some(ControllerRef::TargetPlayer),
+            ..ParseContext::default()
+        };
+        let def = parse_effect_chain_with_context(
+            "Manifest the top card of that player's library",
+            AbilityKind::Spell,
+            &mut ctx,
+        );
+        assert!(
+            matches!(
+                *def.effect,
+                Effect::Manifest {
+                    target: TargetFilter::TriggeringPlayer,
+                    count: QuantityExpr::Fixed { value: 1 }
+                }
+            ),
+            "expected Manifest {{ TriggeringPlayer, count: 1 }}, got: {:?}",
+            def.effect
         );
     }
 
@@ -12780,6 +14767,11 @@ mod tests {
             .sub_ability
             .as_ref()
             .expect("should have sub_ability for Draw after ', then draws'");
+        assert_eq!(
+            sub.player_scope,
+            Some(PlayerFilter::All),
+            "carried each-player subject should apply to the draw continuation"
+        );
         assert!(
             matches!(
                 &*sub.effect,
@@ -12791,6 +14783,57 @@ mod tests {
             "sub_ability should be Draw(7), got {:?}",
             sub.effect
         );
+    }
+
+    #[test]
+    fn windfall_draw_uses_previous_discard_max_for_each_player() {
+        let def = parse_effect_chain(
+            "Each player discards their hand, then draws cards equal to the greatest number of cards a player discarded this way.",
+            AbilityKind::Spell,
+        );
+        assert_eq!(def.player_scope, Some(PlayerFilter::All));
+        assert!(matches!(&*def.effect, Effect::Discard { .. }));
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("expected draw continuation");
+        assert_eq!(sub.player_scope, Some(PlayerFilter::All));
+        assert!(matches!(
+            &*sub.effect,
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::PreviousEffectAmount
+                },
+                target: TargetFilter::Controller,
+            }
+        ));
+    }
+
+    #[test]
+    fn dark_deal_draw_uses_each_players_discard_count_minus_one() {
+        let def = parse_effect_chain(
+            "Each player discards all the cards in their hand, then draws that many cards minus one.",
+            AbilityKind::Spell,
+        );
+        assert_eq!(def.player_scope, Some(PlayerFilter::All));
+        assert!(matches!(&*def.effect, Effect::Discard { .. }));
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("expected draw continuation");
+        assert_eq!(sub.player_scope, Some(PlayerFilter::All));
+        assert!(matches!(
+            &*sub.effect,
+            Effect::Draw {
+                count: QuantityExpr::Offset { inner, offset: -1 },
+                target: TargetFilter::Controller,
+            } if matches!(
+                inner.as_ref(),
+                QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount
+                }
+            )
+        ));
     }
 
     #[test]
@@ -13595,7 +15638,7 @@ mod tests {
     fn compound_tap_and_put_counter() {
         let clause = parse_effect_clause(
             "tap target creature an opponent controls and put a stun counter on it",
-            &ParseContext::default(),
+            &mut ParseContext::default(),
         );
         assert!(
             matches!(clause.effect, Effect::Tap { .. }),
@@ -13620,7 +15663,7 @@ mod tests {
     fn compound_tap_and_put_counter_ignores_trigger_subject_context() {
         let clause = parse_effect_clause(
             "tap target creature an opponent controls and put a stun counter on it",
-            &ParseContext {
+            &mut ParseContext {
                 subject: Some(TargetFilter::SelfRef),
                 card_name: None,
                 actor: None,
@@ -13646,7 +15689,7 @@ mod tests {
         let def = parse_effect_chain_with_context(
             "tap target creature an opponent controls and put a stun counter on it.",
             AbilityKind::Spell,
-            &ParseContext {
+            &mut ParseContext {
                 subject: Some(TargetFilter::SelfRef),
                 card_name: None,
                 actor: None,
@@ -13671,7 +15714,7 @@ mod tests {
     fn compound_exile_own_and_control_not_split() {
         let clause = parse_effect_clause(
             "exile any number of other nonland permanents you own and control",
-            &ParseContext::default(),
+            &mut ParseContext::default(),
         );
         assert!(
             matches!(
@@ -13703,11 +15746,37 @@ mod tests {
     }
 
     #[test]
+    fn choose_color_then_add_mana_of_that_color_collapses_to_mana_effect() {
+        let def = parse_effect_chain(
+            "Choose a color. Add an amount of mana of that color equal to your devotion to that color.",
+            AbilityKind::Activated,
+        );
+        let Effect::Mana { produced, .. } = &*def.effect else {
+            panic!("expected collapsed mana effect, got {:?}", def.effect);
+        };
+        assert!(matches!(
+            produced,
+            ManaProduction::ChosenColor {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::Devotion {
+                        colors: crate::types::ability::DevotionColors::ChosenColor
+                    }
+                },
+                ..
+            }
+        ));
+        assert!(
+            def.sub_ability.is_none(),
+            "ephemeral color choice should not remain as a stack sub-ability"
+        );
+    }
+
+    #[test]
     fn put_counter_up_to_one_target_creature() {
         let (effect, _rem, multi) = counter::try_parse_put_counter(
             "put a +1/+1 counter on up to one target creature",
             "Put a +1/+1 counter on up to one target creature",
-            &ParseContext::default(),
+            &mut ParseContext::default(),
         )
         .expect("should parse");
         if let Effect::PutCounter { target, .. } = &effect {
@@ -13728,7 +15797,7 @@ mod tests {
         let (effect, _rem, multi) = counter::try_parse_put_counter(
             "put two +1/+1 counters on target creature",
             "Put two +1/+1 counters on target creature",
-            &ParseContext::default(),
+            &mut ParseContext::default(),
         )
         .expect("should parse");
         assert!(matches!(effect, Effect::PutCounter { .. }));
@@ -13739,7 +15808,7 @@ mod tests {
     fn put_counter_each_of_up_to_two_target_creatures_is_multi_targeted() {
         let clause = parse_effect_clause(
             "put a +1/+1 counter on each of up to two target creatures",
-            &ParseContext::default(),
+            &mut ParseContext::default(),
         );
         assert_eq!(clause.multi_target, Some(MultiTargetSpec::fixed(0, 2)));
         assert!(
@@ -13777,7 +15846,7 @@ mod tests {
         let def = parse_effect_chain_with_context(
             "put X +1/+1 counters on target creature you control, where X is your speed",
             AbilityKind::Spell,
-            &ParseContext::default(),
+            &mut ParseContext::default(),
         );
 
         assert!(matches!(
@@ -14411,7 +16480,7 @@ mod tests {
     fn any_number_of_target_creatures_pump_and_keyword() {
         let clause = parse_effect_clause(
             "any number of target creatures each get +1/+1 and gain flying until end of turn",
-            &ParseContext::default(),
+            &mut ParseContext::default(),
         );
         // Combined pump + keyword becomes GenericEffect with continuous modifications
         assert!(
@@ -14430,7 +16499,7 @@ mod tests {
     fn any_number_of_target_creatures_phase_out() {
         let clause = parse_effect_clause(
             "any number of target creatures you control phase out",
-            &ParseContext::default(),
+            &mut ParseContext::default(),
         );
         assert!(
             matches!(clause.effect, Effect::PhaseOut { .. }),
@@ -14444,7 +16513,7 @@ mod tests {
     fn any_number_of_target_players_mill() {
         let clause = parse_effect_clause(
             "any number of target players each mill two cards",
-            &ParseContext::default(),
+            &mut ParseContext::default(),
         );
         assert!(
             matches!(
@@ -14465,7 +16534,7 @@ mod tests {
     fn one_or_two_target_creatures_each_pump() {
         let clause = parse_effect_clause(
             "one or two target creatures each get +2/+2 until end of turn",
-            &ParseContext::default(),
+            &mut ParseContext::default(),
         );
         assert!(
             !matches!(clause.effect, Effect::Unimplemented { .. }),
@@ -14479,7 +16548,7 @@ mod tests {
     fn one_two_or_three_target_creatures_each_pump() {
         let clause = parse_effect_clause(
             "one, two, or three target creatures each get +1/+1 until end of turn",
-            &ParseContext::default(),
+            &mut ParseContext::default(),
         );
         assert!(
             !matches!(clause.effect, Effect::Unimplemented { .. }),
@@ -14779,7 +16848,7 @@ mod tests {
     fn parse_damage_cant_be_prevented_this_turn() {
         let clause = parse_effect_clause(
             "Damage can't be prevented this turn",
-            &ParseContext::default(),
+            &mut ParseContext::default(),
         );
         match clause.effect {
             Effect::AddRestriction { restriction } => {
@@ -14800,7 +16869,7 @@ mod tests {
     fn shuffle_compound_subject_into_owners_libraries() {
         let clause = parse_effect_clause(
             "shuffle ~ and target creature with a stun counter on it into their owners' libraries",
-            &ParseContext::default(),
+            &mut ParseContext::default(),
         );
         match &clause.effect {
             Effect::ChangeZone {
@@ -15570,6 +17639,35 @@ mod tests {
     }
 
     #[test]
+    fn parse_look_at_possessive_hands_targets_player_axes() {
+        let cases = [
+            ("Look at your hand.", TargetFilter::Controller),
+            ("Look at target player's hand.", TargetFilter::Player),
+            (
+                "Look at target opponent's hand.",
+                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+            ),
+            ("Look at their hand.", TargetFilter::TriggeringPlayer),
+            (
+                "Look at that player's hand.",
+                TargetFilter::TriggeringPlayer,
+            ),
+            (
+                "Look at defending player's hand.",
+                TargetFilter::DefendingPlayer,
+            ),
+        ];
+
+        for (text, expected_target) in cases {
+            let def = parse_effect_chain(text, AbilityKind::Spell);
+            let Effect::RevealHand { target, .. } = &*def.effect else {
+                panic!("Expected RevealHand for {text}, got {:?}", def.effect);
+            };
+            assert_eq!(*target, expected_target, "{text}");
+        }
+    }
+
+    #[test]
     fn target_opponent_exiles_relative_creature_and_graveyard_uses_target_only_chain() {
         let def = parse_effect_chain(
             "Target opponent exiles a creature they control and their graveyard.",
@@ -15821,12 +17919,12 @@ mod tests {
                 assert!(
                     matches!(
                         count,
-                        QuantityExpr::HalfRounded {
+                        QuantityExpr::DivideRounded {
                             rounding: crate::types::ability::RoundingMode::Up,
                             ..
                         }
                     ),
-                    "Expected HalfRounded(Up), got {count:?}"
+                    "Expected DivideRounded(Up), got {count:?}"
                 );
             }
             other => panic!("Expected ExileTop, got {other:?}"),
@@ -15835,7 +17933,7 @@ mod tests {
 
     /// CR 107.1a class-level regression — "Target opponent loses half their
     /// life, rounded up." The `try_parse_half_life_amount` path must now
-    /// produce a typed HalfRounded `amount` on `LoseLife`, not `Fixed { 1 }`.
+    /// produce a typed DivideRounded `amount` on `LoseLife`, not `Fixed { 1 }`.
     #[test]
     fn blood_tribute_lose_half_their_life_rounded_up() {
         use crate::types::ability::RoundingMode;
@@ -15847,15 +17945,16 @@ mod tests {
             Effect::LoseLife { amount, .. } => {
                 assert_eq!(
                     *amount,
-                    QuantityExpr::HalfRounded {
+                    QuantityExpr::DivideRounded {
                         inner: Box::new(QuantityExpr::Ref {
                             qty: QuantityRef::LifeTotal {
                                 player: PlayerScope::Target
                             },
                         }),
+                        divisor: 2,
                         rounding: RoundingMode::Up,
                     },
-                    "Expected HalfRounded(TargetLifeTotal, Up), got {amount:?}",
+                    "Expected DivideRounded(TargetLifeTotal, Up), got {amount:?}",
                 );
             }
             other => panic!("Expected LoseLife, got {other:?}"),
@@ -15885,12 +17984,13 @@ mod tests {
                 assert_eq!(*destination, crate::types::zones::Zone::Graveyard);
                 assert_eq!(
                     *count,
-                    QuantityExpr::HalfRounded {
+                    QuantityExpr::DivideRounded {
                         inner: Box::new(QuantityExpr::Ref {
                             qty: QuantityRef::TargetZoneCardCount {
                                 zone: ZoneRef::Library,
                             },
                         }),
+                        divisor: 2,
                         rounding: RoundingMode::Down,
                     },
                 );
@@ -15981,7 +18081,10 @@ mod tests {
 
     #[test]
     fn strip_unless_entered_suffix_strips_correctly() {
-        let (cond, text) = strip_unless_entered_suffix("discard a card unless ~ entered this turn");
+        let (cond, text) = strip_unless_entered_suffix(
+            "discard a card unless ~ entered this turn",
+            &mut ParseContext::default(),
+        );
         assert_eq!(
             cond,
             Some(AbilityCondition::Not {
@@ -15994,7 +18097,8 @@ mod tests {
 
     #[test]
     fn strip_unless_entered_suffix_no_match() {
-        let (cond, text) = strip_unless_entered_suffix("discard a card");
+        let (cond, text) =
+            strip_unless_entered_suffix("discard a card", &mut ParseContext::default());
         assert!(cond.is_none());
         assert_eq!(text, "discard a card");
     }
@@ -16002,7 +18106,10 @@ mod tests {
     #[test]
     fn strip_unless_general_your_turn() {
         // "unless it's your turn" → Not(DuringYourTurn) → IsYourTurn { negated: true }
-        let (cond, text) = strip_unless_entered_suffix("draw a card unless it's your turn");
+        let (cond, text) = strip_unless_entered_suffix(
+            "draw a card unless it's your turn",
+            &mut ParseContext::default(),
+        );
         assert_eq!(
             cond,
             Some(AbilityCondition::Not {
@@ -16015,8 +18122,10 @@ mod tests {
     #[test]
     fn strip_unless_you_control_a_creature() {
         // "unless you control a creature" → Not(IsPresent) → ObjectCount EQ 0
-        let (cond, text) =
-            strip_unless_entered_suffix("sacrifice this enchantment unless you control a creature");
+        let (cond, text) = strip_unless_entered_suffix(
+            "sacrifice this enchantment unless you control a creature",
+            &mut ParseContext::default(),
+        );
         match cond {
             Some(AbilityCondition::QuantityCheck {
                 comparator: Comparator::EQ,
@@ -16030,8 +18139,10 @@ mod tests {
 
     #[test]
     fn strip_unless_unrecognized_returns_none() {
-        let (cond, text) =
-            strip_unless_entered_suffix("sacrifice it unless something weird happens");
+        let (cond, text) = strip_unless_entered_suffix(
+            "sacrifice it unless something weird happens",
+            &mut ParseContext::default(),
+        );
         assert!(cond.is_none());
         assert_eq!(text, "sacrifice it unless something weird happens");
     }
@@ -16294,7 +18405,10 @@ mod tests {
 
     #[test]
     fn search_filter_creature_with_mana_value_3_or_less() {
-        let filter = parse_search_filter("creature card with mana value 3 or less");
+        let filter = parse_search_filter(
+            "creature card with mana value 3 or less",
+            &mut ParseContext::default(),
+        );
         let TargetFilter::Typed(tf) = filter else {
             panic!("Expected Typed filter, got {filter:?}");
         };
@@ -16314,7 +18428,10 @@ mod tests {
 
     #[test]
     fn search_filter_creature_with_mana_value_exact() {
-        let filter = parse_search_filter("creature card with mana value 2");
+        let filter = parse_search_filter(
+            "creature card with mana value 2",
+            &mut ParseContext::default(),
+        );
         let TargetFilter::Typed(tf) = filter else {
             panic!("Expected Typed filter, got {filter:?}");
         };
@@ -16336,6 +18453,7 @@ mod tests {
     fn search_filter_artifact_creature_or_enchantment_with_mana_value_1_or_less() {
         let filter = parse_search_filter(
             "artifact, creature, and/or enchantment cards with mana value 1 or less",
+            &mut ParseContext::default(),
         );
         let TargetFilter::Or { filters } = filter else {
             panic!("Expected Or filter, got {filter:?}");
@@ -16359,6 +18477,7 @@ mod tests {
     fn search_filter_aura_preserves_enchantment_type_and_dynamic_mana_value() {
         let filter = parse_search_filter(
             "Aura card with mana value less than or equal to that Aura and with a different name than each Aura you control",
+            &mut ParseContext::default(),
         );
         let TargetFilter::Typed(tf) = filter else {
             panic!("Expected Typed filter, got {filter:?}");
@@ -16386,7 +18505,7 @@ mod tests {
 
     #[test]
     fn search_filter_card_with_that_name() {
-        let filter = parse_search_filter("card with that name");
+        let filter = parse_search_filter("card with that name", &mut ParseContext::default());
         let TargetFilter::Typed(tf) = filter else {
             panic!("Expected Typed filter with SameName, got {filter:?}");
         };
@@ -16398,7 +18517,7 @@ mod tests {
 
     #[test]
     fn search_filter_basic_card_with_that_name() {
-        let filter = parse_search_filter("basic card with that name");
+        let filter = parse_search_filter("basic card with that name", &mut ParseContext::default());
         let TargetFilter::Typed(tf) = filter else {
             panic!("Expected Typed filter with Basic + SameName, got {filter:?}");
         };
@@ -16463,8 +18582,10 @@ mod tests {
 
     #[test]
     fn search_library_details_up_to_five() {
-        let details =
-            parse_search_library_details("search your library for up to five creature cards");
+        let details = parse_search_library_details(
+            "search your library for up to five creature cards",
+            &mut ParseContext::default(),
+        );
         assert_eq!(details.count, QuantityExpr::Fixed { value: 5 });
         let TargetFilter::Typed(tf) = &details.filter else {
             panic!("Expected Typed filter, got {:?}", details.filter);
@@ -16514,7 +18635,7 @@ mod tests {
 
     #[test]
     fn search_filter_noncreature_card() {
-        let filter = parse_search_filter("noncreature card");
+        let filter = parse_search_filter("noncreature card", &mut ParseContext::default());
         let TargetFilter::Typed(tf) = filter else {
             panic!("Expected Typed filter, got {filter:?}");
         };
@@ -16526,7 +18647,7 @@ mod tests {
 
     #[test]
     fn search_filter_nonland_card() {
-        let filter = parse_search_filter("nonland card");
+        let filter = parse_search_filter("nonland card", &mut ParseContext::default());
         let TargetFilter::Typed(tf) = filter else {
             panic!("Expected Typed filter, got {filter:?}");
         };
@@ -16538,7 +18659,7 @@ mod tests {
 
     #[test]
     fn search_filter_card_of_chosen_kind() {
-        let filter = parse_search_filter("card of the chosen kind");
+        let filter = parse_search_filter("card of the chosen kind", &mut ParseContext::default());
         let TargetFilter::Typed(tf) = filter else {
             panic!("Expected Typed filter, got {filter:?}");
         };
@@ -16550,7 +18671,10 @@ mod tests {
 
     #[test]
     fn search_filter_permanent_card_of_chosen_kind() {
-        let filter = parse_search_filter("permanent card of the chosen kind");
+        let filter = parse_search_filter(
+            "permanent card of the chosen kind",
+            &mut ParseContext::default(),
+        );
         let TargetFilter::Typed(tf) = filter else {
             panic!("Expected Typed filter, got {filter:?}");
         };
@@ -16568,7 +18692,7 @@ mod tests {
 
     #[test]
     fn seek_an_elf_card() {
-        let details = parse_seek_details("seek an elf card");
+        let details = parse_seek_details("seek an elf card", &mut ParseContext::default());
         assert_eq!(details.count, QuantityExpr::Fixed { value: 1 });
         assert_eq!(details.destination, Zone::Hand);
         assert!(!details.enter_tapped);
@@ -16583,8 +18707,9 @@ mod tests {
 
     #[test]
     fn seek_two_nonland_cards() {
-        let details = parse_seek_details("seek two nonland cards");
+        let details = parse_seek_details("seek two nonland cards", &mut ParseContext::default());
         assert_eq!(details.count, QuantityExpr::Fixed { value: 2 });
+        assert_eq!(details.from_top, None);
         assert_eq!(details.destination, Zone::Hand);
         let TargetFilter::Typed(tf) = &details.filter else {
             panic!("Expected Typed filter, got {:?}", details.filter);
@@ -16596,8 +18721,53 @@ mod tests {
     }
 
     #[test]
+    fn seek_from_among_top_cards_carries_library_limit() {
+        let details = parse_seek_details(
+            "seek an artifact card from among the top ten cards of your library, then shuffle",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(details.count, QuantityExpr::Fixed { value: 1 });
+        assert_eq!(details.from_top, Some(10));
+        let TargetFilter::Typed(tf) = &details.filter else {
+            panic!("Expected Typed filter, got {:?}", details.filter);
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Artifact));
+    }
+
+    #[test]
+    fn seek_with_opponent_cast_mana_value_condition_keeps_filter_clean() {
+        let def = parse_effect_chain(
+            "Seek a creature card if an opponent has cast a spell with mana value 3 or less this turn.",
+            AbilityKind::Spell,
+        );
+        let Effect::Seek { filter, .. } = &*def.effect else {
+            panic!("expected Seek, got {:?}", def.effect);
+        };
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Creature));
+        assert!(matches!(
+            def.condition,
+            Some(AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::SpellsCastThisTurn {
+                        scope: crate::types::ability::CountScope::Opponents,
+                        ..
+                    }
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 }
+            })
+        ));
+    }
+
+    #[test]
     fn seek_cards_of_chosen_kind() {
-        let details = parse_seek_details("seek two cards of the chosen kind");
+        let details = parse_seek_details(
+            "seek two cards of the chosen kind",
+            &mut ParseContext::default(),
+        );
         assert_eq!(details.count, QuantityExpr::Fixed { value: 2 });
         let TargetFilter::Typed(tf) = &details.filter else {
             panic!("Expected Typed filter, got {:?}", details.filter);
@@ -16639,7 +18809,10 @@ mod tests {
 
     #[test]
     fn seek_land_onto_battlefield_tapped() {
-        let details = parse_seek_details("seek a land card and put it onto the battlefield tapped");
+        let details = parse_seek_details(
+            "seek a land card and put it onto the battlefield tapped",
+            &mut ParseContext::default(),
+        );
         assert_eq!(details.count, QuantityExpr::Fixed { value: 1 });
         assert_eq!(details.destination, Zone::Battlefield);
         assert!(details.enter_tapped);
@@ -16864,19 +19037,23 @@ mod tests {
     fn strip_each_player_subject_still_strips_imperatives() {
         // These should still be stripped (imperative effects, not static restrictions)
         let (scope, result) = strip_each_player_subject("each opponent discards a card");
-        assert!(scope.is_some());
+        assert_eq!(scope, Some(PlayerFilter::Opponent));
         assert_eq!(result, "discard a card");
 
+        let (scope, result) = strip_each_player_subject("each other player sacrifices a creature");
+        assert_eq!(scope, Some(PlayerFilter::Opponent));
+        assert_eq!(result, "sacrifice a creature");
+
         let (scope, result) = strip_each_player_subject("each player draws a card");
-        assert!(scope.is_some());
+        assert_eq!(scope, Some(PlayerFilter::All));
         assert_eq!(result, "draw a card");
 
         let (scope, result) = strip_each_player_subject("each player mills three cards");
-        assert!(scope.is_some());
+        assert_eq!(scope, Some(PlayerFilter::All));
         assert_eq!(result, "mill three cards");
 
         let (scope, result) = strip_each_player_subject("each opponent loses 2 life");
-        assert!(scope.is_some());
+        assert_eq!(scope, Some(PlayerFilter::Opponent));
         assert_eq!(result, "lose 2 life");
     }
 
@@ -16898,6 +19075,60 @@ mod tests {
     fn effect_goads_target_creature() {
         let e = parse_effect("goads target creature");
         assert!(matches!(e, Effect::Goad { .. }), "Expected Goad, got {e:?}");
+    }
+
+    #[test]
+    fn effect_tap_and_goad_chains_same_target() {
+        let def = parse_effect_chain("Tap and goad the chosen creatures", AbilityKind::Spell);
+
+        assert!(
+            matches!(
+                *def.effect,
+                Effect::Tap {
+                    target: TargetFilter::ParentTarget
+                }
+            ),
+            "Expected Tap ParentTarget, got {:?}",
+            def.effect
+        );
+        let sub = def.sub_ability.expect("goad should be chained");
+        assert!(
+            matches!(
+                *sub.effect,
+                Effect::Goad {
+                    target: TargetFilter::ParentTarget
+                }
+            ),
+            "Expected Goad ParentTarget, got {:?}",
+            sub.effect
+        );
+    }
+
+    #[test]
+    fn effect_untap_and_goad_chains_same_target() {
+        let def = parse_effect_chain("Untap and goad that creature", AbilityKind::Spell);
+
+        assert!(
+            matches!(
+                *def.effect,
+                Effect::Untap {
+                    target: TargetFilter::ParentTarget
+                }
+            ),
+            "Expected Untap ParentTarget, got {:?}",
+            def.effect
+        );
+        let sub = def.sub_ability.expect("goad should be chained");
+        assert!(
+            matches!(
+                *sub.effect,
+                Effect::Goad {
+                    target: TargetFilter::ParentTarget
+                }
+            ),
+            "Expected Goad ParentTarget, got {:?}",
+            sub.effect
+        );
     }
 
     #[test]
@@ -17051,7 +19282,7 @@ mod tests {
         // Test the imperative path directly (no subject)
         let clause = parse_imperative_effect(
             "take an extra turn after this one",
-            &ParseContext::default(),
+            &mut ParseContext::default(),
         );
         assert!(matches!(
             clause.effect,
@@ -17620,22 +19851,22 @@ mod tests {
 
     #[test]
     fn resolve_it_pronoun_default_context() {
-        let ctx = ParseContext::default();
-        assert_eq!(resolve_it_pronoun(&ctx), TargetFilter::SelfRef);
+        let mut ctx = ParseContext::default();
+        assert_eq!(resolve_it_pronoun(&mut ctx), TargetFilter::SelfRef);
     }
 
     #[test]
     fn resolve_it_pronoun_self_ref_subject() {
-        let ctx = ParseContext {
+        let mut ctx = ParseContext {
             subject: Some(TargetFilter::SelfRef),
             ..Default::default()
         };
-        assert_eq!(resolve_it_pronoun(&ctx), TargetFilter::SelfRef);
+        assert_eq!(resolve_it_pronoun(&mut ctx), TargetFilter::SelfRef);
     }
 
     #[test]
     fn resolve_it_pronoun_typed_subject() {
-        let ctx = ParseContext {
+        let mut ctx = ParseContext {
             subject: Some(TargetFilter::Typed(crate::types::ability::TypedFilter {
                 type_filters: vec![TypeFilter::Creature],
                 controller: Some(ControllerRef::You),
@@ -17643,25 +19874,25 @@ mod tests {
             })),
             ..Default::default()
         };
-        assert_eq!(resolve_it_pronoun(&ctx), TargetFilter::TriggeringSource);
+        assert_eq!(resolve_it_pronoun(&mut ctx), TargetFilter::TriggeringSource);
     }
 
     #[test]
     fn resolve_it_pronoun_attached_to_subject() {
-        let ctx = ParseContext {
+        let mut ctx = ParseContext {
             subject: Some(TargetFilter::AttachedTo),
             ..Default::default()
         };
-        assert_eq!(resolve_it_pronoun(&ctx), TargetFilter::TriggeringSource);
+        assert_eq!(resolve_it_pronoun(&mut ctx), TargetFilter::TriggeringSource);
     }
 
     #[test]
     fn resolve_it_pronoun_any_subject() {
-        let ctx = ParseContext {
+        let mut ctx = ParseContext {
             subject: Some(TargetFilter::Any),
             ..Default::default()
         };
-        assert_eq!(resolve_it_pronoun(&ctx), TargetFilter::SelfRef);
+        assert_eq!(resolve_it_pronoun(&mut ctx), TargetFilter::SelfRef);
     }
 
     // --- Suffix condition extraction tests ---
@@ -17794,8 +20025,11 @@ mod tests {
 
     #[test]
     fn parse_you_controlled_parent_target_condition_variants() {
-        let artifact = try_nom_condition_as_ability_condition("you controlled that artifact")
-            .expect("artifact condition should parse");
+        let artifact = try_nom_condition_as_ability_condition(
+            "you controlled that artifact",
+            &mut ParseContext::default(),
+        )
+        .expect("artifact condition should parse");
         let AbilityCondition::TargetMatchesFilter { filter, use_lki } = artifact else {
             panic!("expected TargetMatchesFilter condition");
         };
@@ -17808,8 +20042,11 @@ mod tests {
             other => panic!("expected typed artifact filter, got {other:?}"),
         }
 
-        let it = try_nom_condition_as_ability_condition("you controlled it")
-            .expect("it condition should parse");
+        let it = try_nom_condition_as_ability_condition(
+            "you controlled it",
+            &mut ParseContext::default(),
+        )
+        .expect("it condition should parse");
         let AbilityCondition::TargetMatchesFilter { filter, use_lki } = it else {
             panic!("expected TargetMatchesFilter condition");
         };
@@ -17851,6 +20088,7 @@ mod tests {
     fn strip_suffix_conditional_extracts_quantity_check() {
         let (cond, text) = strip_suffix_conditional(
             "draw a card if your life total is greater than your starting life total",
+            &mut ParseContext::default(),
         );
         assert_eq!(text, "draw a card");
         let cond = cond.expect("should extract condition");
@@ -17865,21 +20103,27 @@ mod tests {
 
     #[test]
     fn strip_suffix_conditional_excludes_if_able() {
-        let (cond, text) = strip_suffix_conditional("deal 3 damage to that creature if able");
+        let (cond, text) = strip_suffix_conditional(
+            "deal 3 damage to that creature if able",
+            &mut ParseContext::default(),
+        );
         assert!(cond.is_none());
         assert_eq!(text, "deal 3 damage to that creature if able");
     }
 
     #[test]
     fn strip_suffix_conditional_excludes_if_you_do() {
-        let (cond, _) = strip_suffix_conditional("sacrifice it if you do");
+        let (cond, _) =
+            strip_suffix_conditional("sacrifice it if you do", &mut ParseContext::default());
         assert!(cond.is_none());
     }
 
     #[test]
     fn strip_suffix_conditional_parses_control_condition() {
-        let (cond, text) =
-            strip_suffix_conditional("sacrifice a creature if you control a creature");
+        let (cond, text) = strip_suffix_conditional(
+            "sacrifice a creature if you control a creature",
+            &mut ParseContext::default(),
+        );
         assert!(
             cond.is_some(),
             "should now parse 'you control a creature' via nom bridge"
@@ -17899,7 +20143,10 @@ mod tests {
     #[test]
     fn strip_suffix_conditional_unparseable_returns_none() {
         // A condition the bridge cannot handle returns None.
-        let (cond, text) = strip_suffix_conditional("draw a card if the moon is full");
+        let (cond, text) = strip_suffix_conditional(
+            "draw a card if the moon is full",
+            &mut ParseContext::default(),
+        );
         assert!(cond.is_none());
         assert_eq!(text, "draw a card if the moon is full");
     }
@@ -17908,13 +20155,17 @@ mod tests {
 
     #[test]
     fn bridge_during_your_turn() {
-        let result = try_nom_condition_as_ability_condition("it's your turn");
+        let result =
+            try_nom_condition_as_ability_condition("it's your turn", &mut ParseContext::default());
         assert_eq!(result, Some(AbilityCondition::IsYourTurn));
     }
 
     #[test]
     fn bridge_not_your_turn() {
-        let result = try_nom_condition_as_ability_condition("it's not your turn");
+        let result = try_nom_condition_as_ability_condition(
+            "it's not your turn",
+            &mut ParseContext::default(),
+        );
         assert_eq!(
             result,
             Some(AbilityCondition::Not {
@@ -17925,7 +20176,10 @@ mod tests {
 
     #[test]
     fn bridge_life_total_comparison() {
-        let result = try_nom_condition_as_ability_condition("your life total is 5 or less");
+        let result = try_nom_condition_as_ability_condition(
+            "your life total is 5 or less",
+            &mut ParseContext::default(),
+        );
         match result {
             Some(AbilityCondition::QuantityCheck {
                 lhs:
@@ -17944,7 +20198,10 @@ mod tests {
 
     #[test]
     fn bridge_hand_size_zero() {
-        let result = try_nom_condition_as_ability_condition("you have no cards in hand");
+        let result = try_nom_condition_as_ability_condition(
+            "you have no cards in hand",
+            &mut ParseContext::default(),
+        );
         match result {
             Some(AbilityCondition::QuantityCheck {
                 lhs:
@@ -17963,7 +20220,10 @@ mod tests {
 
     #[test]
     fn bridge_you_control_artifact() {
-        let result = try_nom_condition_as_ability_condition("you control an artifact");
+        let result = try_nom_condition_as_ability_condition(
+            "you control an artifact",
+            &mut ParseContext::default(),
+        );
         match result {
             Some(AbilityCondition::QuantityCheck {
                 comparator: Comparator::GE,
@@ -17976,8 +20236,10 @@ mod tests {
 
     #[test]
     fn bridge_you_control_artifact_and_enchantment() {
-        let result =
-            try_nom_condition_as_ability_condition("you control an artifact and an enchantment");
+        let result = try_nom_condition_as_ability_condition(
+            "you control an artifact and an enchantment",
+            &mut ParseContext::default(),
+        );
         match result {
             Some(AbilityCondition::And { conditions }) => {
                 assert_eq!(conditions.len(), 2);
@@ -17996,8 +20258,10 @@ mod tests {
 
     #[test]
     fn bridge_if_you_do_or_control_condition() {
-        let result =
-            try_nom_condition_as_ability_condition("you do or if you control another Dinosaur");
+        let result = try_nom_condition_as_ability_condition(
+            "you do or if you control another Dinosaur",
+            &mut ParseContext::default(),
+        );
         match result {
             Some(AbilityCondition::Or { conditions }) => {
                 assert_eq!(conditions.len(), 2);
@@ -18018,14 +20282,16 @@ mod tests {
     #[test]
     fn bridge_source_tapped_maps_to_ability_condition() {
         // CR 611.2b: SourceIsTapped bridges to AbilityCondition::SourceIsTapped.
-        let result = try_nom_condition_as_ability_condition("~ is tapped");
+        let result =
+            try_nom_condition_as_ability_condition("~ is tapped", &mut ParseContext::default());
         assert_eq!(result, Some(AbilityCondition::SourceIsTapped));
     }
 
     #[test]
     fn bridge_source_untapped_maps_to_negated_condition() {
         // CR 611.2b: Not(SourceIsTapped) bridges to Not(SourceIsTapped).
-        let result = try_nom_condition_as_ability_condition("~ is untapped");
+        let result =
+            try_nom_condition_as_ability_condition("~ is untapped", &mut ParseContext::default());
         assert_eq!(
             result,
             Some(AbilityCondition::Not {
@@ -18037,7 +20303,10 @@ mod tests {
     #[test]
     fn bridge_partial_input_returns_none() {
         // Partial match with leftover text should return None.
-        let result = try_nom_condition_as_ability_condition("it's your turn and stuff");
+        let result = try_nom_condition_as_ability_condition(
+            "it's your turn and stuff",
+            &mut ParseContext::default(),
+        );
         assert!(result.is_none());
     }
 
@@ -18340,7 +20609,7 @@ mod tests {
     fn parse_airbend_up_to_one_other_target_creature_or_spell() {
         let clause = parse_effect_clause(
             "airbend up to one other target creature or spell",
-            &ParseContext::default(),
+            &mut ParseContext::default(),
         );
         assert_eq!(clause.multi_target, Some(MultiTargetSpec::fixed(0, 1)));
         match clause.effect {
@@ -18449,7 +20718,7 @@ mod tests {
 
     #[test]
     fn source_condition_rebinds_it_pronoun_to_source_in_trigger_context() {
-        let ctx = ParseContext {
+        let mut ctx = ParseContext {
             subject: Some(TargetFilter::Typed(
                 TypedFilter::creature().controller(ControllerRef::You),
             )),
@@ -18458,7 +20727,7 @@ mod tests {
         let def = parse_effect_chain_with_context(
             "If this enchantment isn't a creature, it becomes a 3/3 Angel creature with flying.",
             AbilityKind::Spell,
-            &ctx,
+            &mut ctx,
         );
 
         assert!(matches!(
@@ -18489,7 +20758,7 @@ mod tests {
         let def = parse_effect_chain_with_context(
             "creatures you control get +1/+1 until end of turn.",
             AbilityKind::Spell,
-            &ParseContext::default(),
+            &mut ParseContext::default(),
         );
         assert!(
             matches!(*def.effect, Effect::PumpAll { .. }),
@@ -18504,7 +20773,7 @@ mod tests {
         let def = parse_effect_chain_with_context(
             "creatures you control get +1/+1 until end of turn.",
             AbilityKind::Spell,
-            &ParseContext {
+            &mut ParseContext {
                 subject: Some(TargetFilter::Typed(TypedFilter {
                     type_filters: vec![TypeFilter::Creature],
                     controller: Some(ControllerRef::You),
@@ -18808,6 +21077,79 @@ mod tests {
             first.condition.is_some(),
             "should have RevealedHasCardType condition, got: {:?}",
             first
+        );
+    }
+
+    #[test]
+    fn copy_token_suffix_condition_attaches_otherwise() {
+        let (suffix_cond, suffix_text) = strip_suffix_conditional(
+            "create a tapped token that's a copy of ~ if seven or more land cards are in your graveyard",
+            &mut ParseContext::default(),
+        );
+        let condition_probe = try_nom_condition_as_ability_condition(
+            "seven or more land cards are in your graveyard",
+            &mut ParseContext::default(),
+        );
+        assert!(
+            condition_probe.is_some(),
+            "condition bridge should parse subject-first zone count"
+        );
+        assert!(
+            suffix_cond.is_some(),
+            "suffix stripper should parse condition"
+        );
+        assert_eq!(suffix_text, "create a tapped token that's a copy of ~");
+
+        let chain = parse_effect_chain(
+            "create a tapped token that's a copy of this creature if seven or more land cards are in your graveyard. Otherwise, create a tapped 1/1 black Insect creature token with flying.",
+            crate::types::ability::AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                &*chain.effect,
+                Effect::CopyTokenOf {
+                    tapped: true,
+                    enters_attacking: false,
+                    ..
+                }
+            ),
+            "expected tapped CopyTokenOf, got {:?}",
+            chain.effect
+        );
+        assert!(
+            matches!(
+                chain.condition,
+                Some(AbilityCondition::QuantityCheck {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::ZoneCardCount {
+                            zone: ZoneRef::Graveyard,
+                            ref card_types,
+                            scope: CountScope::Controller,
+                        },
+                    },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 7 },
+                }) if card_types == &vec![TypeFilter::Land]
+            ),
+            "expected land graveyard condition, got {:?}",
+            chain.condition
+        );
+        let else_ab = chain
+            .else_ability
+            .as_ref()
+            .expect("CopyTokenOf should carry Otherwise else_ability");
+        assert!(
+            matches!(
+                &*else_ab.effect,
+                Effect::Token {
+                    name,
+                    tapped: true,
+                    keywords,
+                    ..
+                } if name == "Insect" && keywords.contains(&Keyword::Flying)
+            ),
+            "expected tapped flying Insect fallback, got {:?}",
+            else_ab.effect
         );
     }
 
@@ -19171,6 +21513,26 @@ mod tests {
                 count: QuantityExpr::Ref {
                     qty: QuantityRef::BasicLandTypeCount {
                         controller: ControllerRef::TargetPlayer,
+                    },
+                },
+                target: TargetFilter::Player,
+            },
+        );
+    }
+
+    #[test]
+    fn effect_target_player_draws_for_each_attacking_creature_they_control() {
+        let e = parse_effect("target player draws a card for each attacking creature they control");
+        assert_eq!(
+            e,
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(TypedFilter {
+                            type_filters: vec![TypeFilter::Creature],
+                            controller: Some(ControllerRef::TargetPlayer),
+                            properties: vec![FilterProp::Attacking],
+                        }),
                     },
                 },
                 target: TargetFilter::Player,
@@ -19780,7 +22142,10 @@ mod tests {
     #[test]
     fn leading_conditional_threads_condition_through_ast() {
         // "if it's your turn" is parseable by try_nom_condition_as_ability_condition.
-        let ast = parse_clause_ast("if it's your turn, draw a card", &ParseContext::default());
+        let ast = parse_clause_ast(
+            "if it's your turn, draw a card",
+            &mut ParseContext::default(),
+        );
         assert!(
             matches!(
                 ast,
@@ -19791,7 +22156,7 @@ mod tests {
             ),
             "expected Conditional with Some condition, got: {ast:?}"
         );
-        let clause = lower_clause_ast(ast, &ParseContext::default());
+        let clause = lower_clause_ast(ast, &mut ParseContext::default());
         assert!(
             matches!(clause.condition, Some(AbilityCondition::IsYourTurn)),
             "expected IsYourTurn condition, got: {:?}",
@@ -19809,7 +22174,7 @@ mod tests {
         // An unrecognized condition should produce condition: None (backward-compatible).
         let ast = parse_clause_ast(
             "if a random unrecognized condition, draw a card",
-            &ParseContext::default(),
+            &mut ParseContext::default(),
         );
         assert!(
             matches!(
@@ -19821,7 +22186,7 @@ mod tests {
             ),
             "expected Conditional with None condition for unrecognized text, got: {ast:?}"
         );
-        let clause = lower_clause_ast(ast, &ParseContext::default());
+        let clause = lower_clause_ast(ast, &mut ParseContext::default());
         assert!(
             clause.condition.is_none(),
             "expected None condition for unrecognized text, got: {:?}",
@@ -19873,7 +22238,7 @@ mod tests {
         // correctly when the for-each prefix is already stripped upstream.
         let clause = parse_effect_clause(
             "this creature gets +2/+0 until end of turn",
-            &ParseContext::default(),
+            &mut ParseContext::default(),
         );
         match &clause.effect {
             Effect::Pump { target, .. } => {
@@ -19911,8 +22276,10 @@ mod tests {
         // The subject "~" is stripped, "gets +2/+2 until end of turn" is parsed as
         // imperative Pump with TargetFilter::Any, then inject_subject_target should
         // replace Any with SelfRef from the subject.
-        let clause =
-            parse_effect_clause("~ gets +2/+2 until end of turn", &ParseContext::default());
+        let clause = parse_effect_clause(
+            "~ gets +2/+2 until end of turn",
+            &mut ParseContext::default(),
+        );
         assert!(
             matches!(
                 clause.effect,
@@ -19935,7 +22302,7 @@ mod tests {
         // for one target and only that creature shrinks.
         let clause = parse_effect_clause(
             "All creatures get -1/-1 until end of turn for each Swamp you control.",
-            &ParseContext::default(),
+            &mut ParseContext::default(),
         );
         match &clause.effect {
             Effect::PumpAll { target, .. } => {
@@ -19955,7 +22322,7 @@ mod tests {
         // `Effect::Pump` with `SelfRef` — not `PumpAll`.
         let clause = parse_effect_clause(
             "~ gets +1/+0 until end of turn for each card in your graveyard.",
-            &ParseContext::default(),
+            &mut ParseContext::default(),
         );
         assert!(
             matches!(
@@ -19977,7 +22344,7 @@ mod tests {
         // class counts excluding the source object.
         let clause = parse_effect_clause(
             "other attacking creatures get +1/+1 until end of turn for each attacking creature other than ~.",
-            &ParseContext::default(),
+            &mut ParseContext::default(),
         );
         match &clause.effect {
             Effect::PumpAll {
@@ -20016,7 +22383,7 @@ mod tests {
 
         let clause = parse_effect_clause(
             "other blocking creatures get +1/+1 until end of turn for each blocking creature other than ~.",
-            &ParseContext::default(),
+            &mut ParseContext::default(),
         );
         assert!(matches!(
             clause.effect,
@@ -20703,6 +23070,120 @@ mod tests {
         ));
     }
 
+    /// CR 614.10a: "You skip your next untap step" is a one-shot step skip,
+    /// not an Untap effect with bogus target text "step".
+    #[test]
+    fn skip_next_untap_step_parses_as_step_skip() {
+        let def = parse_effect_chain("You skip your next untap step.", AbilityKind::Activated);
+        let Effect::SkipNextStep {
+            target,
+            step,
+            count,
+        } = &*def.effect
+        else {
+            panic!("expected SkipNextStep, got {:?}", def.effect);
+        };
+        assert_eq!(target, &TargetFilter::Controller);
+        assert_eq!(step, &Phase::Untap);
+        assert_eq!(
+            count,
+            &crate::types::ability::QuantityExpr::Fixed { value: 1 }
+        );
+    }
+
+    #[test]
+    fn target_player_skips_next_draw_step_parses_as_step_skip() {
+        let def = parse_effect_chain(
+            "Target player skips their next draw step.",
+            AbilityKind::Spell,
+        );
+        let Effect::SkipNextStep {
+            target,
+            step,
+            count,
+        } = &*def.effect
+        else {
+            panic!("expected SkipNextStep, got {:?}", def.effect);
+        };
+        assert_eq!(target, &TargetFilter::Player);
+        assert_eq!(step, &Phase::Draw);
+        assert_eq!(
+            count,
+            &crate::types::ability::QuantityExpr::Fixed { value: 1 }
+        );
+    }
+
+    #[test]
+    fn that_player_skips_next_untap_step_uses_context_target() {
+        let mut trigger_ctx = ParseContext {
+            subject: Some(TargetFilter::Player),
+            ..ParseContext::default()
+        };
+        let def = parse_effect_chain_with_context(
+            "That player skips their next untap step.",
+            AbilityKind::Spell,
+            &mut trigger_ctx,
+        );
+        let Effect::SkipNextStep {
+            target,
+            step,
+            count,
+        } = &*def.effect
+        else {
+            panic!("expected SkipNextStep, got {:?}", def.effect);
+        };
+        assert_eq!(target, &TargetFilter::TriggeringPlayer);
+        assert_eq!(step, &Phase::Untap);
+        assert_eq!(
+            count,
+            &crate::types::ability::QuantityExpr::Fixed { value: 1 }
+        );
+    }
+
+    #[test]
+    fn that_player_skips_next_untap_step_in_chain_uses_parent_target() {
+        let def = parse_effect_chain(
+            "That player skips their next untap step.",
+            AbilityKind::Spell,
+        );
+        let Effect::SkipNextStep {
+            target,
+            step,
+            count,
+        } = &*def.effect
+        else {
+            panic!("expected SkipNextStep, got {:?}", def.effect);
+        };
+        assert_eq!(target, &TargetFilter::ParentTarget);
+        assert_eq!(step, &Phase::Untap);
+        assert_eq!(
+            count,
+            &crate::types::ability::QuantityExpr::Fixed { value: 1 }
+        );
+    }
+
+    #[test]
+    fn defending_player_skips_next_untap_step_uses_defending_player_target() {
+        let def = parse_effect_chain(
+            "Defending player skips their next untap step.",
+            AbilityKind::Spell,
+        );
+        let Effect::SkipNextStep {
+            target,
+            step,
+            count,
+        } = &*def.effect
+        else {
+            panic!("expected SkipNextStep, got {:?}", def.effect);
+        };
+        assert_eq!(target, &TargetFilter::DefendingPlayer);
+        assert_eq!(step, &Phase::Untap);
+        assert_eq!(
+            count,
+            &crate::types::ability::QuantityExpr::Fixed { value: 1 }
+        );
+    }
+
     /// CR 603.7 + CR 107.3 + CR 202.1: "When you next cast a spell with {X} in
     /// its mana cost this turn, ..." — delayed triggered ability. The embedded
     /// `SpellCast` trigger must carry a `HasXInManaCost` filter on
@@ -20795,7 +23276,7 @@ mod tests {
             "outer 'you may' must mark ability optional"
         );
         match &*ability.effect {
-            Effect::ChooseOneOf { branches } => {
+            Effect::ChooseOneOf { branches, .. } => {
                 assert_eq!(branches.len(), 2, "Highway Robbery has exactly 2 branches");
                 assert!(
                     matches!(&*branches[0].effect, Effect::Discard { .. }),
@@ -20805,6 +23286,126 @@ mod tests {
                     matches!(&*branches[1].effect, Effect::Sacrifice { .. }),
                     "second branch is Sacrifice"
                 );
+            }
+            other => panic!("expected ChooseOneOf, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn villainous_choice_routes_chooser_without_player_scope_rebinding() {
+        let ability = parse_effect_chain(
+            "Each opponent faces a villainous choice — You draw a card, or that player discards a card.",
+            AbilityKind::Spell,
+        );
+
+        match &*ability.effect {
+            Effect::ChooseOneOf { chooser, branches } => {
+                assert_eq!(
+                    ability.player_scope, None,
+                    "villainous choice must not use player_scope because branch text still uses the original controller for 'you'"
+                );
+                assert_eq!(*chooser, PlayerFilter::Opponent);
+                assert_eq!(branches.len(), 2);
+                assert!(matches!(&*branches[0].effect, Effect::Draw { .. }));
+                assert!(matches!(
+                    &*branches[1].effect,
+                    Effect::Discard {
+                        target: TargetFilter::ScopedPlayer,
+                        ..
+                    }
+                ));
+            }
+            other => panic!("expected ChooseOneOf, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn villainous_choice_supports_defending_player_chooser() {
+        let ability = parse_effect_chain(
+            "Defending player faces a villainous choice — That player sacrifices a creature, or you draw a card.",
+            AbilityKind::Spell,
+        );
+
+        match &*ability.effect {
+            Effect::ChooseOneOf { chooser, branches } => {
+                assert_eq!(*chooser, PlayerFilter::DefendingPlayer);
+                assert_eq!(branches.len(), 2);
+            }
+            other => panic!("expected ChooseOneOf, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn villainous_choice_sacrifice_scopes_that_player_to_faced_player() {
+        let ability = parse_effect_chain(
+            "Each opponent faces a villainous choice — That player sacrifices a creature of their choice, or you create a 3/3 black Dalek artifact creature token with menace.",
+            AbilityKind::Spell,
+        );
+
+        match &*ability.effect {
+            Effect::ChooseOneOf { branches, .. } => match &*branches[0].effect {
+                Effect::Sacrifice { target, .. } => match target {
+                    TargetFilter::Typed(filter) => {
+                        assert_eq!(filter.controller, Some(ControllerRef::ScopedPlayer));
+                    }
+                    other => panic!("expected typed sacrifice filter, got {other:?}"),
+                },
+                other => panic!("expected Sacrifice branch, got {other:?}"),
+            },
+            other => panic!("expected ChooseOneOf, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn villainous_choice_they_life_loss_scopes_to_faced_player() {
+        let ability = parse_effect_chain(
+            "Each opponent faces a villainous choice — They lose 4 life, or you create a token that's a copy of that card.",
+            AbilityKind::Spell,
+        );
+
+        match &*ability.effect {
+            Effect::ChooseOneOf { branches, .. } => match &*branches[0].effect {
+                Effect::LoseLife { target, .. } => {
+                    assert_eq!(target.as_ref(), Some(&TargetFilter::ScopedPlayer));
+                }
+                other => panic!("expected LoseLife branch, got {other:?}"),
+            },
+            other => panic!("expected ChooseOneOf, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn villainous_choice_damage_scopes_that_player_to_faced_player() {
+        let ability = parse_effect_chain(
+            "Each opponent faces a villainous choice — ~ deals 3 damage to that player, or you draw a card.",
+            AbilityKind::Spell,
+        );
+
+        match &*ability.effect {
+            Effect::ChooseOneOf { branches, .. } => match &*branches[0].effect {
+                Effect::DealDamage { target, .. } => {
+                    assert_eq!(*target, TargetFilter::ScopedPlayer);
+                }
+                other => panic!("expected DealDamage branch, got {other:?}"),
+            },
+            other => panic!("expected ChooseOneOf, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn choose_one_of_preserves_branch_optionality() {
+        let ability = parse_effect_chain(
+            "Each opponent faces a villainous choice — That player discards a card, or you may put a Construct, Robot, or Vehicle card from your hand onto the battlefield.",
+            AbilityKind::Spell,
+        );
+
+        match &*ability.effect {
+            Effect::ChooseOneOf { chooser, branches } => {
+                assert_eq!(*chooser, PlayerFilter::Opponent);
+                assert_eq!(branches.len(), 2);
+                assert!(!branches[0].optional);
+                assert!(branches[1].optional);
+                assert!(matches!(&*branches[1].effect, Effect::ChangeZone { .. }));
             }
             other => panic!("expected ChooseOneOf, got {other:?}"),
         }
@@ -20846,6 +23447,26 @@ mod tests {
                     tf.controller,
                     Some(ControllerRef::You),
                     "actor=You must be applied as default Sacrifice target controller, got {tf:?}"
+                ),
+                other => panic!("expected Typed Sacrifice target, got {other:?}"),
+            },
+            other => panic!("expected Effect::Sacrifice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_effect_chain_each_other_player_defaults_sacrifice_to_opponent() {
+        let ability = parse_effect_chain(
+            "each other player sacrifices a creature of their choice",
+            AbilityKind::Spell,
+        );
+        assert_eq!(ability.player_scope, Some(PlayerFilter::Opponent));
+        match &*ability.effect {
+            Effect::Sacrifice { target, .. } => match target {
+                TargetFilter::Typed(tf) => assert_eq!(
+                    tf.controller,
+                    Some(ControllerRef::Opponent),
+                    "each other player must restrict sacrifice choices to that opponent's creatures"
                 ),
                 other => panic!("expected Typed Sacrifice target, got {other:?}"),
             },
@@ -21183,6 +23804,160 @@ mod tests {
         );
     }
 
+    #[test]
+    fn each_player_for_each_attacking_creature_they_control_binds_scoped_player() {
+        let def = parse_effect_chain(
+            "each player loses 1 life for each attacking creature they control.",
+            AbilityKind::Spell,
+        );
+
+        assert_eq!(def.player_scope, Some(PlayerFilter::All));
+        let Effect::LoseLife { amount, .. } = &*def.effect else {
+            panic!("expected LoseLife, got {:?}", def.effect);
+        };
+        assert!(matches!(
+            amount,
+            QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(TypedFilter {
+                        controller: Some(ControllerRef::ScopedPlayer),
+                        properties,
+                        ..
+                    })
+                }
+            } if properties.as_slice() == [FilterProp::Attacking]
+        ));
+    }
+
+    #[test]
+    fn each_opponent_gets_counter_keeps_followup_unscoped() {
+        let def = parse_effect_chain(
+            "Each opponent gets a poison counter. Draw a card.",
+            AbilityKind::Spell,
+        );
+
+        assert_eq!(def.player_scope, Some(PlayerFilter::Opponent));
+        assert!(matches!(
+            *def.effect,
+            Effect::GivePlayerCounter {
+                counter_kind: PlayerCounterKind::Poison,
+                target: TargetFilter::Controller,
+                ..
+            }
+        ));
+
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("follow-up draw should remain chained after scoped clause");
+        assert!(sub.player_scope.is_none());
+        assert!(matches!(
+            *sub.effect,
+            Effect::Draw {
+                target: TargetFilter::Controller,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn discover_x_uses_where_x_quantity_expression() {
+        let def = parse_effect_chain(
+            "discover X, where X is that spell's mana value.",
+            AbilityKind::Spell,
+        );
+
+        assert!(
+            matches!(
+                *def.effect,
+                Effect::Discover {
+                    mana_value_limit: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectManaValue {
+                            scope: ObjectScope::EventSource
+                        }
+                    }
+                }
+            ),
+            "expected dynamic Discover limit, got {:?}",
+            def.effect
+        );
+    }
+
+    #[test]
+    fn veil_of_summer_effect_chain_parses_supported_clauses() {
+        let def = parse_effect_chain(
+            "Draw a card if an opponent has cast a blue or black spell this turn. Spells you control can't be countered this turn. You and permanents you control gain hexproof from blue and from black until end of turn.",
+            AbilityKind::Spell,
+        );
+
+        assert!(matches!(*def.effect, Effect::Draw { .. }));
+        assert!(matches!(
+            def.condition,
+            Some(AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::SpellsCastThisTurn {
+                        scope: crate::types::ability::CountScope::Opponents,
+                        ..
+                    }
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 }
+            })
+        ));
+
+        let cant_counter = def.sub_ability.as_ref().expect("expected second clause");
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = &*cant_counter.effect
+        else {
+            panic!(
+                "expected CantBeCountered GenericEffect, got {:?}",
+                cant_counter.effect
+            );
+        };
+        assert!(static_abilities
+            .iter()
+            .any(|sd| sd.mode == StaticMode::CantBeCountered
+                && matches!(
+                    sd.affected,
+                    Some(TargetFilter::Typed(TypedFilter {
+                        controller: Some(ControllerRef::You),
+                        ..
+                    }))
+                )));
+
+        let hexproof = cant_counter
+            .sub_ability
+            .as_ref()
+            .expect("expected hexproof clause");
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = &*hexproof.effect
+        else {
+            panic!("expected hexproof GenericEffect, got {:?}", hexproof.effect);
+        };
+        let static_def = static_abilities
+            .iter()
+            .find(|sd| matches!(sd.affected, Some(TargetFilter::Or { .. })))
+            .expect("expected controller-or-permanents affected filter");
+        assert!(static_def.modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::HexproofFrom(crate::types::keywords::HexproofFilter::Color(
+                    crate::types::mana::ManaColor::Blue
+                ))
+            }
+        )));
+        assert!(static_def.modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::HexproofFrom(crate::types::keywords::HexproofFilter::Color(
+                    crate::types::mana::ManaColor::Black
+                ))
+            }
+        )));
+    }
+
     // CR 603.4: Parser arms for `AbilityCondition::NthResolutionThisTurn`.
     // Covers Omnath / Ashling / Nissa / Sephiroth / Teething Wurmlet class.
 
@@ -21192,6 +23967,7 @@ mod tests {
         // form printed in the LEADING-suffix sentence (Omnath, Teething Wurmlet).
         let result = try_nom_condition_as_ability_condition(
             "this is the first time this ability has resolved this turn",
+            &mut ParseContext::default(),
         );
         assert_eq!(
             result,
@@ -21204,6 +23980,7 @@ mod tests {
         // Ashling the Pilgrim print form.
         let result = try_nom_condition_as_ability_condition(
             "this is the third time this ability has resolved this turn",
+            &mut ParseContext::default(),
         );
         assert_eq!(
             result,
@@ -21215,7 +23992,10 @@ mod tests {
     fn nth_resolution_anaphoric_second() {
         // Omnath's continuation sentence: "If it's the second time, ..."
         // The "this ability has resolved this turn" tail is anaphoric.
-        let result = try_nom_condition_as_ability_condition("it's the second time");
+        let result = try_nom_condition_as_ability_condition(
+            "it's the second time",
+            &mut ParseContext::default(),
+        );
         assert_eq!(
             result,
             Some(AbilityCondition::NthResolutionThisTurn { n: 2 })
@@ -21224,7 +24004,10 @@ mod tests {
 
     #[test]
     fn nth_resolution_anaphoric_third() {
-        let result = try_nom_condition_as_ability_condition("it's the third time");
+        let result = try_nom_condition_as_ability_condition(
+            "it's the third time",
+            &mut ParseContext::default(),
+        );
         assert_eq!(
             result,
             Some(AbilityCondition::NthResolutionThisTurn { n: 3 })
@@ -21236,6 +24019,7 @@ mod tests {
         // Sephiroth, Fabled SOLDIER print form.
         let result = try_nom_condition_as_ability_condition(
             "this is the fourth time this ability has resolved this turn",
+            &mut ParseContext::default(),
         );
         assert_eq!(
             result,
@@ -21249,6 +24033,7 @@ mod tests {
         // requires either the full tail or empty remainder (anaphoric).
         let result = try_nom_condition_as_ability_condition(
             "this is the first time something else happened",
+            &mut ParseContext::default(),
         );
         assert!(result.is_none());
     }
@@ -21325,6 +24110,37 @@ mod tests {
                 assert_eq!(
                     enter_with_counters,
                     vec![("P1P1".to_string(), QuantityExpr::Fixed { value: 2 })]
+                );
+            }
+            other => panic!("expected ChangeZone, got {other:?}"),
+        }
+    }
+
+    /// CR 701.28c + CR 122.1 — Esper Origins class:
+    /// "put it onto the battlefield transformed ... with a finality counter"
+    /// must carry both the transformed entry flag and the counter replacement.
+    #[test]
+    fn put_zone_change_lifts_transformed_and_finality_counter_suffix() {
+        let text = "put it onto the battlefield transformed under its owner's control with a finality counter on it";
+        let lower = text.to_lowercase();
+        let effect = try_parse_put_zone_change(&lower, text)
+            .expect("expected ChangeZone for transformed put-onto-battlefield");
+        match effect {
+            Effect::ChangeZone {
+                destination,
+                target,
+                enter_transformed,
+                under_your_control,
+                enter_with_counters,
+                ..
+            } => {
+                assert_eq!(destination, Zone::Battlefield);
+                assert_eq!(target, TargetFilter::ParentTarget);
+                assert!(enter_transformed);
+                assert!(!under_your_control);
+                assert_eq!(
+                    enter_with_counters,
+                    vec![("finality".to_string(), QuantityExpr::Fixed { value: 1 })]
                 );
             }
             other => panic!("expected ChangeZone, got {other:?}"),
@@ -21874,5 +24690,338 @@ mod tests {
             !has_pay_unimpl(&def),
             "rider must NOT leak as Unimplemented{{name:'pay'}} sibling"
         );
+    }
+}
+
+/// Snapshot tests locking current `parse_effect_chain` behavior before the
+/// IR/lowering split in Phase 48 Plan 02. Per D-05/D-06, these test 4 groups:
+/// continuation patching, condition lifting, delayed-trigger wrapping, and
+/// sub_ability assembly.
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+    use insta::assert_json_snapshot;
+
+    // -----------------------------------------------------------------------
+    // Group 1: Continuation patching
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn continuation_search_put_onto_battlefield_then_shuffle() {
+        let def = parse_effect_chain(
+            "search your library for a creature card, put it onto the battlefield, then shuffle",
+            AbilityKind::Spell,
+        );
+        assert_json_snapshot!("continuation_search_put_battlefield_shuffle", def);
+    }
+
+    #[test]
+    fn continuation_search_reveal_put_into_hand_then_shuffle() {
+        let def = parse_effect_chain(
+            "search your library for a card, reveal it, put it into your hand, then shuffle",
+            AbilityKind::Spell,
+        );
+        assert_json_snapshot!("continuation_search_reveal_hand_shuffle", def);
+    }
+
+    #[test]
+    fn continuation_draw_then_discard() {
+        let def = parse_effect_chain("draw two cards, then discard a card", AbilityKind::Spell);
+        assert_json_snapshot!("continuation_draw_then_discard", def);
+    }
+
+    #[test]
+    fn continuation_search_put_onto_battlefield_tapped_then_shuffle() {
+        let def = parse_effect_chain(
+            "search your library for a basic land card, put it onto the battlefield tapped, then shuffle",
+            AbilityKind::Spell,
+        );
+        assert_json_snapshot!("continuation_search_battlefield_tapped_shuffle", def);
+    }
+
+    // -----------------------------------------------------------------------
+    // Group 2: Condition lifting
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn condition_if_then_draw() {
+        let def = parse_effect_chain("if you control a creature, draw a card", AbilityKind::Spell);
+        assert_json_snapshot!("condition_if_control_creature_draw", def);
+    }
+
+    #[test]
+    fn condition_unless_pay() {
+        let def = parse_effect_chain(
+            "counter target spell unless its controller pays {2}",
+            AbilityKind::Spell,
+        );
+        assert_json_snapshot!("condition_counter_unless_pays", def);
+    }
+
+    #[test]
+    fn condition_optional_you_may_draw() {
+        let def = parse_effect_chain("you may draw a card", AbilityKind::Spell);
+        assert_json_snapshot!("condition_you_may_draw", def);
+    }
+
+    #[test]
+    fn condition_you_may_pay_then_effect() {
+        let def = parse_effect_chain(
+            "you may pay {2}. if you do, draw a card",
+            AbilityKind::Spell,
+        );
+        assert_json_snapshot!("condition_you_may_pay_if_do_draw", def);
+    }
+
+    // -----------------------------------------------------------------------
+    // Group 3: Delayed-trigger wrapping
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn delayed_trigger_at_beginning_of_next_end_step() {
+        let def = parse_effect_chain(
+            "at the beginning of the next end step, sacrifice it",
+            AbilityKind::Spell,
+        );
+        assert_json_snapshot!("delayed_trigger_next_end_step_sacrifice", def);
+    }
+
+    #[test]
+    fn delayed_trigger_beginning_of_next_upkeep() {
+        let def = parse_effect_chain(
+            "at the beginning of your next upkeep, draw a card",
+            AbilityKind::Spell,
+        );
+        assert_json_snapshot!("delayed_trigger_next_upkeep_draw", def);
+    }
+
+    #[test]
+    fn delayed_trigger_until_end_of_turn() {
+        let def = parse_effect_chain(
+            "target creature gets +3/+3 until end of turn",
+            AbilityKind::Spell,
+        );
+        assert_json_snapshot!("delayed_until_end_of_turn_pump", def);
+    }
+
+    #[test]
+    fn delayed_trigger_exile_return_end_step() {
+        let def = parse_effect_chain(
+            "exile target creature. return it to the battlefield under its owner's control at the beginning of the next end step",
+            AbilityKind::Spell,
+        );
+        assert_json_snapshot!("delayed_exile_return_next_end_step", def);
+    }
+
+    // -----------------------------------------------------------------------
+    // Group 4: Sub_ability assembly
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn assembly_two_clause_chain() {
+        let def = parse_effect_chain(
+            "target creature gets +2/+2 until end of turn. draw a card",
+            AbilityKind::Spell,
+        );
+        assert_json_snapshot!("assembly_two_clause_pump_draw", def);
+    }
+
+    #[test]
+    fn assembly_three_clause_chain() {
+        let def = parse_effect_chain(
+            "destroy target creature. its controller loses 2 life. you gain 2 life",
+            AbilityKind::Spell,
+        );
+        assert_json_snapshot!("assembly_three_clause_destroy_lose_gain", def);
+    }
+
+    #[test]
+    fn assembly_each_opponent_discard() {
+        let def = parse_effect_chain("each opponent discards a card", AbilityKind::Spell);
+        assert_json_snapshot!("assembly_each_opponent_discard", def);
+    }
+
+    #[test]
+    fn assembly_gain_life_and_draw() {
+        let def = parse_effect_chain("you gain 3 life. draw a card", AbilityKind::Spell);
+        assert_json_snapshot!("assembly_gain_life_draw", def);
+    }
+
+    #[test]
+    fn assembly_create_token_and_pump() {
+        let def = parse_effect_chain(
+            "create a 1/1 white Soldier creature token. put a +1/+1 counter on it",
+            AbilityKind::Spell,
+        );
+        assert_json_snapshot!("assembly_create_token_put_counter", def);
+    }
+
+    #[test]
+    fn cost_paid_object_instead_clause_uses_cost_paid_toughness() {
+        let def = parse_effect_chain(
+            "Create a Blood token. If you sacrificed an Angel this way, create a number of Blood tokens equal to its toughness instead.",
+            AbilityKind::Activated,
+        );
+
+        assert!(matches!(
+            *def.effect,
+            Effect::Token {
+                count: QuantityExpr::Fixed { value: 1 },
+                ..
+            }
+        ));
+
+        let instead = def.sub_ability.as_ref().expect("expected instead branch");
+        assert!(matches!(
+            instead.condition,
+            Some(AbilityCondition::ConditionInstead { ref inner })
+                if matches!(
+                    **inner,
+                    AbilityCondition::CostPaidObjectMatchesFilter {
+                        filter: TargetFilter::Typed(TypedFilter { ref type_filters, .. })
+                    } if type_filters.iter().any(|filter| {
+                        matches!(filter, TypeFilter::Subtype(subtype) if subtype == "Angel")
+                    })
+                )
+        ));
+        assert!(matches!(
+            *instead.effect,
+            Effect::Token {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::Toughness {
+                        scope: ObjectScope::CostPaidObject
+                    }
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn returned_creatures_can_receive_counters_and_additive_type_followup() {
+        let def = parse_effect_chain(
+            "Return each creature card from your graveyard to the battlefield with a finality counter on it. Those creatures are Vampires in addition to their other types.",
+            AbilityKind::Activated,
+        );
+
+        let Effect::ChangeZone {
+            enter_with_counters,
+            ..
+        } = &*def.effect
+        else {
+            panic!("expected ChangeZone, got {:?}", def.effect);
+        };
+        assert_eq!(
+            enter_with_counters,
+            &vec![("finality".to_string(), QuantityExpr::Fixed { value: 1 })]
+        );
+
+        let subtype_followup = def.sub_ability.as_ref().expect("expected subtype followup");
+        assert_eq!(subtype_followup.duration, Some(Duration::Permanent));
+        let Effect::GenericEffect {
+            static_abilities,
+            duration,
+            target,
+        } = &*subtype_followup.effect
+        else {
+            panic!("expected GenericEffect, got {:?}", subtype_followup.effect);
+        };
+        assert_eq!(*duration, Some(Duration::Permanent));
+        assert_eq!(*target, None);
+        assert!(static_abilities.iter().any(|static_def| {
+            matches!(
+                static_def.affected,
+                Some(TargetFilter::TrackedSet {
+                    id: TrackedSetId(0)
+                })
+            ) && static_def.modifications.iter().any(|modification| {
+                matches!(
+                    modification,
+                    ContinuousModification::AddSubtype { subtype } if subtype == "Vampire"
+                )
+            })
+        }));
+    }
+
+    #[test]
+    fn leading_cast_from_graveyard_condition_scopes_over_then_put_transformed_chain() {
+        let def = parse_effect_chain(
+            "If this spell was cast from a graveyard, exile it, then put it onto the battlefield transformed under its owner's control with a finality counter on it.",
+            AbilityKind::Spell,
+        );
+
+        assert_eq!(
+            def.condition,
+            Some(AbilityCondition::CastFromZone {
+                zone: Zone::Graveyard
+            })
+        );
+        assert!(matches!(
+            *def.effect,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ));
+
+        let put = def.sub_ability.as_ref().expect("expected then-put clause");
+        assert_eq!(
+            put.condition,
+            Some(AbilityCondition::CastFromZone {
+                zone: Zone::Graveyard
+            })
+        );
+        let Effect::ChangeZone {
+            destination,
+            target,
+            enter_transformed,
+            under_your_control,
+            enter_with_counters,
+            ..
+        } = &*put.effect
+        else {
+            panic!("expected transformed ChangeZone, got {:?}", put.effect);
+        };
+        assert_eq!(*destination, Zone::Battlefield);
+        assert_eq!(*target, TargetFilter::ParentTarget);
+        assert!(
+            *enter_transformed,
+            "expected transformed battlefield entry, got {:?}",
+            put.effect
+        );
+        assert!(!*under_your_control);
+        assert_eq!(
+            enter_with_counters,
+            &vec![("finality".to_string(), QuantityExpr::Fixed { value: 1 })]
+        );
+    }
+
+    #[test]
+    fn sylvan_library_followup_parses_drawn_this_turn_choice() {
+        let def = parse_effect_chain(
+            "You may draw two additional cards. If you do, choose two cards in your hand drawn this turn. For each of those cards, pay 4 life or put the card on top of your library.",
+            AbilityKind::Spell,
+        );
+
+        assert!(def.optional);
+        assert!(matches!(
+            &*def.effect,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 2 },
+                ..
+            }
+        ));
+        let followup = def.sub_ability.as_ref().expect("expected followup");
+        assert_eq!(followup.condition, Some(AbilityCondition::IfYouDo));
+        assert!(followup.sub_ability.is_none());
+        assert!(matches!(
+            &*followup.effect,
+            Effect::ChooseDrawnThisTurnPayOrTopdeck {
+                count: QuantityExpr::Fixed { value: 2 },
+                life_payment: QuantityExpr::Fixed { value: 4 },
+                player: TargetFilter::Controller,
+            }
+        ));
     }
 }

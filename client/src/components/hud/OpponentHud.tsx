@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type CSSProperties, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { motion, useReducedMotion } from "framer-motion";
 
 import type { PlayerId } from "../../adapter/types.ts";
@@ -11,6 +12,7 @@ import { useUiStore } from "../../stores/uiStore.ts";
 import { partitionByType } from "../../viewmodel/battlefieldProps.ts";
 import { LifeTotal } from "../controls/LifeTotal.tsx";
 import { ManaPoolSummary } from "./ManaPoolSummary.tsx";
+import { ScoreBadge } from "../draft/ScoreBadge.tsx";
 import { CounterBadge, StatusBadge } from "./HudBadges.tsx";
 import { HudPlate } from "./HudPlate.tsx";
 import { IncomingAttackersPopover } from "./IncomingAttackersPopover.tsx";
@@ -133,9 +135,14 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
   const connectionStatus = useMultiplayerStore((s) => s.connectionStatus);
   const isOnline = connectionStatus !== "disconnected";
 
+  const primaryOpponentId = allOpponents[0] ?? (playerId === 0 ? 1 : 0);
+  const primaryOpponentAvatarUrl = useMultiplayerStore(
+    (s) => s.playerAvatars.get(primaryOpponentId) ?? null,
+  );
+
   if (!isMultiplayer) {
     // 1v1: single opponent pill (existing design)
-    const opponentId = allOpponents[0] ?? (playerId === 0 ? 1 : 0);
+    const opponentId = primaryOpponentId;
     const isOpponentTurn = gameState?.active_player === opponentId;
     const isValidTarget = validPlayerTargetIds.includes(opponentId);
     const opponentCompanion = gameState?.players[opponentId]?.companion;
@@ -144,7 +151,10 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
     const isDisconnected = isOnline && disconnectedPlayers.has(opponentId);
     const isOpponentPhasedOut =
       gameState?.players[opponentId]?.status?.type === "PhasedOut";
+    const showMatchScore = gameState?.match_config?.match_type === "Bo3";
+    const matchScore = showMatchScore ? gameState?.match_score ?? null : null;
     const label = opponentName ?? getOpponentDisplayName(opponentId);
+    const opponentAvatarUrl = primaryOpponentAvatarUrl;
 
     const hudTone = isValidTarget ? "cyan" : isOpponentTurn ? "rose" : "neutral";
     const opponentSeatColor = getSeatColor(opponentId, gameState?.seat_order);
@@ -166,9 +176,11 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
           active={isOpponentTurn}
           seatColor={opponentSeatColor}
           underAttack={isOpponentUnderAttack}
+          avatarUrl={opponentAvatarUrl}
           onClick={isValidTarget ? () => handlePlayerTarget(opponentId) : undefined}
-          trailing={opponentPoisonCounters > 0 || opponentSpeed > 0 || opponentCompanion || isOnline || isOpponentPhasedOut ? (
+          trailing={matchScore || opponentPoisonCounters > 0 || opponentSpeed > 0 || opponentCompanion || isOnline || isOpponentPhasedOut ? (
             <>
+              {matchScore ? <ScoreBadge score={matchScore} player={1} /> : null}
               {isOpponentPhasedOut ? <StatusBadge label="Phased Out" tone="neutral" /> : null}
               {opponentPoisonCounters > 0 ? <CounterBadge kind="poison" value={opponentPoisonCounters} /> : null}
               {opponentSpeed > 0 ? <CounterBadge kind="speed" value={opponentSpeed} /> : null}
@@ -219,19 +231,61 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
         }}
         onCancel={() => setKickTarget(null)}
       />
-      <button
-        type="button"
-        aria-pressed={followActiveOpponent}
-        onClick={() => setFollowActiveOpponent(!followActiveOpponent)}
-        className={`rounded-full border px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.16em] backdrop-blur-xl transition-all duration-200 ${
-          followActiveOpponent
-            ? "border-amber-300/35 bg-amber-500/18 text-amber-100 shadow-[0_10px_24px_rgba(245,158,11,0.18)]"
-            : "border-white/10 bg-slate-950/62 text-slate-300 hover:border-white/20 hover:text-white"
+      <FollowActiveToggle
+        enabled={followActiveOpponent}
+        onToggle={() => setFollowActiveOpponent(!followActiveOpponent)}
+      />
+    </div>
+  );
+}
+
+function FollowActiveToggle({
+  enabled,
+  onToggle,
+}: {
+  enabled: boolean;
+  onToggle: () => void;
+}) {
+  const tooltipId = useId();
+  const tooltip = enabled
+    ? "Following active opponent. Focus switches to the opponent whose turn it is."
+    : "Follow active opponent. Focus will switch to the opponent whose turn it is.";
+
+  return (
+    <button
+      type="button"
+      aria-label={tooltip}
+      aria-describedby={tooltipId}
+      aria-pressed={enabled}
+      onClick={onToggle}
+      className={`group relative flex h-9 w-9 shrink-0 items-center justify-center rounded-full border backdrop-blur-xl transition-all duration-200 ${
+        enabled
+          ? "border-amber-300/45 bg-amber-500/18 text-amber-100 shadow-[0_0_18px_rgba(245,158,11,0.24)]"
+          : "border-white/10 bg-slate-950/62 text-slate-300 hover:border-white/20 hover:text-white"
+      }`}
+    >
+      <span
+        aria-hidden
+        className={`relative flex h-[18px] w-[18px] items-center justify-center rounded-full border ${
+          enabled ? "border-amber-200" : "border-current"
         }`}
       >
-        Follow
-      </button>
-    </div>
+        <span className="absolute left-1/2 top-0 h-full w-px -translate-x-1/2 bg-current opacity-75" />
+        <span className="absolute left-0 top-1/2 h-px w-full -translate-y-1/2 bg-current opacity-75" />
+        <span
+          className={`h-1.5 w-1.5 rounded-full ${
+            enabled ? "bg-amber-200 shadow-[0_0_8px_rgba(251,191,36,0.85)]" : "bg-current"
+          }`}
+        />
+      </span>
+      <span
+        id={tooltipId}
+        role="tooltip"
+        className="pointer-events-none absolute right-0 bottom-full z-50 mb-2 hidden w-64 rounded-md border border-white/10 bg-slate-950/95 px-3 py-2 text-left text-[11px] leading-snug font-medium text-slate-100 shadow-2xl shadow-black/40 backdrop-blur-xl group-hover:block group-focus-visible:block"
+      >
+        {tooltip}
+      </span>
+    </button>
   );
 }
 
@@ -266,6 +320,7 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
   ) ?? false;
   const [showIncomingPopover, setShowIncomingPopover] = useState(false);
   const hasIncoming = incomingAttackerIds.length > 0;
+  const tabRef = useRef<HTMLButtonElement>(null);
   // Short close delay so cursor moving through the gap between the tab and
   // the popover below doesn't flicker the popover shut. The popover itself
   // is `pointer-events-none`, so it can't re-enter the button — the delay
@@ -291,6 +346,7 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
   const player = gameState?.players[playerId];
   const isDisconnected = useMultiplayerStore((s) => s.disconnectedPlayers.has(playerId));
   const isOnline = useMultiplayerStore((s) => s.connectionStatus) !== "disconnected";
+  const avatarUrl = useMultiplayerStore((s) => s.playerAvatars.get(playerId) ?? null);
   const shouldReduceMotion = useReducedMotion();
 
   const counts = useMemo(() => {
@@ -330,6 +386,7 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
 
   return (
     <button
+      ref={tabRef}
       type="button"
       onClick={onClick}
       disabled={isEliminated}
@@ -339,7 +396,7 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
       onMouseLeave={hasIncoming ? scheduleClosePopover : undefined}
       onFocus={hasIncoming ? openPopover : undefined}
       onBlur={hasIncoming ? scheduleClosePopover : undefined}
-      className={`relative flex items-center gap-3 rounded-[18px] border px-3 py-2 backdrop-blur-xl transition-all duration-200 ${borderClass} ${isEliminated || isPhasedOut ? "opacity-40 grayscale" : ""}`}
+      className={`relative flex items-center gap-1.5 rounded-xl border px-2 py-1.5 backdrop-blur-xl transition-all duration-200 lg:gap-3 lg:rounded-[18px] lg:px-3 lg:py-2 ${borderClass} ${isEliminated || isPhasedOut ? "opacity-40 grayscale" : ""}`}
     >
       {isTheirTurn && !shouldReduceMotion && (
         <motion.div
@@ -365,14 +422,26 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
           <span className="sr-only">{label} is under attack</span>
         </>
       )}
+      {avatarUrl ? (
+        <OpponentAvatar
+          label={label}
+          avatarUrl={avatarUrl}
+          seatColor={seatColor}
+        />
+      ) : null}
       <div className="flex min-w-[4.5rem] flex-col items-start leading-none">
-        <span className="mb-1 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-white/48">
-          <span
-            aria-hidden
-            className="h-1.5 w-1.5 shrink-0 rounded-full ring-1 ring-black/30"
-            style={{ backgroundColor: seatColor }}
-          />
-          {label}
+        <span
+          className="relative mb-1 flex w-full min-w-0 items-center gap-1 text-[10px] font-semibold uppercase tracking-[0.18em]"
+          style={{ color: seatColor }}
+        >
+          {!avatarUrl && (
+            <span
+              aria-hidden
+              className="h-2.5 w-2.5 shrink-0 rounded-full ring-1 ring-black/30 shadow-[0_0_6px_var(--seat-glow)]"
+              style={{ backgroundColor: seatColor, "--seat-glow": `${seatColor}88` } as CSSProperties}
+            />
+          )}
+          <span className="truncate">{label}</span>
         </span>
         <div className="flex items-center gap-1">
           {isTheirTurn && <span className="h-1.5 w-1.5 rounded-full bg-rose-400 animate-pulse" />}
@@ -441,15 +510,40 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
           >
             ⚔×{incomingAttackerIds.length}
           </span>
-          {showIncomingPopover && (
-            <IncomingAttackersPopover
-              attackerIds={incomingAttackerIds}
-              opponentName={label}
-            />
+          {showIncomingPopover && tabRef.current && (
+            <PortaledPopover anchorEl={tabRef.current}>
+              <IncomingAttackersPopover
+                attackerIds={incomingAttackerIds}
+                opponentName={label}
+              />
+            </PortaledPopover>
           )}
         </>
       )}
     </button>
+  );
+}
+
+function OpponentAvatar({
+  label,
+  avatarUrl,
+  seatColor,
+}: {
+  label: string;
+  avatarUrl: string;
+  seatColor: string;
+}) {
+  return (
+    <div
+      className="relative h-10 w-9 shrink-0 overflow-hidden rounded-lg border border-white/15 bg-slate-950 shadow-[0_8px_18px_rgba(0,0,0,0.32)]"
+      style={{
+        borderColor: `${seatColor}cc`,
+        boxShadow: `0 0 0 1px ${seatColor}55, 0 8px 18px rgba(0,0,0,0.32), 0 0 14px ${seatColor}2e`,
+      }}
+    >
+      <img src={avatarUrl} alt={label} className="h-full w-full object-cover" />
+      <div className="absolute inset-0 bg-gradient-to-b from-white/12 via-transparent to-black/35" />
+    </div>
   );
 }
 
@@ -459,6 +553,48 @@ function ConnectionDotInline({ disconnected }: { disconnected: boolean }) {
       className={`inline-block h-2 w-2 rounded-full ring-1 ring-white/20 ${disconnected ? "bg-red-500 animate-pulse" : "bg-emerald-400"}`}
       title={disconnected ? "Disconnected" : "Connected"}
     />
+  );
+}
+
+function PortaledPopover({ anchorEl, children }: { anchorEl: HTMLElement; children: React.ReactNode }) {
+  const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
+  const stableCountRef = useRef(0);
+
+  useEffect(() => {
+    stableCountRef.current = 0;
+    let prevLeft = 0;
+    let prevTop = 0;
+    let rafId: number;
+
+    function poll() {
+      const rect = anchorEl.getBoundingClientRect();
+      const left = rect.left + rect.width / 2;
+      const top = rect.bottom + 8;
+      const changed = Math.abs(left - prevLeft) > 0.5 || Math.abs(top - prevTop) > 0.5;
+      prevLeft = left;
+      prevTop = top;
+      stableCountRef.current = changed ? 0 : stableCountRef.current + 1;
+      setPos({ left, top });
+
+      if (stableCountRef.current < 10) {
+        rafId = requestAnimationFrame(poll);
+      }
+    }
+
+    rafId = requestAnimationFrame(poll);
+    return () => cancelAnimationFrame(rafId);
+  }, [anchorEl]);
+
+  if (!pos) return null;
+
+  return createPortal(
+    <div
+      className="pointer-events-none fixed z-40"
+      style={{ left: pos.left, top: pos.top, transform: "translateX(-50%)" }}
+    >
+      {children}
+    </div>,
+    document.body,
   );
 }
 

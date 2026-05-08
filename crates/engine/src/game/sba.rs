@@ -89,6 +89,14 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
             return;
         }
 
+        // CR 903.9a: A commander in graveyard or exile (since last SBA check) may
+        // be put into the command zone by its owner. This pauses the SBA loop to
+        // ask the player, similar to the legend rule.
+        check_commander_zone_return(state);
+        if matches!(state.waiting_for, WaitingFor::CommanderZoneChoice { .. }) {
+            return;
+        }
+
         // CR 704.5f: A creature with toughness 0 or less is put into its owner's graveyard.
         check_zero_toughness(state, events, &mut any_performed);
 
@@ -260,6 +268,7 @@ fn static_affects_player(
             Some(ControllerRef::Opponent) => source_controller != player_id,
             // CR 109.4: TargetPlayer has no meaning for static-ability scoping
             // against a player. Fail closed.
+            Some(ControllerRef::ScopedPlayer) => false,
             Some(ControllerRef::TargetPlayer) => false,
             Some(ControllerRef::DefendingPlayer) => false,
             None => true,
@@ -335,6 +344,28 @@ fn check_poison_counters(
         events.push(GameEvent::PlayerLost { player_id: loser });
         super::elimination::eliminate_player(state, loser, events);
         *any_performed = true;
+    }
+}
+
+/// CR 903.9a: If a commander is in a graveyard or exile (and was put there
+/// since the last SBA check), its owner may put it into the command zone.
+/// CR 903.9b: Hand and library are also covered (see `commander_eligible_for_zone_return`).
+///
+/// Pauses the SBA loop by setting `WaitingFor::CommanderZoneChoice` so the
+/// player can accept (move to command zone) or decline (leave in place).
+fn check_commander_zone_return(state: &mut GameState) {
+    if !state.format_config.command_zone {
+        return;
+    }
+
+    if let Some((commander_id, owner, current_zone)) =
+        super::commander::commander_eligible_for_zone_return(state)
+    {
+        state.waiting_for = WaitingFor::CommanderZoneChoice {
+            player: owner,
+            commander_id,
+            current_zone,
+        };
     }
 }
 
@@ -543,59 +574,94 @@ fn check_unattached_auras(
     events: &mut Vec<GameEvent>,
     any_performed: &mut bool,
 ) {
-    let to_remove: Vec<_> = state
+    // CR 702.103f override: Bestow Auras have a special unattached behavior —
+    // when an attached bestow Aura becomes unattached (host died, host became
+    // an illegal target, etc.), the bestow type-changing effect ends and the
+    // permanent stays on the battlefield as an enchantment creature. This is
+    // explicitly an exception to CR 704.5m, so we partition the unattached
+    // Aura set: bestow Auras revert in place, non-bestow Auras go to graveyard.
+    enum UnattachedAuraAction {
+        /// CR 704.5m: standard — move to owner's graveyard.
+        ToGraveyard,
+        /// CR 702.103f: bestow Aura — revert form, stay on battlefield.
+        BestowRevert,
+    }
+
+    let actions: Vec<(crate::types::identifiers::ObjectId, UnattachedAuraAction)> = state
         .battlefield_phased_in_ids()
         .into_iter()
-        .filter(|id| {
-            state
-                .objects
-                .get(id)
-                .map(|obj| {
-                    if !obj.card_types.core_types.contains(&CoreType::Enchantment) {
-                        return false;
-                    }
-                    // CR 704.5m / CR 704.5n apply specifically to *Auras* —
-                    // gate on the Aura subtype so non-Aura enchantments
-                    // (Saga, Class, Background, Shrine, etc.) are not
-                    // affected. The CoreType check above is necessary but
-                    // not sufficient.
-                    let is_aura = obj
-                        .card_types
-                        .subtypes
-                        .iter()
-                        .any(|s| s.eq_ignore_ascii_case("Aura"));
-                    if !is_aura {
-                        return false;
-                    }
-                    // Note: the parser also routes player-attached Auras here.
-                    // CR 303.4c: A player who has left the game is an illegal host.
-                    // CR 704.5n: An Aura that is "unattached and on the
-                    // battlefield" is also put into its owner's graveyard —
-                    // covers the case where a target legally chosen at
-                    // announcement is removed before resolution can attach
-                    // (target destroyed by another stack effect, target left
-                    // the battlefield mid-resolution, etc.). Without this, an
-                    // orphan Aura with `attached_to = None` would persist on
-                    // the battlefield doing nothing. Aura cast resolution
-                    // sets `attached_to` synchronously, so a freshly resolved
-                    // Aura is never observed here with `None` — by the time
-                    // SBAs run, an Aura with no host genuinely has no host.
-                    match obj.attached_to {
-                        Some(crate::game::game_object::AttachTarget::Object(t)) => {
-                            !is_valid_attachment_target(state, t)
-                        }
-                        Some(crate::game::game_object::AttachTarget::Player(pid)) => {
-                            !is_player_in_game(state, pid)
-                        }
-                        None => true,
-                    }
-                })
-                .unwrap_or(false)
+        .filter_map(|id| {
+            let obj = state.objects.get(&id)?;
+            if !obj.card_types.core_types.contains(&CoreType::Enchantment) {
+                return None;
+            }
+            // CR 704.5m / CR 704.5n apply specifically to *Auras* —
+            // gate on the Aura subtype so non-Aura enchantments
+            // (Saga, Class, Background, Shrine, etc.) are not
+            // affected. The CoreType check above is necessary but
+            // not sufficient.
+            let is_aura = obj
+                .card_types
+                .subtypes
+                .iter()
+                .any(|s| s.eq_ignore_ascii_case("Aura"));
+            if !is_aura {
+                return None;
+            }
+            // Note: the parser also routes player-attached Auras here.
+            // CR 303.4c: A player who has left the game is an illegal host.
+            // CR 704.5n: An Aura that is "unattached and on the
+            // battlefield" is also put into its owner's graveyard —
+            // covers the case where a target legally chosen at
+            // announcement is removed before resolution can attach
+            // (target destroyed by another stack effect, target left
+            // the battlefield mid-resolution, etc.). Without this, an
+            // orphan Aura with `attached_to = None` would persist on
+            // the battlefield doing nothing. Aura cast resolution
+            // sets `attached_to` synchronously, so a freshly resolved
+            // Aura is never observed here with `None` — by the time
+            // SBAs run, an Aura with no host genuinely has no host.
+            let unattached = match obj.attached_to {
+                Some(crate::game::game_object::AttachTarget::Object(t)) => {
+                    !is_valid_attachment_target(state, t)
+                }
+                Some(crate::game::game_object::AttachTarget::Player(pid)) => {
+                    !is_player_in_game(state, pid)
+                }
+                None => true,
+            };
+            if !unattached {
+                return None;
+            }
+            // CR 702.103f: A bestowed Aura that becomes unattached ceases to
+            // be bestowed and remains on the battlefield as a creature. This
+            // overrides CR 704.5m for bestow Auras specifically.
+            if obj.bestow_form.is_some() {
+                Some((id, UnattachedAuraAction::BestowRevert))
+            } else {
+                Some((id, UnattachedAuraAction::ToGraveyard))
+            }
         })
         .collect();
 
-    for id in to_remove {
-        zones::move_to_zone(state, id, Zone::Graveyard, events);
+    for (id, action) in actions {
+        match action {
+            UnattachedAuraAction::ToGraveyard => {
+                zones::move_to_zone(state, id, Zone::Graveyard, events);
+            }
+            UnattachedAuraAction::BestowRevert => {
+                // CR 702.103f: revert in place — restore Creature form, drop
+                // the synthesized Aura subtype + `enchant creature` keyword,
+                // and detach from the (illegal) host so the permanent remains
+                // on the battlefield unattached as an enchantment creature.
+                // The host's `attachments` list was already cleaned when the
+                // host changed zones.
+                crate::game::casting::revert_bestow_form(state, id);
+                if let Some(obj) = state.objects.get_mut(&id) {
+                    obj.attached_to = None;
+                }
+            }
+        }
         *any_performed = true;
     }
 }

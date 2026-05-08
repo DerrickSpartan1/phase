@@ -41,8 +41,8 @@ export function OpponentHand({ showCards = false }: OpponentHandProps) {
 
   return (
     <div
-      className={`flex shrink-0 items-start justify-center overflow-visible px-4 pb-1 ${
-        isCompactHeight ? "min-h-[32px]" : "min-h-[calc(var(--card-h)*1.2)]"
+      className={`flex items-start justify-center overflow-visible px-4 pb-1 ${
+        isCompactHeight ? "min-h-[32px]" : "min-h-[calc(var(--card-h)*0.7)]"
       }`}
       style={{ perspective: "800px" }}
     >

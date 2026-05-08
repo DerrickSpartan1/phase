@@ -180,6 +180,10 @@ Important current behavior:
 - `coverage-report` loads `card-data.json` via `CardDatabase::from_export()`, not raw MTGJSON
 - Without `--all`, it filters to `standard-cards.txt`
 - It strips known-benign MTGJSON keyword mismatches (bare parameterized keywords like `Keyword:Ward` and action-keyword noise like `Keyword:Scry`) before computing final manifest coverage
+- `--write-warning-patterns <path>` writes clustered parser warnings ranked by likely shared fix
+- `--warning-pattern '<pattern>'` emits a compact JSON drilldown for one exact parser warning pattern
+- `--warning-detector <detector>` emits a compact JSON drilldown for a broader swallowed-clause detector family
+- `--warning-full` includes the full `parse_details` tree and exported `CardFace` JSON in drilldown output
 
 CI mode (`--ci`): exits 1 if any Standard-legal cards have gaps.
 

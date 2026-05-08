@@ -199,24 +199,28 @@ pub(super) fn handle_replacement_choice(
                     source_id,
                     player_id,
                     mana_type,
+                    count,
+                    tapped_for_mana,
                     ..
                 } => {
-                    let unit = crate::types::mana::ManaUnit {
-                        color: mana_type,
-                        source_id,
-                        snow: false,
-                        restrictions: Vec::new(),
-                        grants: Vec::new(),
-                        expiry: None,
-                    };
                     if let Some(player) = state.players.iter_mut().find(|p| p.id == player_id) {
-                        player.mana_pool.add(unit);
-                        events.push(GameEvent::ManaAdded {
-                            player_id,
-                            mana_type,
-                            source_id,
-                            tapped_for_mana: false,
-                        });
+                        for _ in 0..count {
+                            let unit = crate::types::mana::ManaUnit {
+                                color: mana_type,
+                                source_id,
+                                snow: false,
+                                restrictions: Vec::new(),
+                                grants: Vec::new(),
+                                expiry: None,
+                            };
+                            player.mana_pool.add(unit);
+                            events.push(GameEvent::ManaAdded {
+                                player_id,
+                                mana_type,
+                                source_id,
+                                tapped_for_mana,
+                            });
+                        }
                     }
                 }
                 // CR 614.1b + CR 614.10: BeginTurn / BeginPhase replacements are
@@ -281,6 +285,7 @@ pub(super) fn handle_replacement_choice(
                 // replacement.
                 state.post_replacement_source = None;
                 state.post_replacement_event_source = None;
+                state.post_replacement_event_target = None;
                 if let Some(next_waiting_for) = apply_post_replacement_effect(
                     state,
                     &effect_def,
@@ -539,6 +544,15 @@ fn apply_pending_spell_resolution(
                 p.attack_target,
                 &mut events,
             );
+        }
+    }
+
+    if let CastingVariant::WebSlinging { .. } = ctx.casting_variant {
+        if let Some(obj) = state.objects.get_mut(&ctx.object_id) {
+            obj.cast_variant_paid = Some((
+                crate::types::ability::CastVariantPaid::WebSlinging,
+                state.turn_number,
+            ));
         }
     }
 

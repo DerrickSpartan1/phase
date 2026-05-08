@@ -1,5 +1,6 @@
 import type { ScryfallCard } from "../../services/scryfall";
 import type { DeckEntry } from "../../services/deckParser";
+import { BASIC_LAND_NAMES, hasUnlimitedCopies } from "../../constants/game";
 
 const WUBRG_COLORS = ["W", "U", "B", "R", "G"] as const;
 
@@ -61,10 +62,12 @@ export function getColorIdentityViolations(
   return violations;
 }
 
-export function getSingletonViolations(deck: DeckEntry[]): string[] {
-  const basicLands = new Set(["Plains", "Island", "Swamp", "Mountain", "Forest"]);
+export function getSingletonViolations(
+  deck: DeckEntry[],
+  cardDataCache: Map<string, ScryfallCard>,
+): string[] {
   return deck
-    .filter((e) => e.count > 1 && !basicLands.has(e.name))
+    .filter((e) => e.count > 1 && !BASIC_LAND_NAMES.has(e.name) && !hasUnlimitedCopies(cardDataCache.get(e.name)?.oracle_text))
     .map((e) => e.name);
 }
 

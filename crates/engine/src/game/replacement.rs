@@ -559,11 +559,16 @@ fn resolve_draw_replacement_quantity(expr: &QuantityExpr, event_count: u32) -> O
             qty: crate::types::ability::QuantityRef::EventContextAmount,
         } => Some(event_count as i32),
         QuantityExpr::Fixed { value } => Some(*value),
-        QuantityExpr::HalfRounded { inner, rounding } => {
+        QuantityExpr::DivideRounded {
+            inner,
+            divisor,
+            rounding,
+        } => {
             let value = resolve_draw_replacement_quantity(inner, event_count)?;
+            let divisor = i32::try_from((*divisor).max(1)).ok()?;
             Some(match rounding {
-                crate::types::ability::RoundingMode::Up => (value + 1) / 2,
-                crate::types::ability::RoundingMode::Down => value / 2,
+                crate::types::ability::RoundingMode::Up => (value + divisor - 1) / divisor,
+                crate::types::ability::RoundingMode::Down => value / divisor,
             })
         }
         QuantityExpr::Offset { inner, offset } => {
@@ -973,19 +978,26 @@ fn produce_mana_applier(
         source_id,
         player_id,
         mana_type,
+        count,
+        tapped_for_mana,
         applied,
     } = event
     {
-        let new_mana_type = match modification {
+        let (new_mana_type, new_count) = match modification {
             Some(ManaModification::ReplaceWith {
                 mana_type: replacement,
-            }) => replacement,
-            None => mana_type,
+            }) => (replacement, count),
+            Some(ManaModification::Multiply { factor }) => {
+                (mana_type, count.saturating_mul(factor))
+            }
+            None => (mana_type, count),
         };
         ApplyResult::Modified(ProposedEvent::ProduceMana {
             source_id,
             player_id,
             mana_type: new_mana_type,
+            count: new_count,
+            tapped_for_mana,
             applied,
         })
     } else {
@@ -1625,6 +1637,7 @@ fn evaluate_replacement_condition(
                 Some(ControllerRef::Opponent) => state.active_player != controller,
                 // CR 109.4: TargetPlayer active-player gate is nonsensical at
                 // replacement-check time (no ability context). Fail closed.
+                Some(ControllerRef::ScopedPlayer) => false,
                 Some(ControllerRef::TargetPlayer) => false,
                 Some(ControllerRef::DefendingPlayer) => false,
                 None => true,
@@ -1649,6 +1662,7 @@ fn evaluate_replacement_condition(
                 Some(ControllerRef::Opponent) => state.active_player != controller,
                 // CR 109.4: TargetPlayer active-player gate is nonsensical at
                 // replacement-check time (no ability context). Fail closed.
+                Some(ControllerRef::ScopedPlayer) => false,
                 Some(ControllerRef::TargetPlayer) => false,
                 Some(ControllerRef::DefendingPlayer) => false,
                 None => true,
@@ -1727,6 +1741,7 @@ fn evaluate_replacement_condition(
                 // damage-history condition (no ability-target context here).
                 // Fall back to the replacement controller; parser never emits
                 // this variant in replacement conditions.
+                ControllerRef::ScopedPlayer => controller,
                 ControllerRef::TargetPlayer => controller,
                 ControllerRef::DefendingPlayer => controller,
             };
@@ -1750,6 +1765,32 @@ fn evaluate_replacement_condition(
                 })
             } else {
                 false
+            }
+        }
+        ReplacementCondition::EventSourceControlledBy {
+            controller: ctrl_ref,
+        } => {
+            let event_source = match event {
+                ProposedEvent::Discard {
+                    source_id: Some(source_id),
+                    ..
+                } => *source_id,
+                _ => return false,
+            };
+            let event_source_controller = state
+                .objects
+                .get(&event_source)
+                .map(|o| o.controller)
+                .or_else(|| state.lki_cache.get(&event_source).map(|lki| lki.controller));
+            let Some(event_source_controller) = event_source_controller else {
+                return false;
+            };
+            match ctrl_ref {
+                ControllerRef::You => event_source_controller == controller,
+                ControllerRef::Opponent => event_source_controller != controller,
+                ControllerRef::ScopedPlayer
+                | ControllerRef::TargetPlayer
+                | ControllerRef::DefendingPlayer => false,
             }
         }
         // CR 500.7 + CR 614.10: Replacement applies only for extra turns.
@@ -1946,6 +1987,19 @@ pub fn find_applicable_replacements(
                             }
                         }
                     }
+                    // CR 106.12b + CR 614.1a: Mana replacements can be scoped to
+                    // production caused by tapping a permanent for mana.
+                    if repl_def.mana_replacement_scope
+                        == crate::types::ability::ManaReplacementScope::TappedForMana
+                    {
+                        match event {
+                            ProposedEvent::ProduceMana {
+                                tapped_for_mana, ..
+                            } if *tapped_for_mana => {}
+                            ProposedEvent::ProduceMana { .. } => continue,
+                            _ => {}
+                        }
+                    }
                     // CR 614.16: Skip damage prevention replacements when prevention is disabled
                     if is_damage_prevention_replacement(state, &rid, &repl_def.event)
                         && is_prevention_disabled(state, event)
@@ -1965,6 +2019,7 @@ pub fn find_applicable_replacements(
                                 // CR 109.4: Target-player scope has no meaning
                                 // for static token-creation replacements. Fail
                                 // closed — parser never emits this variant here.
+                                crate::types::ability::ControllerRef::ScopedPlayer => false,
                                 crate::types::ability::ControllerRef::TargetPlayer => false,
                                 crate::types::ability::ControllerRef::DefendingPlayer => false,
                             };
@@ -1988,6 +2043,7 @@ pub fn find_applicable_replacements(
                             }
                             // CR 109.4: Target-player scope has no meaning at
                             // replacement-application time. Fail closed.
+                            Some(crate::types::ability::ControllerRef::ScopedPlayer) => false,
                             Some(crate::types::ability::ControllerRef::TargetPlayer) => false,
                             Some(crate::types::ability::ControllerRef::DefendingPlayer) => false,
                             None => {
@@ -2147,6 +2203,7 @@ fn extract_etb_counters(
                 entering,
                 source: source_id,
                 recipient: None,
+                scoped_player: None,
             };
             let n = match count {
                 QuantityExpr::Fixed { value } => (*value).max(0) as u32,
@@ -2162,6 +2219,29 @@ fn extract_etb_counters(
             };
             vec![(counter_type.clone(), n)]
         }
+        Effect::ChangeZone {
+            enter_with_counters,
+            ..
+        } => enter_with_counters
+            .iter()
+            .map(|(counter_type, count)| {
+                let controller = state
+                    .objects
+                    .get(&source_id)
+                    .map(|obj| obj.controller)
+                    .unwrap_or(PlayerId(0));
+                let ctx = crate::game::quantity::QuantityContext {
+                    entering: event.affected_object_id(),
+                    source: source_id,
+                    recipient: None,
+                    scoped_player: None,
+                };
+                let n =
+                    crate::game::quantity::resolve_quantity_with_ctx(state, count, controller, ctx)
+                        .max(0) as u32;
+                (counter_type.clone(), n)
+            })
+            .collect(),
         _ => Vec::new(),
     };
     counters.extend(extract_etb_counters(
@@ -2439,6 +2519,10 @@ fn apply_single_replacement(
         ProposedEvent::Damage { source_id, .. } => Some(*source_id),
         _ => None,
     };
+    let proposed_damage_target = match &proposed {
+        ProposedEvent::Damage { target, .. } => Some(target.clone()),
+        _ => None,
+    };
 
     if let Some(handler) = registry.get(&event_key) {
         let event_type = event_key.to_string();
@@ -2482,6 +2566,7 @@ fn apply_single_replacement(
                         // `post_replacement_event_source`; clear here so a prior
                         // prevention's source can't leak into a non-prevention stash.
                         state.post_replacement_event_source = None;
+                        state.post_replacement_event_target = None;
                     }
                 }
                 events.push(GameEvent::ReplacementApplied {
@@ -2509,6 +2594,7 @@ fn apply_single_replacement(
                         state.post_replacement_effect = Some(post);
                         state.post_replacement_source = Some(rid.source);
                         state.post_replacement_event_source = proposed_damage_source;
+                        state.post_replacement_event_target = proposed_damage_target.clone();
                     }
                 }
                 events.push(GameEvent::ReplacementApplied {
@@ -2695,6 +2781,7 @@ pub fn continue_replacement(
             // prevention-event-source semantics — clear so a prior prevention
             // can't leak into a non-prevention stash.
             state.post_replacement_event_source = None;
+            state.post_replacement_event_target = None;
         }
         state.post_replacement_effect = post_effect;
 
@@ -4977,6 +5064,59 @@ mod tests {
                     ManaType::Black,
                     "Green should be rewritten to Black"
                 );
+            }
+            other => panic!("expected Execute(ProduceMana), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn produce_mana_replacement_multiplies_tapped_for_mana_amount() {
+        // CR 106.12b + CR 614.1a: Nyxbloom-style replacements multiply only
+        // mana produced by tapping a permanent for mana.
+        use crate::types::ability::{
+            ControllerRef, ManaModification, ManaReplacementScope, TargetFilter, TypedFilter,
+        };
+        use crate::types::card_type::CoreType;
+        use crate::types::mana::ManaType;
+
+        let land_id = ObjectId(10);
+        let nyxbloom_id = ObjectId(20);
+        let repl = ReplacementDefinition::new(ReplacementEvent::ProduceMana)
+            .mana_modification(ManaModification::Multiply { factor: 3 })
+            .mana_replacement_scope(ManaReplacementScope::TappedForMana)
+            .valid_card(TargetFilter::Typed(
+                TypedFilter::permanent().controller(ControllerRef::You),
+            ));
+        let mut state = test_state_with_object(nyxbloom_id, Zone::Battlefield, vec![repl]);
+        let mut land = GameObject::new(
+            land_id,
+            CardId(2),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        land.card_types.core_types.push(CoreType::Land);
+        state.objects.insert(land_id, land);
+        state.battlefield.push_back(land_id);
+
+        let mut events = Vec::new();
+        let tapped_event =
+            ProposedEvent::produce_mana_with_context(land_id, PlayerId(0), ManaType::Green, true);
+        let result = replace_event(&mut state, tapped_event, &mut events);
+
+        match result {
+            ReplacementResult::Execute(ProposedEvent::ProduceMana { count, .. }) => {
+                assert_eq!(count, 3);
+            }
+            other => panic!("expected Execute(ProduceMana), got {:?}", other),
+        }
+
+        let untapped_event =
+            ProposedEvent::produce_mana_with_context(land_id, PlayerId(0), ManaType::Green, false);
+        let result = replace_event(&mut state, untapped_event, &mut events);
+        match result {
+            ReplacementResult::Execute(ProposedEvent::ProduceMana { count, .. }) => {
+                assert_eq!(count, 1);
             }
             other => panic!("expected Execute(ProduceMana), got {:?}", other),
         }

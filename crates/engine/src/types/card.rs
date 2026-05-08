@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use serde::{Deserialize, Serialize};
 
 use super::ability::{
@@ -7,6 +9,19 @@ use super::ability::{
 use super::card_type::CardType;
 use super::keywords::Keyword;
 use super::mana::{ManaColor, ManaCost};
+use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
+
+/// Card rarity as assigned per-printing in MTGJSON set data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Rarity {
+    Common,
+    Uncommon,
+    Rare,
+    Mythic,
+    Special,
+    Bonus,
+}
 
 /// Diagnostic metadata for a card face. Grouped here to keep debug/pipeline
 /// concerns separate from game-logic fields. Omitted from JSON when empty.
@@ -96,10 +111,14 @@ pub struct CardFace {
     /// Parser diagnostic warnings — silent fallbacks, ignored remainders, bare filters.
     /// Populated at build time by the Oracle parser warning accumulator.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub parse_warnings: Vec<String>,
+    pub parse_warnings: Vec<OracleDiagnostic>,
     /// Diagnostic metadata (forge source counts, etc.). Omitted from JSON when empty.
     #[serde(default, skip_serializing_if = "CardMetadata::is_empty")]
     pub metadata: CardMetadata,
+    /// Set of all rarities this card has been printed at (across all sets).
+    /// Used for format legality checks (e.g. PDH commander must have an uncommon printing).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub rarities: BTreeSet<Rarity>,
 }
 
 /// Runtime layout discriminant for double-faced cards.

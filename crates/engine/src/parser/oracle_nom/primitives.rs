@@ -8,7 +8,8 @@ use nom::multi::{many0, many1};
 use nom::sequence::{delimited, preceded};
 use nom::Parser;
 
-use super::error::OracleResult;
+use super::error::{OracleError, OracleResult};
+use crate::types::ability::PtValue;
 use crate::types::counter::CounterType;
 use crate::types::keywords::KeywordKind;
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
@@ -52,12 +53,10 @@ fn parse_digit_number(input: &str) -> OracleResult<'_, u32> {
     let digits: String = matched.chars().filter(|c| *c != ',').collect();
     match digits.parse::<u32>() {
         Ok(n) => Ok((rest, n)),
-        Err(_) => Err(nom::Err::Error(nom_language::error::VerboseError {
-            errors: vec![(
-                input,
-                nom_language::error::VerboseErrorKind::Nom(nom::error::ErrorKind::Digit),
-            )],
-        })),
+        Err(_) => Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        ))),
     }
 }
 
@@ -121,12 +120,10 @@ fn parse_article_number(input: &str) -> OracleResult<'_, u32> {
     let (rest, _) = alt((tag("an"), tag("a"))).parse(input)?;
     match rest.chars().next() {
         None | Some(' ' | ',' | ';' | '.' | ':' | ')' | '/' | '-' | '\'' | '"') => Ok((rest, 1)),
-        _ => Err(nom::Err::Error(nom_language::error::VerboseError {
-            errors: vec![(
-                input,
-                nom_language::error::VerboseErrorKind::Context("article requires word boundary"),
-            )],
-        })),
+        _ => Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        ))),
     }
 }
 
@@ -329,6 +326,44 @@ fn parse_signed_number(input: &str) -> OracleResult<'_, i32> {
     .parse(input)
 }
 
+/// Parse a P/T value pair from a token like "3/3", "X/X", "0/0", or "*/*".
+///
+/// Each component is either a fixed integer, `X` (variable, resolves later), or
+/// `*` (CDA-defined). Returns the pair as `(PtValue, PtValue)`.
+///
+/// This is the shared building block for token description and animation spec
+/// parsing — both need the same P/T tokenization.
+pub fn parse_pt_value(input: &str) -> OracleResult<'_, (PtValue, PtValue)> {
+    let input = input.trim_start();
+    let word_end = input.find(char::is_whitespace).unwrap_or(input.len());
+    let token = &input[..word_end];
+    let Some(slash) = token.find('/') else {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    };
+    let power_str = token[..slash].trim();
+    let toughness_str = token[slash + 1..].trim();
+    let power = parse_pt_component(power_str).ok_or_else(|| {
+        nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Fail))
+    })?;
+    let toughness = parse_pt_component(toughness_str).ok_or_else(|| {
+        nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Fail))
+    })?;
+    Ok((&input[word_end..], (power, toughness)))
+}
+
+fn parse_pt_component(text: &str) -> Option<PtValue> {
+    if text.eq_ignore_ascii_case("x") {
+        return Some(PtValue::Variable("X".to_string()));
+    }
+    if text == "*" {
+        return Some(PtValue::Variable("*".to_string()));
+    }
+    text.parse::<i32>().ok().map(PtValue::Fixed)
+}
+
 /// Parse a roman numeral (I through XX) from Oracle text.
 ///
 /// Consumes one or more roman numeral characters (I, V, X) and converts to u32.
@@ -338,12 +373,10 @@ pub fn parse_roman_numeral(input: &str) -> OracleResult<'_, u32> {
         .find(|c: char| !matches!(c.to_ascii_uppercase(), 'I' | 'V' | 'X'))
         .unwrap_or(input.len());
     if end == 0 {
-        return Err(nom::Err::Error(nom_language::error::VerboseError {
-            errors: vec![(
-                input,
-                nom_language::error::VerboseErrorKind::Context("roman numeral"),
-            )],
-        }));
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
     }
     let roman_str = &input[..end];
     let upper = roman_str.to_uppercase();
@@ -355,24 +388,20 @@ pub fn parse_roman_numeral(input: &str) -> OracleResult<'_, u32> {
             'V' => 5,
             'X' => 10,
             _ => {
-                return Err(nom::Err::Error(nom_language::error::VerboseError {
-                    errors: vec![(
-                        input,
-                        nom_language::error::VerboseErrorKind::Context("roman numeral"),
-                    )],
-                }));
+                return Err(nom::Err::Error(nom::error::Error::new(
+                    input,
+                    nom::error::ErrorKind::Fail,
+                )));
             }
         };
         if val < prev {
             total = match total.checked_sub(val) {
                 Some(t) => t,
                 None => {
-                    return Err(nom::Err::Error(nom_language::error::VerboseError {
-                        errors: vec![(
-                            input,
-                            nom_language::error::VerboseErrorKind::Context("roman numeral"),
-                        )],
-                    }));
+                    return Err(nom::Err::Error(nom::error::Error::new(
+                        input,
+                        nom::error::ErrorKind::Fail,
+                    )));
                 }
             };
         } else {
@@ -381,12 +410,10 @@ pub fn parse_roman_numeral(input: &str) -> OracleResult<'_, u32> {
         prev = val;
     }
     if total == 0 {
-        return Err(nom::Err::Error(nom_language::error::VerboseError {
-            errors: vec![(
-                input,
-                nom_language::error::VerboseErrorKind::Context("roman numeral"),
-            )],
-        }));
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
     }
     Ok((&input[end..], total))
 }
@@ -397,9 +424,7 @@ pub fn ws(input: &str) -> OracleResult<'_, &str> {
 }
 
 /// Parse optional whitespace then a specific tag.
-pub fn ws_tag(
-    t: &str,
-) -> impl Parser<&str, Output = &str, Error = nom_language::error::VerboseError<&str>> {
+pub fn ws_tag(t: &str) -> impl Parser<&str, Output = &str, Error = OracleError<'_>> {
     preceded(opt(space0), tag(t))
 }
 
@@ -493,12 +518,10 @@ pub fn parse_keyword_name(input: &str) -> OracleResult<'_, &str> {
         }
     }
 
-    Err(nom::Err::Error(nom_language::error::VerboseError {
-        errors: vec![(
-            input,
-            nom_language::error::VerboseErrorKind::Context("keyword name"),
-        )],
-    }))
+    Err(nom::Err::Error(nom::error::Error::new(
+        input,
+        nom::error::ErrorKind::Fail,
+    )))
 }
 
 /// Parse an alt-cost keyword name (lowercase Oracle text) into its `KeywordKind`
@@ -598,12 +621,10 @@ pub fn parse_verb(input: &str) -> OracleResult<'_, &str> {
         }
     }
 
-    Err(nom::Err::Error(nom_language::error::VerboseError {
-        errors: vec![(
-            input,
-            nom_language::error::VerboseErrorKind::Context("verb"),
-        )],
-    }))
+    Err(nom::Err::Error(nom::error::Error::new(
+        input,
+        nom::error::ErrorKind::Fail,
+    )))
 }
 
 /// Parse common Oracle phrase fragments.
@@ -632,12 +653,10 @@ pub fn parse_phrase_fragment(input: &str) -> OracleResult<'_, &str> {
         }
     }
 
-    Err(nom::Err::Error(nom_language::error::VerboseError {
-        errors: vec![(
-            input,
-            nom_language::error::VerboseErrorKind::Context("phrase fragment"),
-        )],
-    }))
+    Err(nom::Err::Error(nom::error::Error::new(
+        input,
+        nom::error::ErrorKind::Fail,
+    )))
 }
 
 // ── Word-boundary scanning primitives ─────────────────────────────────
@@ -665,7 +684,7 @@ pub fn parse_phrase_fragment(input: &str) -> OracleResult<'_, &str> {
 /// ```
 pub fn scan_at_word_boundaries<'a, O, F>(text: &'a str, mut combinator: F) -> Option<O>
 where
-    F: FnMut(&'a str) -> nom::IResult<&'a str, O, nom_language::error::VerboseError<&'a str>>,
+    F: FnMut(&'a str) -> nom::IResult<&'a str, O, OracleError<'a>>,
 {
     let mut remaining = text;
     while !remaining.is_empty() {
@@ -690,7 +709,7 @@ where
 pub fn scan_contains(text: &str, phrase: &str) -> bool {
     let mut remaining = text;
     while !remaining.is_empty() {
-        if tag::<_, _, nom_language::error::VerboseError<&str>>(phrase)
+        if tag::<_, _, OracleError<'_>>(phrase)
             .parse(remaining)
             .is_ok()
         {
@@ -722,7 +741,7 @@ pub fn scan_split_at_phrase<'a, O, F>(
     mut combinator: F,
 ) -> Option<(&'a str, &'a str)>
 where
-    F: FnMut(&'a str) -> nom::IResult<&'a str, O, nom_language::error::VerboseError<&'a str>>,
+    F: FnMut(&'a str) -> nom::IResult<&'a str, O, OracleError<'a>>,
 {
     let mut remaining = text;
     while !remaining.is_empty() {
@@ -755,7 +774,7 @@ where
 /// use nom::sequence::preceded;
 /// use nom::Parser;
 /// let (before, value, rest) = scan_preceded("then it dies soon", |i| {
-///     preceded(tag::<_, _, nom_language::error::VerboseError<&str>>("it "), tag("dies")).parse(i)
+///     preceded(tag::<_, _, OracleError<'_>>("it "), tag("dies")).parse(i)
 /// }).unwrap();
 /// assert_eq!(before, "then ");
 /// assert_eq!(value, "dies");
@@ -763,7 +782,7 @@ where
 /// ```
 pub fn scan_preceded<'a, O, F>(text: &'a str, mut combinator: F) -> Option<(&'a str, O, &'a str)>
 where
-    F: FnMut(&'a str) -> nom::IResult<&'a str, O, nom_language::error::VerboseError<&'a str>>,
+    F: FnMut(&'a str) -> nom::IResult<&'a str, O, OracleError<'a>>,
 {
     let mut remaining = text;
     while !remaining.is_empty() {
@@ -781,7 +800,7 @@ where
 /// Split `input` on the first occurrence of `separator`, returning `(before, after)`.
 ///
 /// Equivalent to `str::split_once(separator)` but as a nom combinator — uses
-/// `take_until` + `tag` internally, producing structured `VerboseError` traces
+/// `take_until` + `tag` internally, producing structured `OracleError` traces
 /// on failure instead of a bare `None`.
 ///
 /// # Example
@@ -793,7 +812,7 @@ where
 pub fn split_once_on<'a>(
     input: &'a str,
     separator: &'a str,
-) -> nom::IResult<&'a str, (&'a str, &'a str), nom_language::error::VerboseError<&'a str>> {
+) -> nom::IResult<&'a str, (&'a str, &'a str), OracleError<'a>> {
     let (rest, before) = take_until(separator).parse(input)?;
     let (after, _) = tag(separator).parse(rest)?;
     Ok(("", (before, after)))
@@ -836,7 +855,7 @@ mod tests {
     #[test]
     fn test_scan_split_at_phrase_at_start() {
         let result = scan_split_at_phrase("dies to removal", |i| {
-            tag::<_, _, nom_language::error::VerboseError<&str>>("dies").parse(i)
+            tag::<_, _, OracleError<'_>>("dies").parse(i)
         });
         assert_eq!(result, Some(("", "dies to removal")));
     }
@@ -844,7 +863,7 @@ mod tests {
     #[test]
     fn test_scan_split_at_phrase_mid_string() {
         let result = scan_split_at_phrase("the creature dies", |i| {
-            tag::<_, _, nom_language::error::VerboseError<&str>>("dies").parse(i)
+            tag::<_, _, OracleError<'_>>("dies").parse(i)
         });
         assert_eq!(result, Some(("the creature ", "dies")));
     }
@@ -852,7 +871,7 @@ mod tests {
     #[test]
     fn test_scan_split_at_phrase_not_found() {
         let result = scan_split_at_phrase("the creature enters", |i| {
-            tag::<_, _, nom_language::error::VerboseError<&str>>("dies").parse(i)
+            tag::<_, _, OracleError<'_>>("dies").parse(i)
         });
         assert!(result.is_none());
     }
@@ -861,7 +880,7 @@ mod tests {
     fn test_scan_split_at_phrase_word_boundary_safe() {
         // "studies" must NOT match "dies" mid-word
         let result = scan_split_at_phrase("studies hard", |i| {
-            tag::<_, _, nom_language::error::VerboseError<&str>>("dies").parse(i)
+            tag::<_, _, OracleError<'_>>("dies").parse(i)
         });
         assert!(result.is_none());
     }
@@ -870,11 +889,7 @@ mod tests {
     fn test_scan_preceded_threads_value_and_remainder() {
         use nom::combinator::value;
         let (before, val, rest) = scan_preceded("the creature dies to removal", |i| {
-            value(
-                "dies",
-                tag::<_, _, nom_language::error::VerboseError<&str>>("dies"),
-            )
-            .parse(i)
+            value("dies", tag::<_, _, OracleError<'_>>("dies")).parse(i)
         })
         .unwrap();
         assert_eq!(before, "the creature ");
@@ -890,7 +905,7 @@ mod tests {
     fn test_scan_preceded_word_boundary_safe() {
         // "studies" must NOT match "dies" mid-word even with value capture.
         let result = scan_preceded("studies hard", |i| {
-            tag::<_, _, nom_language::error::VerboseError<&str>>("dies").parse(i)
+            tag::<_, _, OracleError<'_>>("dies").parse(i)
         });
         assert!(result.is_none());
     }
@@ -898,7 +913,7 @@ mod tests {
     #[test]
     fn test_scan_preceded_not_found() {
         let result = scan_preceded("the creature enters", |i| {
-            tag::<_, _, nom_language::error::VerboseError<&str>>("dies").parse(i)
+            tag::<_, _, OracleError<'_>>("dies").parse(i)
         });
         assert!(result.is_none());
     }

@@ -1,8 +1,13 @@
 use crate::game::filter;
-use crate::types::ability::{AbilityCondition, Effect, EffectKind, TargetRef, UnlessCost};
+use crate::types::ability::{
+    AbilityCondition, Effect, EffectKind, TargetFilter, TargetRef, UnlessCost,
+};
 use crate::types::events::GameEvent;
-use crate::types::game_state::{ActionResult, GameState, PendingContinuation, WaitingFor};
+use crate::types::game_state::{
+    ActionResult, AutoMayChoice, GameState, PendingContinuation, WaitingFor,
+};
 use crate::types::identifiers::ObjectId;
+use crate::types::keywords::Keyword;
 use crate::types::zones::Zone;
 
 use super::casting;
@@ -24,22 +29,42 @@ pub(super) fn handle_optional_effect_choice(
     state.cost_payment_failed_flag = false;
     set_active_priority(state);
 
-    if let Some(mut ability) = state.pending_optional_effect.take() {
-        ability.optional = false;
-        if accept {
-            ability.context.optional_effect_performed = true;
-            effects::resolve_ability_chain(state, &ability, events, 1)
-                .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
-        } else if let Some(ref sub) = ability.sub_ability {
-            let mut sub_resolved = sub.as_ref().clone();
-            sub_resolved.context = ability.context.clone();
-            effects::resolve_ability_chain(state, &sub_resolved, events, 1)
-                .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
-        }
+    if let Some(ability) = state.pending_optional_effect.take() {
+        let choice = if accept {
+            AutoMayChoice::Accept
+        } else {
+            AutoMayChoice::Decline
+        };
+        effects::resolve_optional_effect_decision(state, *ability, choice, events, 1)
+            .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
     }
 
     resume_pending_continuation_if_priority(state, events)?;
+    if state.resolving_begin_game_abilities
+        && matches!(state.waiting_for, WaitingFor::Priority { .. })
+    {
+        return Ok(super::mulligan::resume_begin_game_abilities(state, events));
+    }
     Ok(state.waiting_for.clone())
+}
+
+pub(super) fn handle_optional_effect_choice_and_remember(
+    state: &mut GameState,
+    waiting_for: WaitingFor,
+    choice: AutoMayChoice,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let WaitingFor::OptionalEffectChoice {
+        may_trigger_key: Some(key),
+        ..
+    } = waiting_for
+    else {
+        return Err(EngineError::InvalidAction(
+            "Optional effect cannot be remembered".to_string(),
+        ));
+    };
+    state.set_may_trigger_auto_choice(key, choice);
+    handle_optional_effect_choice(state, matches!(choice, AutoMayChoice::Accept), events)
 }
 
 pub(super) fn handle_opponent_may_choice(
@@ -230,13 +255,13 @@ pub(super) fn handle_unless_payment(
                     }
                 }
             }
-            UnlessCost::DiscardCard => {
-                let hand_cards: Vec<ObjectId> = state
-                    .players
-                    .iter()
-                    .find(|p| p.id == player)
-                    .map(|p| p.hand.iter().copied().collect::<Vec<_>>())
-                    .unwrap_or_default();
+            UnlessCost::DiscardCard { filter } => {
+                let hand_cards = crate::game::casting::find_eligible_discard_targets(
+                    state,
+                    player,
+                    pending_effect.source_id,
+                    filter.as_ref(),
+                );
                 if hand_cards.is_empty() {
                     payment_failed = true;
                 } else {
@@ -332,6 +357,7 @@ pub(super) fn handle_unless_payment(
         }
 
         if !payment_failed {
+            clear_echo_due_for_echo_payment(state, &pending_effect);
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&pending_effect.effect),
                 source_id: pending_effect.source_id,
@@ -341,6 +367,7 @@ pub(super) fn handle_unless_payment(
 
     if !pay || payment_failed {
         let mut ability = pending_effect.as_ref().clone();
+        clear_echo_due_for_echo_payment(state, &ability);
         if let Effect::Counter {
             ref mut unless_payment,
             ..
@@ -360,6 +387,28 @@ pub(super) fn handle_unless_payment(
     }
     resume_pending_continuation_if_priority(state, events)?;
     Ok(action_result(events, state.waiting_for.clone()))
+}
+
+fn clear_echo_due_for_echo_payment(
+    state: &mut GameState,
+    pending_effect: &crate::types::ability::ResolvedAbility,
+) {
+    let is_echo_sacrifice = matches!(
+        &pending_effect.effect,
+        Effect::Sacrifice {
+            target: TargetFilter::SelfRef,
+            ..
+        }
+    );
+    if !is_echo_sacrifice {
+        return;
+    }
+
+    if let Some(obj) = state.objects.get_mut(&pending_effect.source_id) {
+        if obj.echo_due && obj.keywords.iter().any(|kw| matches!(kw, Keyword::Echo(_))) {
+            obj.echo_due = false;
+        }
+    }
 }
 
 pub(super) fn handle_unless_payment_tap_land_for_mana(
@@ -637,6 +686,7 @@ fn action_result(events: &mut Vec<GameEvent>, waiting_for: WaitingFor) -> Action
 mod tests {
     use super::*;
     use crate::types::ability::{AbilityCondition, GainLifePlayer, QuantityExpr, ResolvedAbility};
+    use crate::types::game_state::{AutoMayChoice, MayTriggerAutoChoiceKey, MayTriggerOrigin};
     use crate::types::identifiers::ObjectId;
     use crate::types::player::PlayerId;
 
@@ -663,6 +713,7 @@ mod tests {
             player: PlayerId(0),
             source_id: ObjectId(100),
             description: None,
+            may_trigger_key: None,
         };
 
         let mut events = Vec::new();
@@ -688,6 +739,7 @@ mod tests {
             player: PlayerId(0),
             source_id: ObjectId(100),
             description: None,
+            may_trigger_key: None,
         };
 
         let mut events = Vec::new();
@@ -695,5 +747,64 @@ mod tests {
             .expect("accepted optional effect should resolve");
 
         assert_eq!(state.players[0].life, 21);
+    }
+
+    #[test]
+    fn remember_optional_effect_records_key_and_resolves_choice() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = ObjectId(100);
+        let key = MayTriggerAutoChoiceKey {
+            player: PlayerId(0),
+            source_id,
+            origin: MayTriggerOrigin::Printed { trigger_index: 0 },
+        };
+        let mut optional = ResolvedAbility::new(gain_life(2), vec![], source_id, PlayerId(0));
+        optional.optional = true;
+        state.pending_optional_effect = Some(Box::new(optional));
+        state.waiting_for = WaitingFor::OptionalEffectChoice {
+            player: PlayerId(0),
+            source_id,
+            description: None,
+            may_trigger_key: Some(key),
+        };
+
+        let mut events = Vec::new();
+        handle_optional_effect_choice_and_remember(
+            &mut state,
+            WaitingFor::OptionalEffectChoice {
+                player: PlayerId(0),
+                source_id,
+                description: None,
+                may_trigger_key: Some(key),
+            },
+            AutoMayChoice::Accept,
+            &mut events,
+        )
+        .expect("remembered optional choice should resolve");
+
+        assert_eq!(
+            state.may_trigger_auto_choice(&key),
+            Some(AutoMayChoice::Accept)
+        );
+        assert_eq!(state.players[0].life, 22);
+    }
+
+    #[test]
+    fn remember_optional_effect_rejects_unkeyed_prompt() {
+        let mut state = GameState::new_two_player(42);
+        let mut events = Vec::new();
+        let result = handle_optional_effect_choice_and_remember(
+            &mut state,
+            WaitingFor::OptionalEffectChoice {
+                player: PlayerId(0),
+                source_id: ObjectId(100),
+                description: None,
+                may_trigger_key: None,
+            },
+            AutoMayChoice::Accept,
+            &mut events,
+        );
+
+        assert!(result.is_err());
     }
 }

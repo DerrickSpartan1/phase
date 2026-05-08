@@ -1,11 +1,16 @@
 use serde::{Deserialize, Serialize};
 
 use super::ability::TargetRef;
-use super::game_state::{AutoPassRequest, CombatDamageAssignmentMode, ShardChoice};
+use super::card_type::CoreType;
+use super::counter::CounterType;
+use super::game_state::{AutoMayChoice, AutoPassRequest, CombatDamageAssignmentMode, ShardChoice};
 use super::identifiers::{CardId, ObjectId};
-use super::mana::ManaType;
+use super::keywords::Keyword;
+use super::mana::{ManaColor, ManaType};
 use super::match_config::DeckCardCount;
+use super::phase::Phase;
 use super::player::PlayerId;
+use super::zones::Zone;
 use crate::game::combat::AttackTarget;
 
 /// CR 701.57a + CR 702.85a: Player decision for any "you may cast that card
@@ -60,6 +65,18 @@ pub enum GameAction {
     },
     MulliganDecision {
         keep: bool,
+    },
+    /// CR 402.3: A player may arrange their hand in any convenient fashion at any time.
+    /// Hand order has no game-rules significance for mainline gameplay, so
+    /// this action is purely a display-preference update on the actor's own
+    /// hand. `order` MUST be a permutation of the actor's current hand —
+    /// same multiset of ObjectIds, no additions or removals. Like
+    /// `SetPhaseStops` and `CancelAutoPass`, it bypasses the WaitingFor
+    /// dispatch and the priority/turn checks: a player can rearrange their
+    /// hand whenever they want, including while the opponent holds priority
+    /// or while another interactive choice is open.
+    ReorderHand {
+        order: Vec<ObjectId>,
     },
     TapLandForMana {
         object_id: ObjectId,
@@ -130,6 +147,10 @@ pub enum GameAction {
     ChooseOption {
         choice: String,
     },
+    /// CR 701.55a: Choose one branch of a resolution-time "A or B" instruction.
+    ChooseBranch {
+        index: usize,
+    },
     /// CR 609.7a: Choose a source of damage for a prevention or replacement effect.
     ChooseDamageSource {
         source: ObjectId,
@@ -164,10 +185,17 @@ pub enum GameAction {
     ChooseOverloadCost {
         use_overload: bool,
     },
+    /// CR 702.103a: Choose normal cast (false) or Bestow cast (true) from hand.
+    /// Bestow cast substitutes the bestow mana cost and turns the spell into an
+    /// Aura with `enchant creature` (CR 702.103b).
+    ChooseBestowCost {
+        use_bestow: bool,
+    },
     /// CR 702.49: Activate a Ninjutsu-family keyword from hand or command zone during combat.
     ActivateNinjutsu {
-        ninjutsu_card_id: CardId,
-        /// The creature to return — unblocked attacker (Ninjutsu) or tapped creature (WebSlinging).
+        /// The card object with Ninjutsu in hand or command zone.
+        ninjutsu_object_id: ObjectId,
+        /// The unblocked attacker to return.
         creature_to_return: ObjectId,
     },
     /// CR 702.190a: Cast a spell from HAND via the Sneak alternative cost.
@@ -183,6 +211,13 @@ pub enum GameAction {
     /// attacking alongside the returned creature. Non-permanent Sneak casts
     /// resolve normally.
     CastSpellAsSneak {
+        hand_object: ObjectId,
+        card_id: CardId,
+        creature_to_return: ObjectId,
+    },
+    /// CR 702.188a: Cast a spell from HAND via the Web-slinging alternative cost.
+    /// The returned creature must be a tapped creature controlled by the caster.
+    CastSpellAsWebSlinging {
         hand_object: ObjectId,
         card_id: CardId,
         creature_to_return: ObjectId,
@@ -221,6 +256,9 @@ pub enum GameAction {
     /// CR 609.3: Accept or decline an optional effect ("You may X").
     DecideOptionalEffect {
         accept: bool,
+    },
+    DecideOptionalEffectAndRemember {
+        choice: AutoMayChoice,
     },
     /// CR 118.12: Pay or decline an "unless pays" cost (e.g., Mana Leak, No More Lies).
     PayUnlessCost {
@@ -386,6 +424,10 @@ pub enum GameAction {
     /// may be offered again next turn. Assign when WotC publishes SOS CR
     /// update.
     PassParadigmOffer,
+    /// Debug/remediation action — bypasses WaitingFor validation (like Concede).
+    /// Gated on `GameState::debug_mode`. Rejected in multiplayer at both the
+    /// WASM and server-core layers.
+    Debug(DebugAction),
     /// CR 104.3a: A player may concede the game at any time. That player leaves the game.
     /// CR 800.4a: When a player leaves a multiplayer game, all objects owned by that player
     /// leave the game and all spells/abilities controlled by that player cease to exist.
@@ -407,6 +449,117 @@ pub enum LearnOption {
     Rummage { card_id: ObjectId },
     /// Decline to learn (skip).
     Skip,
+}
+
+/// Direct game-state manipulation actions for debugging, testing, and remediation.
+/// Bypasses `WaitingFor` validation — fires from any game state without disrupting
+/// the current prompt. Gated on `GameState::debug_mode`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum DebugAction {
+    // ── Object Zone Manipulation ──────────────────────────────────────────
+    /// Move an existing object to a different zone.
+    /// When `simulate` is true, runs the full pipeline (triggers placed on stack, SBAs).
+    /// When false, raw placement with no triggers or SBAs.
+    MoveToZone {
+        object_id: ObjectId,
+        to_zone: Zone,
+        #[serde(default)]
+        simulate: bool,
+    },
+    /// Create a new card object by name. Resolved against CardDatabase at the
+    /// WASM layer; the engine returns InvalidAction if this reaches apply().
+    CreateCard {
+        card_name: String,
+        owner: PlayerId,
+        zone: Zone,
+    },
+    /// Remove an object from the game entirely.
+    RemoveObject { object_id: ObjectId },
+    /// Draw N cards using the real draw pipeline (CR 121.1).
+    /// Routes through replacement effects and emits CardDrawn events.
+    DrawCards { player_id: PlayerId, count: u32 },
+    /// Mill N cards from library to graveyard.
+    Mill { player_id: PlayerId, count: u32 },
+    /// Shuffle a player's library.
+    ShuffleLibrary { player_id: PlayerId },
+
+    // ── Object Property Manipulation ──────────────────────────────────────
+    /// Overwrite base power/toughness (layer 7a input). Marks layers dirty.
+    SetBasePowerToughness {
+        object_id: ObjectId,
+        power: Option<i32>,
+        toughness: Option<i32>,
+    },
+    /// Modify counters: positive delta adds, negative removes (clamped at 0).
+    /// Bypasses replacement effects.
+    ModifyCounters {
+        object_id: ObjectId,
+        counter_type: CounterType,
+        delta: i32,
+    },
+    /// Tap or untap an object.
+    SetTapped { object_id: ObjectId, tapped: bool },
+    /// Change an object's controller. Marks layers dirty.
+    SetController {
+        object_id: ObjectId,
+        controller: PlayerId,
+    },
+    /// Set summoning sickness flag directly.
+    SetSummoningSickness { object_id: ObjectId, sick: bool },
+    /// Transform a DFC, flip a flip-card, or turn face-down/up.
+    SetFaceState {
+        object_id: ObjectId,
+        face_down: Option<bool>,
+        transformed: Option<bool>,
+        flipped: Option<bool>,
+    },
+    /// Attach an object (equipment/aura) to a target permanent.
+    Attach {
+        object_id: ObjectId,
+        target_id: ObjectId,
+    },
+    /// Detach an object from whatever it's attached to.
+    Detach { object_id: ObjectId },
+    /// Grant a keyword to an object (added to runtime keywords list).
+    GrantKeyword {
+        object_id: ObjectId,
+        keyword: Keyword,
+    },
+    /// Remove a keyword from an object's runtime keywords list.
+    RemoveKeyword {
+        object_id: ObjectId,
+        keyword: Keyword,
+    },
+
+    // ── Player State Manipulation ─────────────────────────────────────────
+    /// Set a player's life total directly.
+    SetLife { player_id: PlayerId, life: i32 },
+    /// Add mana to a player's pool (mixed types in one action).
+    AddMana {
+        player_id: PlayerId,
+        mana: Vec<ManaType>,
+    },
+
+    // ── Game Flow ─────────────────────────────────────────────────────────
+    /// Advance or rewind to a specific phase/step.
+    SetPhase {
+        phase: Phase,
+        active_player: PlayerId,
+    },
+    /// Explicitly run state-based actions. Use after a batch of raw mutations.
+    RunStateBasedActions,
+    /// Create a token with explicit characteristics on the battlefield.
+    CreateToken {
+        owner: PlayerId,
+        name: String,
+        power: Option<i32>,
+        toughness: Option<i32>,
+        core_types: Vec<CoreType>,
+        subtypes: Vec<String>,
+        colors: Vec<ManaColor>,
+        keywords: Vec<Keyword>,
+    },
 }
 
 impl GameAction {
@@ -449,6 +602,10 @@ impl GameAction {
             GameAction::CastSpell { object_id, .. } => Some(*object_id),
             GameAction::Foretell { object_id, .. } => Some(*object_id),
             GameAction::CastSpellAsSneak { hand_object, .. } => Some(*hand_object),
+            GameAction::CastSpellAsWebSlinging { hand_object, .. } => Some(*hand_object),
+            GameAction::ActivateNinjutsu {
+                ninjutsu_object_id, ..
+            } => Some(*ninjutsu_object_id),
             GameAction::CastSpellForFree { object_id, .. } => Some(*object_id),
             GameAction::CastSpellAsMiracle { object_id, .. } => Some(*object_id),
             GameAction::CastSpellAsMadness { object_id, .. } => Some(*object_id),
@@ -474,6 +631,7 @@ impl GameAction {
             | GameAction::DeclareAttackers { .. }
             | GameAction::DeclareBlockers { .. }
             | GameAction::MulliganDecision { .. }
+            | GameAction::ReorderHand { .. }
             | GameAction::SelectCards { .. }
             | GameAction::SelectTargets { .. }
             | GameAction::ChooseTarget { .. }
@@ -482,6 +640,7 @@ impl GameAction {
             | GameAction::SubmitSideboard { .. }
             | GameAction::ChoosePlayDraw { .. }
             | GameAction::ChooseOption { .. }
+            | GameAction::ChooseBranch { .. }
             | GameAction::SelectModes { .. }
             | GameAction::DecideOptionalCost { .. }
             | GameAction::ChooseAdventureFace { .. }
@@ -489,8 +648,9 @@ impl GameAction {
             | GameAction::ChooseWarpCost { .. }
             | GameAction::ChooseEvokeCost { .. }
             | GameAction::ChooseOverloadCost { .. }
-            | GameAction::ActivateNinjutsu { .. }
+            | GameAction::ChooseBestowCost { .. }
             | GameAction::DecideOptionalEffect { .. }
+            | GameAction::DecideOptionalEffectAndRemember { .. }
             | GameAction::PayUnlessCost { .. }
             | GameAction::PayCombatTax { .. }
             | GameAction::ChooseDungeon { .. }
@@ -516,7 +676,8 @@ impl GameAction {
             | GameAction::ChooseManaColor { .. }
             | GameAction::PayManaAbilityMana { .. }
             | GameAction::PassParadigmOffer
-            | GameAction::Concede { .. } => None,
+            | GameAction::Concede { .. }
+            | GameAction::Debug(_) => None,
         }
     }
 }
@@ -646,6 +807,21 @@ mod tests {
                 GameAction::ActivateAbility {
                     source_id: oid,
                     ability_index: 0,
+                },
+                Some(oid),
+            ),
+            (
+                GameAction::ActivateNinjutsu {
+                    ninjutsu_object_id: oid,
+                    creature_to_return: ObjectId(99),
+                },
+                Some(oid),
+            ),
+            (
+                GameAction::CastSpellAsWebSlinging {
+                    hand_object: oid,
+                    card_id: cid,
+                    creature_to_return: ObjectId(99),
                 },
                 Some(oid),
             ),

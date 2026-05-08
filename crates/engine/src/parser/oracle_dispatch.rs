@@ -5,11 +5,12 @@ use super::oracle_classifier::{
     has_trigger_prefix, is_damage_prevention_pattern, is_effect_sentence_candidate,
     is_replacement_pattern, is_static_pattern,
 };
-use super::oracle_effect::{parse_effect_chain_with_context, ParseContext};
+use super::oracle_effect::parse_effect_chain_with_context;
+use super::oracle_ir::context::ParseContext;
 
 pub(super) fn dispatch_line_nom(line: &str, card_name: &str) -> Effect {
     let lower = line.to_lowercase();
-    let ctx = ParseContext {
+    let mut ctx = ParseContext {
         subject: None,
         card_name: Some(card_name.to_string()),
         actor: None,
@@ -17,7 +18,7 @@ pub(super) fn dispatch_line_nom(line: &str, card_name: &str) -> Effect {
     };
 
     if is_effect_sentence_candidate(&lower) || is_damage_prevention_pattern(&lower) {
-        let def = parse_effect_chain_with_context(line, AbilityKind::Spell, &ctx);
+        let def = parse_effect_chain_with_context(line, AbilityKind::Spell, &mut ctx);
         if !has_unimplemented(&def) {
             return *def.effect;
         }
@@ -71,6 +72,6 @@ pub(super) fn make_unimplemented_with_effect(line: &str, effect: Effect) -> Abil
         return AbilityDefinition::new(AbilityKind::Spell, effect).description(line.to_string());
     }
 
-    tracing::warn!(oracle_text = line, "unimplemented ability line");
+    tracing::debug!(oracle_text = line, "unimplemented ability line");
     AbilityDefinition::new(AbilityKind::Spell, effect).description(line.to_string())
 }

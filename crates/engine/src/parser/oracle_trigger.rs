@@ -1,31 +1,35 @@
+use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::combinator::{recognize, value};
+use nom::combinator::{opt, recognize, value};
 use nom::multi::many1;
 use nom::sequence::{delimited, pair, preceded, terminated};
 use nom::Parser;
-use nom_language::error::VerboseError;
 
-use super::oracle_effect::{parse_effect_chain_with_context, ParseContext};
+use super::oracle_effect::{lower_effect_chain_ir, parse_effect_chain_ir};
+use super::oracle_ir::context::ParseContext;
+use super::oracle_ir::trigger::{TriggerBody, TriggerIr, TriggerModifiers};
 use super::oracle_nom::condition::parse_inner_condition;
 use super::oracle_nom::error::OracleResult;
 use super::oracle_nom::primitives::{
     self as nom_primitives, scan_contains, scan_preceded, scan_split_at_phrase,
 };
 use super::oracle_nom::quantity as nom_quantity;
-use super::oracle_target::{parse_type_phrase, starts_with_type_word};
-use super::oracle_target_scope;
+use super::oracle_target::{
+    attachment_kinds_filter_prop, parse_attachment_kind_disjunction, parse_type_phrase,
+    starts_with_type_word,
+};
 use super::oracle_util::{
     canonicalize_subtype_name, is_core_type_name, is_non_subtype_subject_name, merge_or_filters,
     normalize_card_name_refs, parse_number, parse_ordinal, parse_subtype, strip_after,
     strip_reminder_text, TextPair, SELF_REF_PARSE_ONLY_PHRASES,
 };
-use crate::parser::oracle_warnings::{push_warning, take_warnings};
+use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
-    AbilityKind, AttachmentKind, CastVariantPaid, Comparator, ControllerRef, DamageKindFilter,
-    FilterProp, PlayerFilter, QuantityExpr, QuantityRef, StaticCondition, TargetFilter,
-    TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter, UnlessCost,
-    UnlessPayModifier,
+    AbilityDefinition, AbilityKind, AttachmentKind, CastVariantPaid, Comparator, ControllerRef,
+    CounterTriggerFilter, DamageKindFilter, Effect, FilterProp, PlayerFilter, QuantityExpr,
+    QuantityRef, StaticCondition, TargetFilter, TriggerCondition, TriggerConstraint,
+    TriggerDefinition, TypeFilter, TypedFilter, UnlessCost, UnlessPayModifier,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::PlayerActionKind;
@@ -76,7 +80,7 @@ fn effect_adds_mana_to_triggering_player(effect_lower: &str) -> bool {
         (),
         pair(
             alt((
-                tag::<_, _, VerboseError<&str>>("that player "),
+                tag::<_, _, OracleError<'_>>("that player "),
                 tag("that opponent "),
             )),
             alt((tag("adds "), tag("add "))),
@@ -222,14 +226,29 @@ fn trigger_should_rewrite_cost_x(def: &TriggerDefinition) -> bool {
 /// `result.triggers.len()` so each compound-split trigger receives a unique
 /// index in the source object's `base_trigger_definitions` list (CR 707.9a).
 pub fn parse_trigger_lines(text: &str, card_name: &str) -> Vec<TriggerDefinition> {
-    parse_trigger_lines_at_index(text, card_name, None)
+    parse_trigger_lines_at_index(text, card_name, None, &mut ParseContext::default())
 }
 
 pub(crate) fn parse_trigger_lines_at_index(
     text: &str,
     card_name: &str,
     base_trigger_index: Option<usize>,
+    ctx: &mut ParseContext,
 ) -> Vec<TriggerDefinition> {
+    parse_trigger_lines_at_index_ir(text, card_name, base_trigger_index, ctx)
+        .iter()
+        .map(lower_trigger_ir)
+        .collect()
+}
+
+/// IR production for compound trigger splitting. Each compound half produces
+/// its own `TriggerIr`.
+pub(crate) fn parse_trigger_lines_at_index_ir(
+    text: &str,
+    card_name: &str,
+    base_trigger_index: Option<usize>,
+    ctx: &mut ParseContext,
+) -> Vec<TriggerIr> {
     let stripped = strip_reminder_text(text);
     let normalized = normalize_self_refs(&stripped, card_name);
     let lower = normalized.to_lowercase();
@@ -241,53 +260,49 @@ pub(crate) fn parse_trigger_lines_at_index(
     let cond_lower = condition.to_lowercase();
 
     // Pattern 1: "when/whenever X and when Y" or "when X and whenever Y"
-    // The conjunction " and when " or " and whenever " separates two independent conditions.
     if let Some(halves) = split_and_when_compound(&cond_lower, &condition) {
-        return halves
-            .into_iter()
-            .enumerate()
-            .map(|(i, cond)| {
-                let trigger_text = if effect.is_empty() {
-                    cond
-                } else {
-                    format!("{cond}, {effect}")
-                };
-                parse_trigger_line_with_index(
-                    &trigger_text,
-                    card_name,
-                    base_trigger_index.map(|b| b + i),
-                )
-            })
-            .collect();
+        let mut results = Vec::with_capacity(halves.len());
+        for (i, cond) in halves.into_iter().enumerate() {
+            let trigger_text = if effect.is_empty() {
+                cond
+            } else {
+                format!("{cond}, {effect}")
+            };
+            results.push(parse_trigger_line_with_index_ir(
+                &trigger_text,
+                card_name,
+                base_trigger_index.map(|b| b + i),
+                ctx,
+            ));
+        }
+        return results;
     }
 
     // Pattern 2: "whenever ~ [event1] or [event2]" — compound events sharing a subject.
-    // The "or" joins two event verbs, not two subjects. Detect by checking if the
-    // text after "or" starts with a known trigger event verb.
     if let Some(halves) = split_or_event_compound(&cond_lower, &condition) {
-        return halves
-            .into_iter()
-            .enumerate()
-            .map(|(i, cond)| {
-                let trigger_text = if effect.is_empty() {
-                    cond
-                } else {
-                    format!("{cond}, {effect}")
-                };
-                parse_trigger_line_with_index(
-                    &trigger_text,
-                    card_name,
-                    base_trigger_index.map(|b| b + i),
-                )
-            })
-            .collect();
+        let mut results = Vec::with_capacity(halves.len());
+        for (i, cond) in halves.into_iter().enumerate() {
+            let trigger_text = if effect.is_empty() {
+                cond
+            } else {
+                format!("{cond}, {effect}")
+            };
+            results.push(parse_trigger_line_with_index_ir(
+                &trigger_text,
+                card_name,
+                base_trigger_index.map(|b| b + i),
+                ctx,
+            ));
+        }
+        return results;
     }
 
     // No compound — single trigger.
-    vec![parse_trigger_line_with_index(
+    vec![parse_trigger_line_with_index_ir(
         text,
         card_name,
         base_trigger_index,
+        ctx,
     )]
 }
 
@@ -311,7 +326,7 @@ fn strip_first_time_each_turn_qualifier(condition: &str) -> (String, bool) {
     const PHRASE: &str = "for the first time each turn";
     let lower = condition.to_lowercase();
     let Some((before_lower, _, rest_lower)) =
-        scan_preceded(&lower, |i| tag::<_, _, VerboseError<&str>>(PHRASE).parse(i))
+        scan_preceded(&lower, |i| tag::<_, _, OracleError<'_>>(PHRASE).parse(i))
     else {
         return (condition.to_string(), false);
     };
@@ -340,9 +355,9 @@ fn condition_introduces_target_player(cond_lower: &str) -> bool {
     use nom::bytes::complete::tag;
     use nom::combinator::value;
 
-    fn parse_actor(input: &str) -> Result<(&str, ()), nom::Err<VerboseError<&str>>> {
+    fn parse_actor(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
         alt((
-            value((), tag::<_, _, VerboseError<&str>>("you ")),
+            value((), tag::<_, _, OracleError<'_>>("you ")),
             value((), tag("an opponent ")),
             value((), tag("a player ")),
             value((), tag("another player ")),
@@ -350,9 +365,9 @@ fn condition_introduces_target_player(cond_lower: &str) -> bool {
         .parse(input)
     }
 
-    fn parse_attack_verb(input: &str) -> Result<(&str, ()), nom::Err<VerboseError<&str>>> {
+    fn parse_attack_verb(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
         alt((
-            value((), tag::<_, _, VerboseError<&str>>("attack ")),
+            value((), tag::<_, _, OracleError<'_>>("attack ")),
             value((), tag("attacks ")),
         ))
         .parse(input)
@@ -365,12 +380,9 @@ fn condition_introduces_target_player(cond_lower: &str) -> bool {
     /// (Dokuchi Silencer's "destroy target creature or planeswalker that player
     /// controls"). Mirrors `parse_attack_verb` — both verbs produce the same
     /// downstream scope.
-    fn parse_damage_phrase(input: &str) -> Result<(&str, ()), nom::Err<VerboseError<&str>>> {
+    fn parse_damage_phrase(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
         alt((
-            value(
-                (),
-                tag::<_, _, VerboseError<&str>>("deals combat damage to "),
-            ),
+            value((), tag::<_, _, OracleError<'_>>("deals combat damage to ")),
             value((), tag("deals damage to ")),
             value((), tag("deal combat damage to ")),
             value((), tag("deal damage to ")),
@@ -384,7 +396,7 @@ fn condition_introduces_target_player(cond_lower: &str) -> bool {
     while !remaining.is_empty() {
         if let Ok((after_actor, ())) = parse_actor(remaining) {
             if let Ok((after_verb, ())) = parse_attack_verb(after_actor) {
-                if tag::<_, _, VerboseError<&str>>("a player")
+                if tag::<_, _, OracleError<'_>>("a player")
                     .parse(after_verb)
                     .is_ok()
                 {
@@ -397,7 +409,7 @@ fn condition_introduces_target_player(cond_lower: &str) -> bool {
         // SelfRef ("~"), equipped creature ("equipped creature"), or any typed
         // subject, so match on the verb phrase alone.
         if let Ok((after_damage, ())) = parse_damage_phrase(remaining) {
-            if tag::<_, _, VerboseError<&str>>("a player")
+            if tag::<_, _, OracleError<'_>>("a player")
                 .parse(after_damage)
                 .is_ok()
             {
@@ -435,15 +447,21 @@ fn condition_introduces_target_player(cond_lower: &str) -> bool {
 /// pass `None`, in which case any "has this ability" clause inside the trigger
 /// body declines gracefully.
 pub fn parse_trigger_line(text: &str, card_name: &str) -> TriggerDefinition {
-    parse_trigger_line_with_index(text, card_name, None)
+    parse_trigger_line_with_index(text, card_name, None, &mut ParseContext::default())
 }
 
+/// IR production: extract all trigger fields into a `TriggerIr` without
+/// performing final assembly into `TriggerDefinition`.
+///
+/// The scope guard for `ControllerRef::TargetPlayer` (D-04) is alive during
+/// `parse_effect_chain_ir` — the guard must not be dropped before body parsing.
 #[tracing::instrument(level = "debug", skip(card_name))]
-pub(crate) fn parse_trigger_line_with_index(
+pub(crate) fn parse_trigger_line_with_index_ir(
     text: &str,
     card_name: &str,
     current_trigger_index: Option<usize>,
-) -> TriggerDefinition {
+    ctx: &mut ParseContext,
+) -> TriggerIr {
     let text = strip_reminder_text(text);
     // Replace self-references: "this creature", "this enchantment", card name → ~
     let normalized = normalize_self_refs(&text, card_name);
@@ -464,31 +482,12 @@ pub(crate) fn parse_trigger_line_with_index(
 
     let effect_lower = effect_text.to_lowercase();
     // Extract intervening-if condition from effect text first — a leading
-    // "if X, " can hide the "you may " optional marker behind the if-clause
-    // ("At the beginning of your upkeep, if you have more cards in hand
-    // than each opponent, you may return this card from your graveyard to
-    // your hand"). Without stripping the if first, the optional check
-    // below would see "if …" at position 0 and miss the "you may " that
-    // sits between the comma and the verb.
-    let (effect_without_if, if_condition) = extract_if_condition(&effect_lower);
+    // "if X, " can hide the "you may " optional marker behind the if-clause.
+    let (effect_without_if, if_condition) = extract_if_condition(&effect_text);
 
     // CR 609.3: "You may" at the start of the effect text makes the triggered
-    // effect optional at resolution — the player chooses whether to perform it.
-    // Mid-chain "you may" is per-sentence optional, handled by
-    // parse_effect_chain → strip_optional_effect_prefix().
-    //
-    // Three cases route here:
-    //   1. Bare "you may verb …"                     → optional=true at pos 0
-    //   2. "if X, you may verb …" with X recognized  → extract_if_condition
-    //      strips "if X, " and post-strip starts with "you may"
-    //   3. "if X, you may verb …" with X unrecognized → extract_if_condition
-    //      returns the text unchanged. We still want optional detection, so
-    //      fall back to a structural "if [phrase], " skip — find the FIRST
-    //      ", " that closes the if-clause and re-check after the comma.
-    //      The condition itself remains uncaptured (Condition_If swallow
-    //      will fire), but the optional flag is preserved.
-    let starts_with_you_may =
-        |s: &str| tag::<_, _, VerboseError<&str>>("you may ").parse(s).is_ok();
+    // effect optional at resolution.
+    let starts_with_you_may = |s: &str| tag::<_, _, OracleError<'_>>("you may ").parse(s).is_ok();
     let after_structural_if = effect_lower
         .strip_prefix("if ") // allow-noncombinator: structural if-clause skip when condition is unrecognized
         .and_then(|rest| rest.split_once(", "))
@@ -500,105 +499,154 @@ pub(crate) fn parse_trigger_line_with_index(
     // Strip constraint sentences so they don't leak into effect parsing as sub-abilities
     let effect_final = strip_constraint_sentences(&effect_without_if);
 
+    let cond_lower = condition_text.to_lowercase();
+
     // CR 118.12: Detect "unless [player] pays {cost}" in effect text.
-    // Strip it before effect parsing and capture as UnlessPayModifier.
-    let (effect_for_parse, unless_pay) = extract_unless_pay_modifier(&effect_final);
+    let (effect_for_parse, unless_pay) = extract_unless_pay_modifier(&effect_final, &cond_lower);
 
     // CR 608.2k: Extract trigger subject for pronoun resolution in effect text.
-    // "it"/"its"/"itself" in the effect refer to the trigger subject, not the source permanent.
-    let trigger_subject = extract_trigger_subject_for_context(condition_text);
-    // CR 707.9a + CR 603.1: Forward the trigger's index into the parse context
-    // so the BecomeCopy except-clause parser ("she has this ability") can emit
-    // `RetainPrintedTriggerFromSource { source_trigger_index }` referencing
-    // this very trigger. Also forward `card_name` so the SetName override in
-    // "except her name is ~" carries the original-case card name.
-    let effect_ctx = ParseContext {
-        subject: Some(trigger_subject),
+    let trigger_subject = extract_trigger_subject_for_context(condition_text, ctx);
+    let mut effect_ctx = ParseContext {
+        subject: Some(trigger_subject.clone()),
         card_name: Some(card_name.to_string()),
         current_trigger_index,
         ..Default::default()
     };
 
-    // CR 109.4 + CR 115.1 + CR 506.2: When the trigger condition introduces a
-    // player target (e.g. "whenever you attack a player"), follow-on possessive
-    // phrases inside the effect — "that player controls", "that player owns" —
-    // refer to that player, not to the trigger controller. Push a typed
-    // relative-player scope so the controller-suffix parser emits
-    // `ControllerRef::TargetPlayer` instead of the default `ControllerRef::You`;
-    // the runtime auto-surfaces a companion `TargetFilter::Player` slot via
-    // `effect_references_target_player` (game/ability_utils.rs).
-    let cond_lower = condition_text.to_lowercase();
-    let _scope_guard = condition_introduces_target_player(&cond_lower)
-        .then(|| oracle_target_scope::ScopeGuard::new(ControllerRef::TargetPlayer));
+    // CR 109.4 + CR 115.1 + CR 506.2: Set relative-player scope for
+    // TargetPlayer resolution inside the trigger effect body.
+    if condition_introduces_target_player(&cond_lower) {
+        effect_ctx.relative_player_scope = Some(ControllerRef::TargetPlayer);
+    } else if condition_introduces_scoped_phase_player(&cond_lower) {
+        effect_ctx.relative_player_scope = Some(ControllerRef::ScopedPlayer);
+    }
 
-    // Parse the effect
-    let has_up_to = scan_contains(&effect_for_parse, "up to one");
-    let execute = if !effect_for_parse.is_empty() {
-        // CR 701.38 + CR 207.2c: Council's-dilemma / Will-of-the-Council vote
-        // blocks have a fixed three-sentence shape ("starting with you, each
-        // player votes for X or Y. For each X vote, A. For each Y vote, B.")
-        // that can't be cleanly split by `parse_effect_chain` because the per-
-        // choice tally clauses are semantically welded to the vote prompt.
-        // Try the dedicated detector first; fall back to the chain parser if
-        // the input isn't a vote block.
-        let mut ability = if let Some(vote_def) =
+    // Parse the effect body
+    let effect_for_parse_lower = effect_for_parse.to_lowercase();
+    let has_up_to = scan_contains(&effect_for_parse_lower, "up to one");
+    let body = if !effect_for_parse.is_empty() {
+        // CR 701.38 + CR 207.2c: Vote blocks produce AbilityDefinition directly.
+        if let Some(vote_def) =
             crate::parser::oracle_vote::parse_vote_block(&effect_for_parse, AbilityKind::Spell)
         {
-            vote_def
-        } else {
-            parse_effect_chain_with_context(&effect_for_parse, AbilityKind::Spell, &effect_ctx)
-        };
-        if has_up_to {
-            ability.optional_targeting = true;
-        }
-        if effect_adds_mana_to_triggering_player(&effect_lower)
-            && matches!(
-                ability.effect.as_ref(),
-                crate::types::ability::Effect::Mana { .. }
-            )
+            let mut ability = vote_def;
+            if has_up_to {
+                ability.optional_targeting = true;
+            }
+            if effect_adds_mana_to_triggering_player(&effect_lower)
+                && matches!(
+                    ability.effect.as_ref(),
+                    crate::types::ability::Effect::Mana { .. }
+                )
+            {
+                ability.player_scope = Some(PlayerFilter::TriggeringPlayer);
+            }
+            if optional {
+                ability.optional = true;
+            }
+            Some(TriggerBody::PreLowered(Box::new(ability)))
+        } else if unless_pay.is_none()
+            && scan_contains(&effect_for_parse_lower, "unless")
+            && !has_later_sentence_if(&effect_for_parse_lower)
         {
-            ability.player_scope = Some(PlayerFilter::TriggeringPlayer);
+            Some(TriggerBody::PreLowered(Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Unimplemented {
+                    name: "Unsupported unless clause".to_string(),
+                    description: Some(effect_for_parse.clone()),
+                },
+            ))))
+        } else {
+            let ir = parse_effect_chain_ir(&effect_for_parse, AbilityKind::Spell, &mut effect_ctx);
+            Some(TriggerBody::EffectChain(ir))
         }
-        // CR 609.3: "You may" applies to the effect during resolution, not to whether
-        // the trigger fires. Propagate to the execute ability so the resolver prompts
-        // the controller via WaitingFor::OptionalEffectChoice.
-        if optional {
-            ability.optional = true;
-        }
-        Some(Box::new(ability))
     } else {
         None
     };
+    // Transfer diagnostics from the per-trigger effect context to the outer ctx.
+    ctx.diagnostics.append(&mut effect_ctx.diagnostics);
 
-    // Parse the condition
-    let (_, mut def) = parse_trigger_condition(condition_text);
+    // Parse the condition to get TriggerMode + partial TriggerDefinition
+    let (condition, partial_def) = parse_trigger_condition(condition_text, ctx);
+
+    // Constraint from full text (parsed during IR production so lowering has it)
+    let constraint = parse_trigger_constraint(&lower);
+
+    TriggerIr {
+        condition,
+        partial_def,
+        body,
+        modifiers: TriggerModifiers {
+            optional,
+            unless_pay,
+            intervening_if: if_condition,
+            trigger_subject,
+            first_time_each_turn: first_time_each_turn_in_condition,
+            constraint,
+            has_up_to,
+            effect_lower: effect_lower.to_string(),
+        },
+        source_text: text.to_string(),
+    }
+}
+
+fn has_later_sentence_if(lower: &str) -> bool {
+    lower.split('.').skip(1).any(|sentence| {
+        tag::<_, _, OracleError<'_>>("if ")
+            .parse(sentence.trim_start())
+            .is_ok()
+    })
+}
+
+/// Lowering: assemble a `TriggerDefinition` from a `TriggerIr`.
+///
+/// Applies all post-extraction transforms: condition composition, target-player
+/// surfacing, constraint merging, trigger zone derivation, cost-X rewriting.
+pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
+    let mut def = ir.partial_def.clone();
+    let modifiers = &ir.modifiers;
+
+    // Lower the body
+    let execute = match &ir.body {
+        Some(TriggerBody::EffectChain(chain_ir)) => {
+            let mut ability = lower_effect_chain_ir(chain_ir);
+            if modifiers.has_up_to {
+                ability.optional_targeting = true;
+            }
+            if effect_adds_mana_to_triggering_player(&modifiers.effect_lower)
+                && matches!(
+                    ability.effect.as_ref(),
+                    crate::types::ability::Effect::Mana { .. }
+                )
+            {
+                ability.player_scope = Some(PlayerFilter::TriggeringPlayer);
+            }
+            // CR 609.3: Propagate optional to execute ability.
+            if modifiers.optional {
+                ability.optional = true;
+            }
+            Some(Box::new(ability))
+        }
+        Some(TriggerBody::PreLowered(ability)) => Some(ability.clone()),
+        None => None,
+    };
+
     def.execute = execute;
-    def.optional = optional;
-    def.unless_pay = unless_pay;
-    // CR 603.4: When the trigger-condition parser has already attached a condition
-    // (e.g. `AttackersDeclaredMin` from "attacks with N or more creatures") AND the
-    // effect text carries an intervening-if (e.g. "if none of those creatures
-    // attacked you"), both must hold simultaneously — compose with And rather than
-    // letting the intervening-if replace the event-batch predicate.
-    def.condition = match (if_condition, def.condition.take()) {
+    def.optional = modifiers.optional;
+    def.unless_pay = modifiers.unless_pay.clone();
+
+    // CR 603.4: Compose intervening-if with existing condition via And.
+    def.condition = match (&modifiers.intervening_if, def.condition.take()) {
         (Some(if_cond), Some(existing)) => Some(TriggerCondition::And {
-            conditions: vec![existing, if_cond],
+            conditions: vec![existing, if_cond.clone()],
         }),
-        (Some(c), None) | (None, Some(c)) => Some(c),
+        (Some(c), None) => Some(c.clone()),
+        (None, Some(c)) => Some(c),
         (None, None) => None,
     };
 
-    // CR 109.4 + CR 603.7c: When the execute ability references
-    // `ControllerRef::TargetPlayer` in a filter (e.g. Ruthless Winnower's
-    // "that player sacrifices a non-Elf creature" → `Sacrifice { target:
-    // Typed { controller: TargetPlayer } }`) and the trigger has no
-    // `valid_target`, surface `TargetFilter::Player` on the trigger so the
-    // triggering player (upkeep's active player, damaged player, etc.) is
-    // auto-bound to the first `TargetRef::Player` slot from the trigger
-    // event. Without this, `collect_target_slots` would surface a
-    // companion player-choice slot and the controller would be prompted to
-    // pick — which is wrong for phase and damage triggers whose acting
-    // player is implicit.
+    // CR 109.4 + CR 603.7c: Surface TargetFilter::Player when execute
+    // references ControllerRef::TargetPlayer.
     if def.valid_target.is_none() {
         if let Some(execute) = def.execute.as_deref() {
             if execute_references_target_player(&execute.effect) {
@@ -607,27 +655,18 @@ pub(crate) fn parse_trigger_line_with_index(
         }
     }
 
-    // Check for constraint phrases in the full text.
-    // Text-based constraints take precedence; fall back to any constraint already set
-    // by the trigger condition parser (e.g. NthSpellThisTurn from try_parse_nth_spell_trigger).
-    def.constraint = parse_trigger_constraint(&lower).or(def.constraint.take());
+    // Text-based constraints take precedence; fall back to condition-parser constraint.
+    def.constraint = modifiers.constraint.clone().or(def.constraint.take());
 
-    // CR-uniform: apply OncePerTurn as a fallback ONLY if no stronger constraint
-    // was already set. An explicit "during your main phase" (OnlyDuringYourMainPhase)
-    // or "triggers only once each turn" (OncePerTurn) takes precedence. If both
-    // "for the first time each turn" and "during your main phase" appeared on the
-    // same trigger, the timing restriction is strictly stronger, so we prefer it
-    // (no current card hits this case).
-    if first_time_each_turn_in_condition && def.constraint.is_none() {
+    // CR-uniform: apply OncePerTurn as fallback.
+    if modifiers.first_time_each_turn && def.constraint.is_none() {
         def.constraint = Some(TriggerConstraint::OncePerTurn);
     }
 
-    // Preserve the original oracle text for coverage/UI annotation
-    def.description = Some(text.to_string());
+    // Preserve original oracle text for coverage/UI annotation.
+    def.description = Some(ir.source_text.clone());
 
-    // CR 113.6k: A trigger condition that can't trigger from the battlefield
-    // functions in all zones it can trigger from. Derive the active source zone
-    // from typed trigger/effect data instead of leaving it battlefield-only.
+    // CR 113.6k: Derive trigger source zone from typed trigger/effect data.
     if let Some(zone) = def
         .condition
         .as_ref()
@@ -642,14 +681,7 @@ pub(crate) fn parse_trigger_line_with_index(
         def.trigger_zones = vec![zone];
     }
 
-    // CR 107.3a + CR 107.3i + CR 601.2f: For ETB-self triggers on a spell
-    // with `{X}` in its cost, bare `X` in the trigger body refers to the
-    // value paid for `{X}` at cast time. Rewrite the execute ability tree so
-    // `Variable{name:"X"}` and `PtValue::Variable("X"/"-X")` both read the
-    // entering permanent's `cost_x_paid` via `QuantityRef::CostXPaid`.
-    // Applies to Wan Shi Tong (PutCounter count + Draw HalfRounded), The
-    // Meathook Massacre (PumpAll -X/-X), Hangarback Walker, Walking Ballista
-    // ETB, Primordial Hydra, and all future X-cost ETB-self triggers.
+    // CR 107.3a + CR 107.3i + CR 601.2f: Rewrite X in ETB-self triggers.
     if trigger_should_rewrite_cost_x(&def) {
         if let Some(execute) = def.execute.as_deref_mut() {
             rewrite_cost_x_in_ability(execute);
@@ -657,6 +689,18 @@ pub(crate) fn parse_trigger_line_with_index(
     }
 
     def
+}
+
+/// Thin wrapper: parse trigger line through IR production + lowering.
+#[tracing::instrument(level = "debug", skip(card_name))]
+pub(crate) fn parse_trigger_line_with_index(
+    text: &str,
+    card_name: &str,
+    current_trigger_index: Option<usize>,
+    ctx: &mut ParseContext,
+) -> TriggerDefinition {
+    let ir = parse_trigger_line_with_index_ir(text, card_name, current_trigger_index, ctx);
+    lower_trigger_ir(&ir)
 }
 
 /// Parse trigger constraint from the full trigger text.
@@ -723,14 +767,14 @@ fn strip_constraint_sentences(text: &str) -> String {
     // Uses scan_split_at_phrase + split_once_on instead of raw .find() for dispatch.
     let lower = result.to_lowercase();
     if let Some((prefix_text, matched_start)) = scan_split_at_phrase(&lower, |i| {
-        tag::<_, _, VerboseError<&str>>("this ability triggers only the first ").parse(i)
+        tag::<_, _, OracleError<'_>>("this ability triggers only the first ").parse(i)
     }) {
         let start = prefix_text.len();
         if let Ok((_, (_, after_each_turn))) =
             nom_primitives::split_once_on(matched_start, "each turn")
         {
             let end_pos = lower.len() - after_each_turn.len();
-            let end_pos = if tag::<_, _, VerboseError<&str>>(".")
+            let end_pos = if tag::<_, _, OracleError<'_>>(".")
                 .parse(after_each_turn)
                 .is_ok()
             {
@@ -758,7 +802,10 @@ fn strip_constraint_sentences(text: &str) -> String {
 /// - "sacrifice it unless you discard a card at random"  (CR 608.2c — UnlessCost::DiscardCard)
 /// - "destroy it unless you sacrifice a creature"        (UnlessCost::Sacrifice)
 /// - "draw a card unless you pay 2 life"                 (CR 119.4 — UnlessCost::PayLife)
-fn extract_unless_pay_modifier(text: &str) -> (String, Option<UnlessPayModifier>) {
+fn extract_unless_pay_modifier(
+    text: &str,
+    condition_lower: &str,
+) -> (String, Option<UnlessPayModifier>) {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
     let Some(unless_pos) = tp.find(" unless ") else {
@@ -772,15 +819,22 @@ fn extract_unless_pay_modifier(text: &str) -> (String, Option<UnlessPayModifier>
     // effect parser (`parse_discard_unless_filter` in oracle_effect/imperative.rs)
     // encodes the unless-clause as a *type qualifier* on the mandatory discard,
     // not as an alternative cost on a different effect. Defer to that path.
-    let primary_is_discard = tag::<_, _, VerboseError<&str>>("discard ")
+    let primary_is_discard = tag::<_, _, OracleError<'_>>("discard ")
         .parse(lower[..unless_pos].trim_start())
         .is_ok();
     if primary_is_discard
-        && tag::<_, _, VerboseError<&str>>("you discard ")
+        && tag::<_, _, OracleError<'_>>("you discard ")
             .parse(after_unless)
             .is_ok()
     {
         return (text.to_string(), None);
+    }
+
+    if let Some((cost, payer)) =
+        parse_inferred_pronoun_unless_alt_cost(after_unless, &lower[..unless_pos], condition_lower)
+    {
+        let cleaned = text[..unless_pos].trim().to_string();
+        return (cleaned, Some(UnlessPayModifier { cost, payer }));
     }
 
     // CR 118.12 + CR 608.2c + CR 119.4: Non-mana alternative costs ("you discard
@@ -799,11 +853,19 @@ fn extract_unless_pay_modifier(text: &str) -> (String, Option<UnlessPayModifier>
         );
     }
 
+    let they_pay_result = tag::<_, _, OracleError<'_>>("they pay ")
+        .parse(after_unless)
+        .ok()
+        .and_then(|(rest, _)| {
+            infer_pronoun_unless_payer(&lower[..unless_pos], condition_lower)
+                .map(|payer| (rest, payer))
+        });
+
     // Parse payer + payment verb as a single combinator: "(payer) pay(s) " → (TargetFilter, &str).
     let payer_result: Result<(&str, TargetFilter), _> = alt((
         value(
             TargetFilter::Controller,
-            tag::<_, _, VerboseError<&str>>("you pay "),
+            tag::<_, _, OracleError<'_>>("you pay "),
         ),
         value(
             TargetFilter::TriggeringPlayer,
@@ -819,13 +881,12 @@ fn extract_unless_pay_modifier(text: &str) -> (String, Option<UnlessPayModifier>
     ))
     .parse(after_unless);
 
-    let (cost_str, payer) = match payer_result {
-        Ok((rest, p)) => (rest, p),
-        Err(_) => {
-            // No recognized payment pattern — strip the unless clause so the effect parses.
-            let cleaned = text[..unless_pos].trim().to_string();
-            return (cleaned, None);
-        }
+    let (cost_str, payer) = match they_pay_result {
+        Some((rest, payer)) => (rest, payer),
+        None => match payer_result {
+            Ok((rest, p)) => (rest, p),
+            Err(_) => return (text.to_string(), None),
+        },
     };
 
     // Extract cost symbols
@@ -865,6 +926,121 @@ fn extract_unless_pay_modifier(text: &str) -> (String, Option<UnlessPayModifier>
     (cleaned, Some(UnlessPayModifier { cost, payer }))
 }
 
+fn condition_introduces_scoped_phase_player(cond_lower: &str) -> bool {
+    let phase_scope = preceded(
+        tag::<_, _, OracleError<'_>>("at the beginning of "),
+        alt((
+            tag("each player's "),
+            tag("each players "),
+            tag("each opponent's "),
+            tag("each opponents "),
+        )),
+    )
+    .parse(cond_lower);
+
+    let Ok((phase_text, _)) = phase_scope else {
+        return false;
+    };
+
+    scan_for_phase(phase_text).is_some()
+}
+
+fn effect_references_that_player(effect_before_unless: &str) -> bool {
+    scan_contains(effect_before_unless, "that player ")
+        || scan_contains(effect_before_unless, "that opponent ")
+        || scan_contains(effect_before_unless, "to that player")
+        || scan_contains(effect_before_unless, "to that opponent")
+}
+
+fn infer_pronoun_unless_payer(
+    effect_before_unless: &str,
+    condition_lower: &str,
+) -> Option<TargetFilter> {
+    // CR 503.1a + CR 603.2: "At the beginning of each player's upkeep, that
+    // player ... unless they pay" refers to the active player for that phase.
+    if condition_introduces_scoped_phase_player(condition_lower)
+        && effect_references_that_player(effect_before_unless)
+    {
+        return Some(TargetFilter::Controller);
+    }
+    // CR 603.2 + CR 118.12: "that player/that opponent ... unless they pay"
+    // refers to the player from the triggering event.
+    if effect_references_that_player(effect_before_unless) {
+        return Some(TargetFilter::TriggeringPlayer);
+    }
+    // CR 608.2c: in "each opponent [does X] unless they pay", the lowered
+    // ability has `player_scope = Opponent`; runtime binds `Controller` to
+    // each scoped opponent before presenting the unless-payment choice.
+    if scan_contains(effect_before_unless, "each opponent ") {
+        return Some(TargetFilter::Controller);
+    }
+    if scan_contains(effect_before_unless, "creature's controller ") {
+        return Some(TargetFilter::ParentTargetController);
+    }
+    None
+}
+
+fn parse_inferred_pronoun_unless_alt_cost(
+    after_unless: &str,
+    effect_before_unless: &str,
+    condition_lower: &str,
+) -> Option<(UnlessCost, TargetFilter)> {
+    let cost = if let Ok((rest, _)) =
+        tag::<_, _, OracleError<'_>>("they discard ").parse(after_unless)
+    {
+        parse_unless_discard_cost(rest)?
+    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("they pay ").parse(after_unless) {
+        parse_unless_life_cost(rest)?
+    } else {
+        return None;
+    };
+    let payer = infer_pronoun_unless_payer(effect_before_unless, condition_lower)?;
+    Some((cost, payer))
+}
+
+fn parse_unless_life_cost(rest: &str) -> Option<UnlessCost> {
+    let (amount, after_num) = parse_number(rest)?;
+    if tag::<_, _, OracleError<'_>>("life")
+        .parse(after_num.trim_start())
+        .is_ok()
+    {
+        return Some(UnlessCost::PayLife {
+            amount: amount as i32,
+        });
+    }
+    None
+}
+
+fn parse_unless_discard_cost(discard_tail: &str) -> Option<UnlessCost> {
+    let trailing = discard_tail.trim().trim_end_matches('.').trim();
+    let trailing = alt((
+        tag::<_, _, OracleError<'_>>("a "),
+        tag::<_, _, OracleError<'_>>("an "),
+    ))
+    .parse(trailing)
+    .map(|(rest, _)| rest.trim())
+    .unwrap_or(trailing);
+    if !trailing.is_empty() {
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("card").parse(trailing) {
+            let rest = rest.trim().trim_end_matches('.').trim();
+            if rest.is_empty()
+                || tag::<_, _, OracleError<'_>>("at random")
+                    .parse(rest)
+                    .is_ok()
+            {
+                return Some(UnlessCost::DiscardCard { filter: None });
+            }
+        }
+        if let Some(filter) = super::oracle_effect::imperative::parse_discard_card_filter(trailing)
+        {
+            return Some(UnlessCost::DiscardCard {
+                filter: Some(filter),
+            });
+        }
+    }
+    None
+}
+
 /// CR 118.12 + CR 608.2c + CR 119.4: Recognize non-mana "unless" alternative
 /// costs that map to existing `UnlessCost` variants. Operates on the lowercased
 /// text immediately after `" unless "`.
@@ -886,24 +1062,14 @@ fn parse_unless_alt_cost(after_unless: &str) -> Option<UnlessCost> {
     // "you discard a card" — match prefix, accept any trailing modifiers
     // ("at random", trailing punctuation) since the caller strips the entire
     // unless-clause wholesale.
-    if tag::<_, _, VerboseError<&str>>("you discard a card")
-        .parse(after_unless)
-        .is_ok()
-    {
-        return Some(UnlessCost::DiscardCard);
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("you discard ").parse(after_unless) {
+        return parse_unless_discard_cost(rest);
     }
 
     // "you pay N life" / "you pay N life." — life amount is bare integer.
-    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("you pay ").parse(after_unless) {
-        if let Some((amount, after_num)) = parse_number(rest) {
-            if tag::<_, _, VerboseError<&str>>("life")
-                .parse(after_num.trim_start())
-                .is_ok()
-            {
-                return Some(UnlessCost::PayLife {
-                    amount: amount as i32,
-                });
-            }
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("you pay ").parse(after_unless) {
+        if let Some(cost) = parse_unless_life_cost(rest) {
+            return Some(cost);
         }
     }
 
@@ -911,12 +1077,12 @@ fn parse_unless_alt_cost(after_unless: &str) -> Option<UnlessCost> {
     // `parse_target` building block (oracle_target). Count is optional and
     // defaults to 1; articles ("a"/"an") are absorbed by `parse_target` via
     // its "target {phrase}" entry point.
-    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("you sacrifice ").parse(after_unless) {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("you sacrifice ").parse(after_unless) {
         return parse_unless_sacrifice_filter(rest);
     }
 
     // CR 118.12: "you return [count] [filter] [you control] to its/their owner's hand"
-    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("you return ").parse(after_unless) {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("you return ").parse(after_unless) {
         return parse_unless_return_to_hand(rest);
     }
 
@@ -948,7 +1114,7 @@ fn parse_unless_sacrifice_filter(rest: &str) -> Option<UnlessCost> {
         // No count — strip leading article via nom combinator so parse_target
         // receives a bare type phrase (parse_target only strips "a"/"an" when
         // they precede "target", not when they precede a type word).
-        let stripped = alt((tag::<_, _, VerboseError<&str>>("a "), tag("an ")))
+        let stripped = alt((tag::<_, _, OracleError<'_>>("a "), tag("an ")))
             .parse(trimmed)
             .map(|(rest, _)| rest)
             .unwrap_or(trimmed);
@@ -1043,7 +1209,7 @@ fn parse_unless_return_to_hand(rest: &str) -> Option<UnlessCost> {
 fn parse_where_x_is_trigger(text: &str) -> Option<QuantityExpr> {
     let trimmed = text.trim().trim_start_matches(',').trim();
     let (rest, ()) = alt((
-        value((), tag::<_, _, VerboseError<&str>>("where x is ")),
+        value((), tag::<_, _, OracleError<'_>>("where x is ")),
         value((), tag("where X is ")),
     ))
     .parse(trimmed)
@@ -1121,8 +1287,13 @@ fn substitute_another_in_expr(expr: &QuantityExpr) -> QuantityExpr {
             inner: Box::new(substitute_another_in_expr(inner)),
             offset: *offset,
         },
-        QuantityExpr::HalfRounded { inner, rounding } => QuantityExpr::HalfRounded {
+        QuantityExpr::DivideRounded {
+            inner,
+            divisor,
+            rounding,
+        } => QuantityExpr::DivideRounded {
             inner: Box::new(substitute_another_in_expr(inner)),
+            divisor: *divisor,
             rounding: *rounding,
         },
         QuantityExpr::Multiply { factor, inner } => QuantityExpr::Multiply {
@@ -1194,13 +1365,7 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
             }),
             // Negate an IsPresent → ObjectCount == 0
             StaticCondition::IsPresent { filter } => {
-                let f = filter.clone().unwrap_or_else(|| {
-                    push_warning(
-                        "bare-filter: NegatedIsPresent has no filter, defaulting to Any"
-                            .to_string(),
-                    );
-                    TargetFilter::Any
-                });
+                let f = filter.clone().unwrap_or(TargetFilter::Any);
                 Some(TriggerCondition::QuantityComparison {
                     lhs: QuantityExpr::Ref {
                         qty: QuantityRef::ObjectCount { filter: f },
@@ -1392,7 +1557,7 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
     // to sacrifice it if you didn't cast it, or if it was cast using any
     // permission other than an escape ability").
     if let Some((prefix, _)) = scan_split_at_phrase(&lower, |i| {
-        tag::<_, _, VerboseError<&str>>("unless it escaped").parse(i)
+        tag::<_, _, OracleError<'_>>("unless it escaped").parse(i)
     }) {
         return (
             strip_condition_clause(text, prefix.len(), "unless it escaped".len()),
@@ -1484,7 +1649,7 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
     // CR 400.7 + CR 603.10: "if it was a [type]" / "if it was an [type]"
     // Nom combinator: prefix dispatch + typed core type extraction.
     {
-        fn was_type_combinator(i: &str) -> nom::IResult<&str, CoreType, VerboseError<&str>> {
+        fn was_type_combinator(i: &str) -> nom::IResult<&str, CoreType, OracleError<'_>> {
             let (i, _) = alt((tag("if it was an "), tag("if it was a "))).parse(i)?;
             alt((
                 value(CoreType::Creature, tag("creature")),
@@ -1508,10 +1673,14 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
         }
     }
 
+    if let Some(result) = try_extract_zone_change_object_filter_condition(&lower, text) {
+        return result;
+    }
+
     // CR 509.1a + CR 603.4: "if defending player controls no [type]"
     // Nom combinator prefix dispatch + parse_type_phrase for the remainder.
     {
-        fn def_prefix(i: &str) -> nom::IResult<&str, (), VerboseError<&str>> {
+        fn def_prefix(i: &str) -> nom::IResult<&str, (), OracleError<'_>> {
             let (i, _) = tag("if defending player controls no ").parse(i)?;
             Ok((i, ()))
         }
@@ -1545,46 +1714,68 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
         return result;
     }
 
-    // CR 603.4 + CR 603.10a + CR 509.1g: Death-trigger look-back condition.
-    // The subject is the dying event object, not the source in its current zone.
-    if let Some((prefix, negated, rest)) = scan_preceded(&lower, |i| {
-        preceded(
-            tag::<_, _, VerboseError<&str>>("if it "),
-            alt((
-                value(
-                    true,
-                    alt((
-                        tag::<_, _, VerboseError<&str>>("wasn't blocking"),
-                        tag("was not blocking"),
-                    )),
-                ),
-                value(false, tag("was blocking")),
-            )),
-        )
-        .parse(i)
-    }) {
-        let filter =
-            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Blocking]));
-        let condition = TriggerCondition::ZoneChangeObjectMatchesFilter {
-            origin: Some(Zone::Battlefield),
-            destination: Zone::Graveyard,
-            filter,
-        };
-        let condition = if negated {
-            TriggerCondition::Not {
-                condition: Box::new(condition),
-            }
-        } else {
-            condition
-        };
-        let consumed = lower.len() - prefix.len() - rest.len();
-        return (
-            strip_condition_clause(text, prefix.len(), consumed),
-            Some(condition),
-        );
+    (text.to_string(), None)
+}
+
+fn try_extract_zone_change_object_filter_condition(
+    lower: &str,
+    text: &str,
+) -> Option<(String, Option<TriggerCondition>)> {
+    let (before, condition, rest) =
+        scan_preceded(lower, parse_zone_change_object_filter_condition)?;
+    let next_char_is_boundary = rest
+        .chars()
+        .next()
+        .is_none_or(|c| !c.is_alphanumeric() && c != '_');
+    if !next_char_is_boundary {
+        return None;
     }
 
-    (text.to_string(), None)
+    let consumed = lower.len() - before.len() - rest.len();
+    Some((
+        strip_condition_clause(text, before.len(), consumed),
+        Some(condition),
+    ))
+}
+
+fn parse_zone_change_object_filter_condition(input: &str) -> OracleResult<'_, TriggerCondition> {
+    preceded(tag("if it "), parse_zone_change_object_filter_predicate).parse(input)
+}
+
+fn parse_zone_change_object_filter_predicate(input: &str) -> OracleResult<'_, TriggerCondition> {
+    let (rest, negated) = alt((
+        value(false, tag("was ")),
+        value(true, tag("wasn't ")),
+        value(true, tag("was not ")),
+    ))
+    .parse(input)?;
+
+    let (rest, prop) = alt((
+        value(FilterProp::Blocking, tag("blocking")),
+        map_attachment_kind_filter_prop,
+    ))
+    .parse(rest)?;
+    let condition = TriggerCondition::ZoneChangeObjectMatchesFilter {
+        origin: Some(Zone::Battlefield),
+        destination: Zone::Graveyard,
+        filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![prop])),
+    };
+
+    if negated {
+        Ok((
+            rest,
+            TriggerCondition::Not {
+                condition: Box::new(condition),
+            },
+        ))
+    } else {
+        Ok((rest, condition))
+    }
+}
+
+fn map_attachment_kind_filter_prop(input: &str) -> OracleResult<'_, FilterProp> {
+    let (rest, kinds) = parse_attachment_kind_disjunction(input)?;
+    Ok((rest, attachment_kinds_filter_prop(kinds, None)))
 }
 
 fn try_extract_no_mana_spent_condition(
@@ -1643,7 +1834,7 @@ fn try_extract_intervening(
     let (rest, sc) = parse_inner_condition(cond_fragment).ok()?;
     let rest_trimmed = rest.trim();
     let after_dots = rest_trimmed.trim_start_matches('.').trim_start();
-    let has_otherwise = tag::<_, _, VerboseError<&str>>("otherwise")
+    let has_otherwise = tag::<_, _, OracleError<'_>>("otherwise")
         .parse(after_dots)
         .is_ok();
     let at_boundary =
@@ -1663,11 +1854,11 @@ fn try_extract_intervening(
 /// Matches all ninjutsu-family activation patterns.
 fn try_parse_ninjutsu_activation_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
     for prefix in ["whenever you activate ", "when you activate "] {
-        let Ok((rest, ())) = value((), tag::<_, _, VerboseError<&str>>(prefix)).parse(lower) else {
+        let Ok((rest, ())) = value((), tag::<_, _, OracleError<'_>>(prefix)).parse(lower) else {
             continue;
         };
         // CR 702.49a: Match "a ninjutsu ability" — covers the ninjutsu-family keyword
-        if tag::<_, _, VerboseError<&str>>("a ninjutsu ability")
+        if tag::<_, _, OracleError<'_>>("a ninjutsu ability")
             .parse(rest)
             .is_ok()
         {
@@ -1782,10 +1973,10 @@ fn try_extract_had_counter_condition(
     let pos = tp.find(prefix)?;
     let after = &lower[pos + prefix.len()..];
     // Parse: "[counter_type] counter on it"
-    let (rest, counter_type_text) = take_until::<_, _, VerboseError<&str>>(" counter on it")
+    let (rest, counter_type_text) = take_until::<_, _, OracleError<'_>>(" counter on it")
         .parse(after)
         .ok()?;
-    let (rest, _) = tag::<_, _, VerboseError<&str>>(" counter on it")
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" counter on it")
         .parse(rest)
         .ok()?;
     let clause_len = prefix.len() + (after.len() - rest.len());
@@ -1814,7 +2005,7 @@ fn try_extract_adamant_condition(
     let (rest, _) = nom_primitives::parse_number(after).ok()?;
     let rest = rest.trim_start();
     let (rest, color) = alt((
-        value(ManaColor::White, tag::<_, _, VerboseError<&str>>("white")),
+        value(ManaColor::White, tag::<_, _, OracleError<'_>>("white")),
         value(ManaColor::Blue, tag("blue")),
         value(ManaColor::Black, tag("black")),
         value(ManaColor::Red, tag("red")),
@@ -2015,7 +2206,7 @@ fn if_belongs_to_then_clause(lower: &str, if_pos: usize) -> bool {
     // life total. Then, if you have 1,000 or more life, you lose the game").
     let sentence_start = before.rfind(". ").map_or(0, |i| i + 2);
     let between = lower[sentence_start..if_pos].trim_start();
-    if alt((tag::<_, _, VerboseError<&str>>("then, "), tag("then ")))
+    if alt((tag::<_, _, OracleError<'_>>("then, "), tag("then ")))
         .parse(between)
         .map(|(rest, _)| rest.trim().is_empty())
         .unwrap_or(false)
@@ -2031,8 +2222,8 @@ fn if_belongs_to_then_clause(lower: &str, if_pos: usize) -> bool {
     let word_start = trimmed.rfind([' ', ',']).map_or(0, |i| i + 1);
     let candidate = &trimmed[word_start..];
     alt((
-        tag::<_, _, VerboseError<&str>>("then,"),
-        tag::<_, _, VerboseError<&str>>("then"),
+        tag::<_, _, OracleError<'_>>("then,"),
+        tag::<_, _, OracleError<'_>>("then"),
     ))
     .parse(candidate)
     .map(|(rest, _)| rest.is_empty())
@@ -2111,7 +2302,7 @@ fn split_or_event_compound(cond_lower: &str, condition: &str) -> Option<Vec<Stri
     // Known event verb prefixes that signal a compound event "or".
     fn is_event_verb_start(text: &str) -> bool {
         alt((
-            value((), tag::<_, _, VerboseError<&str>>("dies")),
+            value((), tag::<_, _, OracleError<'_>>("dies")),
             value((), tag("die ")),
             value((), tag("deals ")),
             value((), tag("deal ")),
@@ -2172,11 +2363,11 @@ fn split_or_event_compound(cond_lower: &str, condition: &str) -> Option<Vec<Stri
 fn extract_keyword_and_subject(cond_lower: &str) -> String {
     // Strip trigger keyword
     let (keyword, after_keyword) = if let Ok((rest, ())) =
-        value((), tag::<_, _, VerboseError<&str>>("whenever ")).parse(cond_lower)
+        value((), tag::<_, _, OracleError<'_>>("whenever ")).parse(cond_lower)
     {
         ("Whenever", rest)
     } else if let Ok((rest, ())) =
-        value((), tag::<_, _, VerboseError<&str>>("when ")).parse(cond_lower)
+        value((), tag::<_, _, OracleError<'_>>("when ")).parse(cond_lower)
     {
         ("When", rest)
     } else {
@@ -2260,7 +2451,7 @@ fn find_effect_boundary(lower: &str) -> Option<usize> {
 
 fn continues_player_action_list(after_comma: &str) -> bool {
     let trimmed = after_comma.trim_start();
-    let candidate = value((), tag::<_, _, VerboseError<&str>>("or "))
+    let candidate = value((), tag::<_, _, OracleError<'_>>("or "))
         .parse(trimmed)
         .map(|(rest, _)| rest)
         .unwrap_or(trimmed)
@@ -2282,7 +2473,7 @@ fn continues_player_action_list(after_comma: &str) -> bool {
     // E.g. "creatures you control get +1/+1" starts with "creatures" (type word) but
     // has "get" (predicate verb) — this is the effect, not a continuation.
     let after_conjunction = alt((
-        value((), tag::<_, _, VerboseError<&str>>("or ")),
+        value((), tag::<_, _, OracleError<'_>>("or ")),
         value((), tag("and ")),
     ))
     .parse(trimmed)
@@ -2326,7 +2517,10 @@ fn make_base() -> TriggerDefinition {
         .trigger_zones(vec![Zone::Battlefield])
 }
 
-pub(crate) fn parse_trigger_condition(condition: &str) -> (TriggerMode, TriggerDefinition) {
+pub(crate) fn parse_trigger_condition(
+    condition: &str,
+    ctx: &mut ParseContext,
+) -> (TriggerMode, TriggerDefinition) {
     let lower = condition.to_lowercase();
 
     if let Some(result) = try_parse_named_trigger_mode(&lower) {
@@ -2347,10 +2541,19 @@ pub(crate) fn parse_trigger_condition(condition: &str) -> (TriggerMode, TriggerD
         return result;
     }
 
+    // Counter-related events: "a +1/+1 counter is put on ~" /
+    // "one or more counters are put on ~" / "the twelfth hour counter is put
+    // on ~". These are passive event subjects where the object after "on" is
+    // the trigger subject; parse them before generic subject decomposition so
+    // ordinal counter phrases don't emit a degraded-subject diagnostic first.
+    if let Some(result) = try_parse_counter_trigger(&lower) {
+        return result;
+    }
+
     // --- Subject + event decomposition ---
     // Strip leading "when"/"whenever" using nom alt()
     let after_keyword = alt((
-        value((), tag::<_, _, VerboseError<&str>>("whenever ")),
+        value((), tag::<_, _, OracleError<'_>>("whenever ")),
         value((), tag("when ")),
     ))
     .parse(lower.as_str())
@@ -2363,27 +2566,20 @@ pub(crate) fn parse_trigger_condition(condition: &str) -> (TriggerMode, TriggerD
     // "~ and/or one or more other creatures" place "one or more" after the first branch.
     let is_batched = scan_contains(after_keyword, "one or more ");
 
-    // Drain warnings before subject parsing — if the trigger ends up as Unknown,
-    // the subject warning is redundant (the coverage system already tracks Unknown triggers).
-    // Only re-emit warnings when the event verb parses successfully (meaning the trigger
+    // Snapshot diagnostics before subject parsing — if the trigger ends up as Unknown,
+    // the subject diagnostic is redundant (the coverage system already tracks Unknown triggers).
+    // Only keep subject diagnostics when the event verb parses successfully (meaning the trigger
     // works but has a degraded subject filter).
-    let pre_warnings = take_warnings();
-    let (subject, rest) = parse_trigger_subject(after_keyword);
-    let subject_warnings = take_warnings();
-    // Restore pre-existing warnings
-    for w in pre_warnings {
-        push_warning(w);
-    }
+    let pre_snapshot = ctx.diagnostics.len();
+    let (subject, rest) = parse_trigger_subject(after_keyword, ctx);
+    let subject_diagnostics: Vec<OracleDiagnostic> =
+        ctx.diagnostics.drain(pre_snapshot..).collect();
+    // ctx.diagnostics now contains only pre-existing diagnostics (restored to snapshot)
 
     // Parse event verb from the remaining text.
-    // Note: try_parse_event may emit its own warnings into the thread-local accumulator
-    // during this call; subject_warnings are re-emitted after, so the final ordering is:
-    // pre_warnings → try_parse_event warnings → subject_warnings.
     if let Some((mode, mut def)) = try_parse_event(&subject, rest, &lower) {
-        // Re-emit subject warnings — the trigger parsed but the subject degraded to Any.
-        for w in subject_warnings {
-            push_warning(w);
-        }
+        // Re-emit subject diagnostics — the trigger parsed but the subject degraded to Any.
+        ctx.diagnostics.extend(subject_diagnostics);
         if is_batched {
             def.batched = true;
         }
@@ -2401,8 +2597,7 @@ pub(crate) fn parse_trigger_condition(condition: &str) -> (TriggerMode, TriggerD
 /// CR 109.4 + CR 603.7c: Returns `true` when any filter inside the execute
 /// ability's effect chain references `ControllerRef::TargetPlayer`. Walks
 /// sub-abilities so triggers like Dokuchi Silencer (outer Discard, inner
-/// Destroy targeting "that player controls") and Ruthless Winnower
-/// (Sacrifice with `TargetPlayer`-scoped filter) both trigger the companion
+/// Destroy targeting "that player controls") trigger the companion
 /// `valid_target = Player` surface in `parse_trigger_line`.
 fn execute_references_target_player(effect: &crate::types::ability::Effect) -> bool {
     fn filter_references(filter: &TargetFilter) -> bool {
@@ -2433,10 +2628,13 @@ fn execute_references_target_player(effect: &crate::types::ability::Effect) -> b
 /// Warnings from `parse_trigger_subject` are discarded — this function is a best-effort
 /// subject extraction for pronoun resolution, not a diagnostic site. Warnings for
 /// degraded subjects are emitted by the main trigger condition path instead.
-fn extract_trigger_subject_for_context(condition_text: &str) -> TargetFilter {
+fn extract_trigger_subject_for_context(
+    condition_text: &str,
+    ctx: &mut ParseContext,
+) -> TargetFilter {
     let lower = condition_text.to_lowercase();
     let after_keyword = alt((
-        value((), tag::<_, _, VerboseError<&str>>("whenever ")),
+        value((), tag::<_, _, OracleError<'_>>("whenever ")),
         value((), tag("when ")),
     ))
     .parse(lower.as_str())
@@ -2449,7 +2647,7 @@ fn extract_trigger_subject_for_context(condition_text: &str) -> TargetFilter {
     // Must precede `parse_trigger_subject`, which is object-oriented and would miss
     // these.
     if alt((
-        tag::<_, _, VerboseError<&str>>("another player "),
+        tag::<_, _, OracleError<'_>>("another player "),
         tag("an opponent "),
     ))
     .parse(after_keyword)
@@ -2458,15 +2656,12 @@ fn extract_trigger_subject_for_context(condition_text: &str) -> TargetFilter {
         return TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent));
     }
 
-    // Drain pre-existing warnings, call parse_trigger_subject, discard any
-    // warnings it emits, then restore the originals. This avoids maintaining
-    // a parallel list of "subjectless" trigger patterns.
-    let pre = take_warnings();
-    let (subject, _) = parse_trigger_subject(after_keyword);
-    let _discarded = take_warnings();
-    for w in pre {
-        push_warning(w);
-    }
+    // Snapshot diagnostics, call parse_trigger_subject, discard any diagnostics
+    // it emits (truncate back to snapshot). This avoids maintaining a parallel
+    // list of "subjectless" trigger patterns.
+    let pre_snapshot = ctx.diagnostics.len();
+    let (subject, _) = parse_trigger_subject(after_keyword, ctx);
+    ctx.diagnostics.truncate(pre_snapshot);
     subject
 }
 
@@ -2481,20 +2676,20 @@ fn extract_trigger_subject_for_context(condition_text: &str) -> TargetFilter {
 ///   "~ or another creature or artifact you control enters"
 ///   → Or { SelfRef, Typed{Creature, You, [Another]}, Typed{Artifact, You, [Another]} }
 ///   with remaining text "enters"
-fn parse_trigger_subject(text: &str) -> (TargetFilter, &str) {
-    let (first, rest) = parse_single_subject(text);
+fn parse_trigger_subject<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetFilter, &'a str) {
+    let (first, rest) = parse_single_subject(text, ctx);
 
     // Check for "and/or " or "or " combinator to build compound subjects.
     // CR 603.2c: "~ and/or one or more other creatures" means the trigger fires
     // when any matching object enters — semantically equivalent to "or" for triggers.
     let rest_trimmed = rest.trim_start();
     if let Ok((after_sep, ())) = alt((
-        value((), tag::<_, _, VerboseError<&str>>("and/or ")),
-        value((), tag::<_, _, VerboseError<&str>>("or ")),
+        value((), tag::<_, _, OracleError<'_>>("and/or ")),
+        value((), tag::<_, _, OracleError<'_>>("or ")),
     ))
     .parse(rest_trimmed)
     {
-        let (second, final_rest) = parse_trigger_subject(after_sep);
+        let (second, final_rest) = parse_trigger_subject(after_sep, ctx);
         return (merge_or_filters(first, second), final_rest);
     }
 
@@ -2502,16 +2697,16 @@ fn parse_trigger_subject(text: &str) -> (TargetFilter, &str) {
 }
 
 /// Parse a single (non-compound) trigger subject.
-fn parse_single_subject(text: &str) -> (TargetFilter, &str) {
+fn parse_single_subject<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetFilter, &'a str) {
     // Self-reference: "~"
-    if let Ok((rest, ())) = value((), tag::<_, _, VerboseError<&str>>("~ ")).parse(text) {
+    if let Ok((rest, ())) = value((), tag::<_, _, OracleError<'_>>("~ ")).parse(text) {
         return (TargetFilter::SelfRef, rest);
     }
     if text == "~" {
         return (TargetFilter::SelfRef, "");
     }
 
-    if let Ok((rest, ())) = value((), tag::<_, _, VerboseError<&str>>("this ")).parse(text) {
+    if let Ok((rest, ())) = value((), tag::<_, _, OracleError<'_>>("this ")).parse(text) {
         let noun_end = rest.find(' ').unwrap_or(rest.len());
         if noun_end > 0 {
             return (TargetFilter::SelfRef, rest[noun_end..].trim_start());
@@ -2563,8 +2758,7 @@ fn parse_single_subject(text: &str) -> (TargetFilter, &str) {
     }
 
     // "another <type phrase>" — compose with FilterProp::Another
-    if let Ok((after_another, ())) =
-        value((), tag::<_, _, VerboseError<&str>>("another ")).parse(text)
+    if let Ok((after_another, ())) = value((), tag::<_, _, OracleError<'_>>("another ")).parse(text)
     {
         let (filter, rest) = parse_type_phrase(after_another);
         let with_another = add_another_prop(filter);
@@ -2572,7 +2766,7 @@ fn parse_single_subject(text: &str) -> (TargetFilter, &str) {
     }
 
     if let Ok((after_quantifier, ())) =
-        value((), tag::<_, _, VerboseError<&str>>("one or more ")).parse(text)
+        value((), tag::<_, _, OracleError<'_>>("one or more ")).parse(text)
     {
         // CR 122.6: Passive voice counter placement: "one or more [type] counters are put on [subject]"
         // The subject is the object receiving counters, not the counters themselves.
@@ -2580,13 +2774,13 @@ fn parse_single_subject(text: &str) -> (TargetFilter, &str) {
         if let Ok((_, (_, subject_text))) =
             nom_primitives::split_once_on(after_quantifier, " are put on ")
         {
-            let (filter, rest) = parse_single_subject(subject_text);
+            let (filter, rest) = parse_single_subject(subject_text, ctx);
             return (filter, rest);
         }
         if let Ok((_, (_, subject_text))) =
             nom_primitives::split_once_on(after_quantifier, " are placed on ")
         {
-            let (filter, rest) = parse_single_subject(subject_text);
+            let (filter, rest) = parse_single_subject(subject_text, ctx);
             return (filter, rest);
         }
 
@@ -2599,10 +2793,10 @@ fn parse_single_subject(text: &str) -> (TargetFilter, &str) {
     // "you put one or more [type] counters on [subject]" — active voice counter placement.
     // Use split_once_on to locate the " on " boundary after counter type text.
     if let Ok((after_put, ())) =
-        value((), tag::<_, _, VerboseError<&str>>("you put one or more ")).parse(text)
+        value((), tag::<_, _, OracleError<'_>>("you put one or more ")).parse(text)
     {
         if let Ok((_, (_, subject_text))) = nom_primitives::split_once_on(after_put, " on ") {
-            let (filter, rest) = parse_single_subject(subject_text);
+            let (filter, rest) = parse_single_subject(subject_text, ctx);
             return (filter, rest);
         }
     }
@@ -2616,10 +2810,7 @@ fn parse_single_subject(text: &str) -> (TargetFilter, &str) {
     if let Ok((rest, filter)) = alt((
         value(
             TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
-            alt((
-                tag::<_, _, VerboseError<&str>>("an opponent"),
-                tag("opponent"),
-            )),
+            alt((tag::<_, _, OracleError<'_>>("an opponent"), tag("opponent"))),
         ),
         value(
             TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
@@ -2634,7 +2825,7 @@ fn parse_single_subject(text: &str) -> (TargetFilter, &str) {
 
     // "a "/"an " + type phrase (general subject)
     if let Ok((after, ())) = alt((
-        value((), tag::<_, _, VerboseError<&str>>("a ")),
+        value((), tag::<_, _, OracleError<'_>>("a ")),
         value((), tag("an ")),
     ))
     .parse(text)
@@ -2648,10 +2839,11 @@ fn parse_single_subject(text: &str) -> (TargetFilter, &str) {
         return (filter, rest);
     }
 
-    push_warning(format!(
-        "target-fallback: trigger subject parse fell back to Any for '{}'",
-        text.trim()
-    ));
+    ctx.push_diagnostic(OracleDiagnostic::TargetFallback {
+        context: "trigger subject parse fell back to Any".into(),
+        text: text.trim().into(),
+        line_index: 0,
+    });
     (TargetFilter::Any, text)
 }
 
@@ -2711,7 +2903,7 @@ fn add_controller(filter: TargetFilter, controller: ControllerRef) -> TargetFilt
 /// Other qualifiers (e.g. "to a player or planeswalker") are left as `None`
 /// so the trigger fires for any target, matching current behaviour.
 fn parse_damage_to_qualifier(after_verb: &str) -> Option<TargetFilter> {
-    let (rest, ()) = value((), tag::<_, _, VerboseError<&str>>("to "))
+    let (rest, ()) = value((), tag::<_, _, OracleError<'_>>("to "))
         .parse(after_verb.trim_start())
         .ok()?;
     // Use nom alt() to match damage target qualifiers (input already lowercase)
@@ -2757,10 +2949,10 @@ fn parse_enters_tapped_state_rider(input: &str) -> Option<TriggerCondition> {
     // the state word. Using nom tags keeps dispatch structural, not string-
     // matched.
     let (after_state, negated) = preceded(
-        tag::<_, _, VerboseError<&str>>("s "),
+        tag::<_, _, OracleError<'_>>("s "),
         alt((
-            value(true, tag::<_, _, VerboseError<&str>>("untapped")),
-            value(false, tag::<_, _, VerboseError<&str>>("tapped")),
+            value(true, tag::<_, _, OracleError<'_>>("untapped")),
+            value(false, tag::<_, _, OracleError<'_>>("tapped")),
         )),
     )
     .parse(input)
@@ -2797,10 +2989,10 @@ fn try_parse_event(
 
     // --- Compound triggers (nom alt for prefix matching) ---
     // "enters or attacks" / "enters the battlefield or attacks"
-    if tag::<_, _, VerboseError<&str>>("enters or attacks")
+    if tag::<_, _, OracleError<'_>>("enters or attacks")
         .parse(rest)
         .is_ok()
-        || tag::<_, _, VerboseError<&str>>("enters the battlefield or attacks")
+        || tag::<_, _, OracleError<'_>>("enters the battlefield or attacks")
             .parse(rest)
             .is_ok()
     {
@@ -2812,7 +3004,7 @@ fn try_parse_event(
     }
 
     // "attacks or blocks"
-    if tag::<_, _, VerboseError<&str>>("attacks or blocks")
+    if tag::<_, _, OracleError<'_>>("attacks or blocks")
         .parse(rest)
         .is_ok()
     {
@@ -2823,7 +3015,7 @@ fn try_parse_event(
     }
 
     // "enters [the battlefield]" / "enter [the battlefield]" (plural for "one or more" subjects)
-    if let Ok((after_enter, ())) = value((), tag::<_, _, VerboseError<&str>>("enter")).parse(rest) {
+    if let Ok((after_enter, ())) = value((), tag::<_, _, OracleError<'_>>("enter")).parse(rest) {
         let mut def = make_base();
         def.mode = TriggerMode::ChangesZone;
         def.destination = Some(Zone::Battlefield);
@@ -2870,7 +3062,7 @@ fn try_parse_event(
 
     // CR 120.1: "deals combat damage" / "deal combat damage" (plural for &-names)
     if let Ok((after, ())) = alt((
-        value((), tag::<_, _, VerboseError<&str>>("deals combat damage")),
+        value((), tag::<_, _, OracleError<'_>>("deals combat damage")),
         value((), tag("deal combat damage")),
     ))
     .parse(rest)
@@ -2885,7 +3077,7 @@ fn try_parse_event(
 
     // CR 120.1: "deals damage" / "deal damage" (plural for &-names)
     if let Ok((after, ())) = alt((
-        value((), tag::<_, _, VerboseError<&str>>("deals damage")),
+        value((), tag::<_, _, OracleError<'_>>("deals damage")),
         value((), tag("deal damage")),
     ))
     .parse(rest)
@@ -2899,7 +3091,7 @@ fn try_parse_event(
 
     // CR 508.1a: "~ and at least N other creatures attack" (Battalion/Pack Tactics)
     if let Ok((after_and, ())) = alt((
-        value((), tag::<_, _, VerboseError<&str>>("and at least ")),
+        value((), tag::<_, _, OracleError<'_>>("and at least ")),
         value((), tag("and ")),
     ))
     .parse(rest)
@@ -2917,12 +3109,12 @@ fn try_parse_event(
 
     // "attacks" (singular) or "attack" (plural — multi-name cards like "Raph & Leo")
     // Guard against false-matching "attacker"/"attacking".
-    let attacks_result = tag::<_, _, VerboseError<&str>>("attacks")
+    let attacks_result = tag::<_, _, OracleError<'_>>("attacks")
         .parse(rest)
         .map(|(r, _)| r)
         .ok()
         .or_else(|| {
-            tag::<_, _, VerboseError<&str>>("attack")
+            tag::<_, _, OracleError<'_>>("attack")
                 .parse(rest)
                 .ok()
                 .map(|(r, _)| r)
@@ -2934,7 +3126,10 @@ fn try_parse_event(
             alt((
                 value(
                     AttackTargetFilter::PlayerOrPlaneswalker,
-                    tag(" you or a planeswalker you control"),
+                    alt((
+                        tag(" you or a planeswalker you control"),
+                        tag(" you and/or one or more planeswalkers you control"),
+                    )),
                 ),
                 value(AttackTargetFilter::Planeswalker, tag(" a planeswalker")),
                 value(AttackTargetFilter::Player, tag(" a player")),
@@ -2951,7 +3146,7 @@ fn try_parse_event(
         if matches!(
             def.attack_target_filter,
             Some(AttackTargetFilter::PlayerOrPlaneswalker) | Some(AttackTargetFilter::Player)
-        ) && tag::<_, _, VerboseError<&str>>(" you").parse(after).is_ok()
+        ) && tag::<_, _, OracleError<'_>>(" you").parse(after).is_ok()
         {
             def.valid_target = Some(TargetFilter::Controller);
         }
@@ -2959,10 +3154,7 @@ fn try_parse_event(
     }
 
     // "blocks" — fires for the blocking creature.
-    if tag::<_, _, VerboseError<&str>>("blocks")
-        .parse(rest)
-        .is_ok()
-    {
+    if tag::<_, _, OracleError<'_>>("blocks").parse(rest).is_ok() {
         let mut def = make_base();
         def.mode = TriggerMode::Blocks;
         def.valid_card = Some(subject.clone());
@@ -2971,10 +3163,7 @@ fn try_parse_event(
 
     // "leaves the battlefield" / "leaves"
     if alt((
-        value(
-            (),
-            tag::<_, _, VerboseError<&str>>("leaves the battlefield"),
-        ),
+        value((), tag::<_, _, OracleError<'_>>("leaves the battlefield")),
         value((), tag("leaves")),
     ))
     .parse(rest)
@@ -3018,7 +3207,7 @@ fn try_parse_event(
 
     // CR 701.13a: "is exiled" / "are exiled" — exile trigger
     if alt((
-        value((), tag::<_, _, VerboseError<&str>>("is exiled")),
+        value((), tag::<_, _, OracleError<'_>>("is exiled")),
         value((), tag("are exiled")),
     ))
     .parse(rest)
@@ -3032,7 +3221,7 @@ fn try_parse_event(
 
     // CR 701.21: "is sacrificed" / "are sacrificed" — sacrifice trigger
     if alt((
-        value((), tag::<_, _, VerboseError<&str>>("is sacrificed")),
+        value((), tag::<_, _, OracleError<'_>>("is sacrificed")),
         value((), tag("are sacrificed")),
     ))
     .parse(rest)
@@ -3046,7 +3235,7 @@ fn try_parse_event(
 
     // CR 701.8: "is destroyed" / "are destroyed" — destroy trigger
     if alt((
-        value((), tag::<_, _, VerboseError<&str>>("is destroyed")),
+        value((), tag::<_, _, OracleError<'_>>("is destroyed")),
         value((), tag("are destroyed")),
     ))
     .parse(rest)
@@ -3061,12 +3250,12 @@ fn try_parse_event(
     // CR 701.14: "fights" / "fight" — fight trigger
     // Guard against false-matching "fighting".
     {
-        let fights_result = tag::<_, _, VerboseError<&str>>("fights")
+        let fights_result = tag::<_, _, OracleError<'_>>("fights")
             .parse(rest)
             .map(|(r, _)| r)
             .ok()
             .or_else(|| {
-                tag::<_, _, VerboseError<&str>>("fight")
+                tag::<_, _, OracleError<'_>>("fight")
                     .parse(rest)
                     .ok()
                     .map(|(r, _)| r)
@@ -3247,11 +3436,6 @@ fn try_parse_event(
             }
         }
         return Some((def.mode.clone(), def));
-    }
-
-    // Counter-related events: "a +1/+1 counter is put on ~" / "one or more counters are put on ~"
-    if let Some(result) = try_parse_counter_trigger(full_lower) {
-        return Some(result);
     }
 
     // CR 119.3 + CR 603.2: "Whenever [subject] loses life" — player-scoped life-loss
@@ -3488,7 +3672,7 @@ fn try_parse_special_trigger_pattern(lower: &str) -> Option<(TriggerMode, Trigge
         "whenever enchanted player is attacked",
         "when enchanted player is attacked",
     ] {
-        if tag::<_, _, VerboseError<&str>>(prefix).parse(lower).is_ok() {
+        if tag::<_, _, OracleError<'_>>(prefix).parse(lower).is_ok() {
             let mut def = make_base();
             def.mode = TriggerMode::Attacks;
             // AttachedTo here references the player the aura is attached to
@@ -3498,7 +3682,7 @@ fn try_parse_special_trigger_pattern(lower: &str) -> Option<(TriggerMode, Trigge
     }
 
     for prefix in ["whenever you cast or copy ", "when you cast or copy "] {
-        if let Ok((rest, ())) = value((), tag::<_, _, VerboseError<&str>>(prefix)).parse(lower) {
+        if let Ok((rest, ())) = value((), tag::<_, _, OracleError<'_>>(prefix)).parse(lower) {
             if matches!(
                 rest,
                 "an instant or sorcery spell" | "a instant or sorcery spell"
@@ -3525,7 +3709,7 @@ fn try_parse_special_trigger_pattern(lower: &str) -> Option<(TriggerMode, Trigge
         "whenever a creature dealt damage by ~ this turn dies",
         "when a creature dealt damage by ~ this turn dies",
     ] {
-        if tag::<_, _, VerboseError<&str>>(prefix).parse(lower).is_ok() {
+        if tag::<_, _, OracleError<'_>>(prefix).parse(lower).is_ok() {
             let mut def = make_base();
             def.mode = TriggerMode::ChangesZone;
             def.origin = Some(Zone::Battlefield);
@@ -3611,7 +3795,7 @@ fn try_parse_n_or_more_attacks(lower: &str) -> Option<(TriggerMode, TriggerDefin
         ("whenever two or more ", 2),
         ("when two or more ", 2),
     ] {
-        let Ok((rest, ())) = value((), tag::<_, _, VerboseError<&str>>(prefix)).parse(lower) else {
+        let Ok((rest, ())) = value((), tag::<_, _, OracleError<'_>>(prefix)).parse(lower) else {
             continue;
         };
         // Strip optional " a player" target suffix before checking for "attack"
@@ -3679,7 +3863,7 @@ fn try_parse_attack_with_n_creatures(lower: &str) -> Option<(TriggerMode, Trigge
     use nom::combinator::opt;
 
     let (after_prefix, ()) = alt((
-        value((), tag::<_, _, VerboseError<&str>>("whenever ")),
+        value((), tag::<_, _, OracleError<'_>>("whenever ")),
         value((), tag("when ")),
     ))
     .parse(lower)
@@ -3692,7 +3876,7 @@ fn try_parse_attack_with_n_creatures(lower: &str) -> Option<(TriggerMode, Trigge
     let (after_actor, actor): (&str, ControllerRef) = alt((
         value(
             ControllerRef::You,
-            tag::<_, _, VerboseError<&str>>("you attack"),
+            tag::<_, _, OracleError<'_>>("you attack"),
         ),
         value(ControllerRef::Opponent, tag("another player attacks")),
         value(ControllerRef::Opponent, tag("an opponent attacks")),
@@ -3701,13 +3885,13 @@ fn try_parse_attack_with_n_creatures(lower: &str) -> Option<(TriggerMode, Trigge
     .ok()?;
 
     // Required " with " separator.
-    let (after_with, ()) = value((), tag::<_, _, VerboseError<&str>>(" with "))
+    let (after_with, ()) = value((), tag::<_, _, OracleError<'_>>(" with "))
         .parse(after_actor)
         .ok()?;
 
     // Parse "N or more creatures" — N is a positive integer word/digit.
     let (after_n, n) = nom_primitives::parse_number.parse(after_with).ok()?;
-    let (after_or_more, ()) = value((), tag::<_, _, VerboseError<&str>>(" or more creatures"))
+    let (after_or_more, ()) = value((), tag::<_, _, OracleError<'_>>(" or more creatures"))
         .parse(after_n)
         .ok()?;
     // Accept optional trailing " each turn" / " this turn" qualifier (unused here,
@@ -3715,7 +3899,7 @@ fn try_parse_attack_with_n_creatures(lower: &str) -> Option<(TriggerMode, Trigge
     // at the condition boundary — the caller already split the effect text off,
     // so `after_or_more` should be empty or punctuation-only.
     let (rest, _) = opt(alt((
-        tag::<_, _, VerboseError<&str>>(" each turn"),
+        tag::<_, _, OracleError<'_>>(" each turn"),
         tag(" this turn"),
     )))
     .parse(after_or_more)
@@ -3749,7 +3933,7 @@ fn try_parse_attack_with_n_creatures(lower: &str) -> Option<(TriggerMode, Trigge
 /// CR 603.2c: "One or more" triggers fire once per batch of simultaneous events.
 fn try_parse_one_or_more_die(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
     for prefix in ["whenever one or more ", "when one or more "] {
-        let Ok((rest, ())) = value((), tag::<_, _, VerboseError<&str>>(prefix)).parse(lower) else {
+        let Ok((rest, ())) = value((), tag::<_, _, OracleError<'_>>(prefix)).parse(lower) else {
             continue;
         };
         let Some(subject_text) = rest
@@ -3794,11 +3978,11 @@ fn try_parse_one_or_more_tokens_created(lower: &str) -> Option<(TriggerMode, Tri
     let (_, rest) = alt((
         value(
             (),
-            tag::<_, _, VerboseError<&str>>("whenever you create one or more "),
+            tag::<_, _, OracleError<'_>>("whenever you create one or more "),
         ),
         value(
             (),
-            tag::<_, _, VerboseError<&str>>("when you create one or more "),
+            tag::<_, _, OracleError<'_>>("when you create one or more "),
         ),
     ))
     .parse(lower)
@@ -3836,7 +4020,7 @@ fn try_parse_one_or_more_tokens_created(lower: &str) -> Option<(TriggerMode, Tri
 /// CR 603.2c: "One or more" triggers fire once per batch of simultaneous events.
 fn try_parse_one_or_more_leave_graveyard(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
     for prefix in ["whenever one or more ", "when one or more "] {
-        let Ok((rest, ())) = value((), tag::<_, _, VerboseError<&str>>(prefix)).parse(lower) else {
+        let Ok((rest, ())) = value((), tag::<_, _, OracleError<'_>>(prefix)).parse(lower) else {
             continue;
         };
 
@@ -3908,7 +4092,7 @@ fn try_parse_one_or_more_leave_graveyard(lower: &str) -> Option<(TriggerMode, Tr
 /// Parse a single zone token: "your library" → Zone::Library, "your graveyard" → Zone::Graveyard.
 /// Returns the typed zone and the remaining input. Used by the disjunctive
 /// source-zone combinator below.
-fn parse_your_zone_token(input: &str) -> nom::IResult<&str, Zone, VerboseError<&str>> {
+fn parse_your_zone_token(input: &str) -> nom::IResult<&str, Zone, OracleError<'_>> {
     alt((
         value(Zone::Library, tag("your library")),
         value(Zone::Graveyard, tag("your graveyard")),
@@ -3922,10 +4106,10 @@ fn parse_your_zone_token(input: &str) -> nom::IResult<&str, Zone, VerboseError<&
 ///
 /// Composable: one `parse_your_zone_token` invocation per alternative, joined
 /// by an optional "and/or" / "or" / "and" disjunction combinator.
-fn parse_disjunctive_zone_set(input: &str) -> nom::IResult<&str, Vec<Zone>, VerboseError<&str>> {
+fn parse_disjunctive_zone_set(input: &str) -> nom::IResult<&str, Vec<Zone>, OracleError<'_>> {
     let (input, first) = parse_your_zone_token(input)?;
     // Optional second zone joined by "and/or" (canonical), "or", or "and".
-    let rest_parser = |i| -> nom::IResult<&str, Zone, VerboseError<&str>> {
+    let rest_parser = |i| -> nom::IResult<&str, Zone, OracleError<'_>> {
         let (i, _) = alt((tag(" and/or "), tag(" or "), tag(" and "))).parse(i)?;
         parse_your_zone_token(i)
     };
@@ -3946,7 +4130,7 @@ fn try_parse_one_or_more_put_into_exile_from(
         "whenever one or more cards are put into exile from ",
         "when one or more cards are put into exile from ",
     ] {
-        let Ok((rest, ())) = value((), tag::<_, _, VerboseError<&str>>(prefix)).parse(lower) else {
+        let Ok((rest, ())) = value((), tag::<_, _, OracleError<'_>>(prefix)).parse(lower) else {
             continue;
         };
         let Ok((after_zones, zones)) = parse_disjunctive_zone_set(rest) else {
@@ -3978,7 +4162,7 @@ fn try_parse_one_or_more_combat_damage_to_player(
     lower: &str,
 ) -> Option<(TriggerMode, TriggerDefinition)> {
     for prefix in ["whenever one or more ", "when one or more "] {
-        let Ok((rest, ())) = value((), tag::<_, _, VerboseError<&str>>(prefix)).parse(lower) else {
+        let Ok((rest, ())) = value((), tag::<_, _, OracleError<'_>>(prefix)).parse(lower) else {
             continue;
         };
         let Some(subject_text) = rest
@@ -4083,7 +4267,7 @@ fn try_parse_self_or_another_controlled_subtype_enters(
     lower: &str,
 ) -> Option<(TriggerMode, TriggerDefinition)> {
     for prefix in ["whenever ~ or another ", "when ~ or another "] {
-        let Ok((rest, ())) = value((), tag::<_, _, VerboseError<&str>>(prefix)).parse(lower) else {
+        let Ok((rest, ())) = value((), tag::<_, _, OracleError<'_>>(prefix)).parse(lower) else {
             continue;
         };
         let Some(subject_text) = rest
@@ -4138,7 +4322,7 @@ fn try_parse_controlled_subtype_enters(lower: &str) -> Option<(TriggerMode, Trig
     use nom::bytes::complete::take_until;
 
     let (after_prefix, ()) = alt((
-        value((), tag::<_, _, VerboseError<&str>>("whenever a ")),
+        value((), tag::<_, _, OracleError<'_>>("whenever a ")),
         value((), tag("whenever an ")),
         value((), tag("when a ")),
         value((), tag("when an ")),
@@ -4146,18 +4330,17 @@ fn try_parse_controlled_subtype_enters(lower: &str) -> Option<(TriggerMode, Trig
     .parse(lower)
     .ok()?;
 
-    let (after_subtype, subtype_text) =
-        take_until::<_, _, VerboseError<&str>>(" you control enters")
-            .parse(after_prefix)
-            .ok()?;
+    let (after_subtype, subtype_text) = take_until::<_, _, OracleError<'_>>(" you control enters")
+        .parse(after_prefix)
+        .ok()?;
 
-    let (after_sentinel, ()) = value((), tag::<_, _, VerboseError<&str>>(" you control enters"))
+    let (after_sentinel, ()) = value((), tag::<_, _, OracleError<'_>>(" you control enters"))
         .parse(after_subtype)
         .ok()?;
 
     // Accept either bare "enters" or "enters the battlefield".
     let (tail, ()) = alt((
-        value((), tag::<_, _, VerboseError<&str>>(" the battlefield")),
+        value((), tag::<_, _, OracleError<'_>>(" the battlefield")),
         value((), tag("")),
     ))
     .parse(after_sentinel)
@@ -4188,7 +4371,7 @@ fn try_parse_another_controlled_subtype_enters(
     lower: &str,
 ) -> Option<(TriggerMode, TriggerDefinition)> {
     for prefix in ["whenever another ", "when another "] {
-        let Ok((rest, ())) = value((), tag::<_, _, VerboseError<&str>>(prefix)).parse(lower) else {
+        let Ok((rest, ())) = value((), tag::<_, _, OracleError<'_>>(prefix)).parse(lower) else {
             continue;
         };
         let Some(subject_text) = rest
@@ -4222,7 +4405,7 @@ fn try_parse_another_controlled_subtype_enters(
 
 fn try_parse_controlled_subtype_attacks(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
     for prefix in ["whenever a ", "whenever an ", "when a ", "when an "] {
-        let Ok((rest, ())) = value((), tag::<_, _, VerboseError<&str>>(prefix)).parse(lower) else {
+        let Ok((rest, ())) = value((), tag::<_, _, OracleError<'_>>(prefix)).parse(lower) else {
             continue;
         };
         let Some(subject_text) = rest.strip_suffix(" attacks") else {
@@ -4309,7 +4492,7 @@ fn build_controlled_subtype_filters(
 fn try_parse_phase_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
     // CR 511.2: "at end of combat" triggers as the end of combat step begins.
     if let Ok((rest, ())) = alt((
-        value((), tag::<_, _, VerboseError<&str>>("at end of combat")),
+        value((), tag::<_, _, OracleError<'_>>("at end of combat")),
         value((), tag("at the end of combat")),
     ))
     .parse(lower)
@@ -4320,7 +4503,7 @@ fn try_parse_phase_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinitio
         // CR 511.2: "on your turn" restricts to active player's combat.
         let rest = rest.trim();
         if alt((
-            value((), tag::<_, _, VerboseError<&str>>("on your turn")),
+            value((), tag::<_, _, OracleError<'_>>("on your turn")),
             value((), tag("on each of your turns")),
         ))
         .parse(rest)
@@ -4331,7 +4514,7 @@ fn try_parse_phase_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinitio
         return Some((TriggerMode::Phase, def));
     }
 
-    let (stripped, ()) = value((), tag::<_, _, VerboseError<&str>>("at the beginning of"))
+    let (stripped, ()) = value((), tag::<_, _, OracleError<'_>>("at the beginning of"))
         .parse(lower)
         .ok()?;
     let phase_text = stripped.trim();
@@ -4343,6 +4526,12 @@ fn try_parse_phase_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinitio
     // Uses nom prefix dispatch: opponent possessives checked before bare "your" to avoid
     // "your opponent's" matching as "your".
     def.constraint = parse_turn_constraint(phase_text);
+    if scan_contains(phase_text, "enchanted player's") {
+        def.valid_target = Some(TargetFilter::AttachedTo);
+    }
+    if scan_contains(phase_text, "first upkeep") && scan_contains(phase_text, "each turn") {
+        def.constraint = Some(TriggerConstraint::MaxTimesPerTurn { max: 1 });
+    }
     // "each player's upkeep" / "each upkeep" / "the end step" → no constraint (fires every turn)
 
     Some((TriggerMode::Phase, def))
@@ -4384,7 +4573,7 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
     // CR 700.14: "whenever you expend N" — cumulative mana spent on spells this turn
     // CR 700.14: Delegate number parsing to nom combinator (input already lowercase)
     for prefix in ["whenever you expend ", "when you expend "] {
-        if let Ok((rest, ())) = value((), tag::<_, _, VerboseError<&str>>(prefix)).parse(lower) {
+        if let Ok((rest, ())) = value((), tag::<_, _, OracleError<'_>>(prefix)).parse(lower) {
             if let Ok((_rem, n)) = nom_primitives::parse_number.parse(rest) {
                 let mut def = make_base();
                 def.mode = TriggerMode::ManaExpend;
@@ -4399,7 +4588,7 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
     // Handles: "when you control no islands", "when you control no other creatures",
     // "when you control no artifacts", "when you control no forests", etc.
     for prefix in ["whenever you control no ", "when you control no "] {
-        if let Ok((rest, ())) = value((), tag::<_, _, VerboseError<&str>>(prefix)).parse(lower) {
+        if let Ok((rest, ())) = value((), tag::<_, _, OracleError<'_>>(prefix)).parse(lower) {
             if let Some(filter) = parse_control_none_filter(rest) {
                 let mut def = make_base();
                 def.mode = TriggerMode::StateCondition;
@@ -4507,13 +4696,13 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
     }
 
     for prefix in ["whenever you tap ", "when you tap "] {
-        let Ok((rest, ())) = value((), tag::<_, _, VerboseError<&str>>(prefix)).parse(lower) else {
+        let Ok((rest, ())) = value((), tag::<_, _, OracleError<'_>>(prefix)).parse(lower) else {
             continue;
         };
         let Some(subject_text) = rest.strip_suffix(" for mana") else {
             continue;
         };
-        let (filter, remainder) = parse_trigger_subject(subject_text);
+        let (filter, remainder) = parse_trigger_subject(subject_text, &mut ParseContext::default());
         if !remainder.trim().is_empty() {
             continue;
         }
@@ -4545,7 +4734,8 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
     }
     if let Ok((rem, (actor_controller, subject_text))) = parse_taps_for_mana_line(lower) {
         if rem.trim().is_empty() {
-            let (mut filter, sub_rem) = parse_trigger_subject(subject_text);
+            let (mut filter, sub_rem) =
+                parse_trigger_subject(subject_text, &mut ParseContext::default());
             if sub_rem.trim().is_empty() {
                 if actor_controller.is_some() {
                     // Constrain subject to opponent-controlled permanents.
@@ -4648,7 +4838,7 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         // Truncate at ", " to avoid passing the effect clause (e.g., ", you gain 1 life")
         // into parse_type_phrase where it would cause infinite recursion.
         let after_casts = &lower[who.len() + " casts a".len()..].trim_start();
-        let after_article = value((), tag::<_, _, VerboseError<&str>>("n ")) // "an" → strip the trailing "n "
+        let after_article = value((), tag::<_, _, OracleError<'_>>("n ")) // "an" → strip the trailing "n "
             .parse(after_casts)
             .map(|(rest, _)| rest)
             .unwrap_or(after_casts)
@@ -4807,7 +4997,7 @@ fn try_parse_player_action_trigger(lower: &str) -> Option<(TriggerMode, TriggerD
         ),
         ("when a player ", None),
     ] {
-        let Ok((rest, ())) = value((), tag::<_, _, VerboseError<&str>>(prefix)).parse(lower) else {
+        let Ok((rest, ())) = value((), tag::<_, _, OracleError<'_>>(prefix)).parse(lower) else {
             continue;
         };
         let actions = parse_player_action_list(rest)?;
@@ -5083,7 +5273,7 @@ pub(crate) fn parse_post_spell_modifier(modifier: &str) -> Option<TargetFilter> 
     if let Ok((rest, ())) = alt((
         value(
             (),
-            tag::<_, _, VerboseError<&str>>("with {x} in its mana cost"),
+            tag::<_, _, OracleError<'_>>("with {x} in its mana cost"),
         ),
         value((), tag("with an {x} in its mana cost")),
     ))
@@ -5139,7 +5329,7 @@ fn try_parse_nth_draw_you(lower: &str) -> Option<(TriggerMode, TriggerDefinition
     let after = strip_after(lower, prefix)?;
     let (n, rest) = parse_ordinal(after)?;
     if alt((
-        value((), tag::<_, _, VerboseError<&str>>("card each turn")),
+        value((), tag::<_, _, OracleError<'_>>("card each turn")),
         value((), tag("card in a turn")),
     ))
     .parse(rest)
@@ -5162,7 +5352,7 @@ fn try_parse_nth_draw_opponent(lower: &str) -> Option<(TriggerMode, TriggerDefin
     let after = strip_after(lower, prefix)?;
     let (n, rest) = parse_ordinal(after)?;
     if alt((
-        value((), tag::<_, _, VerboseError<&str>>("card each turn")),
+        value((), tag::<_, _, OracleError<'_>>("card each turn")),
         value((), tag("card in a turn")),
     ))
     .parse(rest)
@@ -5186,7 +5376,7 @@ fn try_parse_nth_draw_any_player(lower: &str) -> Option<(TriggerMode, TriggerDef
     let after = strip_after(lower, prefix)?;
     let (n, rest) = parse_ordinal(after)?;
     if alt((
-        value((), tag::<_, _, VerboseError<&str>>("card each turn")),
+        value((), tag::<_, _, OracleError<'_>>("card each turn")),
         value((), tag("card in a turn")),
     ))
     .parse(rest)
@@ -5222,9 +5412,8 @@ fn try_parse_counter_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinit
     // Find "counter(s) ... on SUBJECT" — locate "counter" then " on " after it.
     // Uses scan_split_at_phrase for word-boundary-aware "counter" match,
     // then split_once_on for the positional " on " split.
-    let (_, counter_start) = scan_split_at_phrase(lower, |i| {
-        tag::<_, _, VerboseError<&str>>("counter").parse(i)
-    })?;
+    let (counter_prefix, counter_start) =
+        scan_split_at_phrase(lower, |i| tag::<_, _, OracleError<'_>>("counter").parse(i))?;
     let Ok((_, (_, subject_text))) = nom_primitives::split_once_on(counter_start, " on ") else {
         return None;
     };
@@ -5232,31 +5421,61 @@ fn try_parse_counter_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinit
 
     let mut def = make_base();
     def.mode = TriggerMode::CounterAdded;
+    if let Some(filter) = parse_counter_threshold_prefix(counter_prefix) {
+        def = def.counter_filter(filter);
+    }
 
     // Parse the subject after "on "
-    if tag::<_, _, VerboseError<&str>>("~")
+    if tag::<_, _, OracleError<'_>>("~")
         .parse(subject_text)
         .is_ok()
     {
         def.valid_card = Some(TargetFilter::SelfRef);
     } else {
-        let (filter, _) = parse_single_subject(subject_text);
+        let (filter, _) = parse_single_subject(subject_text, &mut ParseContext::default());
         def.valid_card = Some(filter);
     }
 
     Some((TriggerMode::CounterAdded, def))
 }
 
+/// "When the twelfth hour counter is put on ~" — thresholded counter triggers.
+/// Uses the same `CounterTriggerFilter` building block as Saga chapters, so the
+/// runtime fires only when the object crosses the named counter threshold.
+fn parse_counter_threshold_prefix(prefix: &str) -> Option<CounterTriggerFilter> {
+    let (rest, _) = opt(alt((
+        tag::<_, _, OracleError<'_>>("when "),
+        tag("whenever "),
+    )))
+    .parse(prefix.trim_start())
+    .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("the ")
+        .parse(rest.trim_start())
+        .ok()?;
+    let (threshold, rest) = parse_ordinal(rest)?;
+    let counter_type_text = rest.trim();
+    if counter_type_text.is_empty() {
+        return None;
+    }
+    Some(CounterTriggerFilter {
+        counter_type: crate::types::counter::parse_counter_type(counter_type_text),
+        threshold: Some(threshold),
+    })
+}
+
 /// CR 122.1: Parse "a [type] counter is removed from [subject]" patterns.
 /// Also handles zone constraints like "while it's exiled" (e.g. suspend cards).
 fn try_parse_counter_removed(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
     // Pattern: "a [type] counter is removed from [subject] [while ...]"
-    let (after_a, ()) = alt((
-        value((), tag::<_, _, VerboseError<&str>>("whenever a ")),
-        value((), tag("when a ")),
-    ))
+    let (after_prefix, _) = opt(alt((
+        tag::<_, _, OracleError<'_>>("whenever "),
+        tag("when "),
+    )))
     .parse(lower)
     .ok()?;
+    let (after_a, ()) = value((), tag::<_, _, OracleError<'_>>("a "))
+        .parse(after_prefix)
+        .ok()?;
 
     let (_, (counter_type, subject_rest)) =
         nom_primitives::split_once_on(after_a, " counter is removed from ").ok()?;
@@ -5280,7 +5499,7 @@ fn try_parse_counter_removed(lower: &str) -> Option<(TriggerMode, TriggerDefinit
     if subject_text == "~" || SELF_REF_PARSE_ONLY_PHRASES.contains(&subject_text) {
         def.valid_card = Some(TargetFilter::SelfRef);
     } else {
-        let (filter, _) = parse_single_subject(subject_text);
+        let (filter, _) = parse_single_subject(subject_text, &mut ParseContext::default());
         def.valid_card = Some(filter);
     }
 
@@ -5311,7 +5530,7 @@ fn try_parse_put_into_graveyard(
 ) -> Option<(TriggerMode, TriggerDefinition)> {
     // Match the verb prefix: "is put into " or "are put into "
     let (after_verb, ()) = alt((
-        value((), tag::<_, _, VerboseError<&str>>("is put into ")),
+        value((), tag::<_, _, OracleError<'_>>("is put into ")),
         value((), tag("are put into ")),
     ))
     .parse(rest)
@@ -5341,7 +5560,7 @@ fn try_parse_put_into_graveyard(
     // Parse optional "from [zone]" clause
     let after_gy = after_gy.trim_start();
     let origin = if let Ok((after_from, ())) =
-        value((), tag::<_, _, VerboseError<&str>>("from ")).parse(after_gy)
+        value((), tag::<_, _, OracleError<'_>>("from ")).parse(after_gy)
     {
         let after_from = after_from.trim_start();
         // Use nom alt() for origin zone matching
@@ -5388,7 +5607,7 @@ fn try_parse_put_into_hand_from(
     rest: &str,
 ) -> Option<(TriggerMode, TriggerDefinition)> {
     let (after_verb, ()) = alt((
-        value((), tag::<_, _, VerboseError<&str>>("is put into ")),
+        value((), tag::<_, _, OracleError<'_>>("is put into ")),
         value((), tag("are put into ")),
     ))
     .parse(rest)
@@ -5416,7 +5635,7 @@ fn try_parse_put_into_hand_from(
 
     let after_hand = after_hand.trim_start();
     let origin = if let Ok((after_from, ())) =
-        value((), tag::<_, _, VerboseError<&str>>("from ")).parse(after_hand)
+        value((), tag::<_, _, OracleError<'_>>("from ")).parse(after_hand)
     {
         let after_from = after_from.trim_start();
         fn parse_origin_zone(input: &str) -> OracleResult<'_, Option<Zone>> {
@@ -5463,7 +5682,7 @@ fn try_parse_put_into_exile_from(
     rest: &str,
 ) -> Option<(TriggerMode, TriggerDefinition)> {
     let (after_verb, ()) = alt((
-        value((), tag::<_, _, VerboseError<&str>>("is put into exile")),
+        value((), tag::<_, _, OracleError<'_>>("is put into exile")),
         value((), tag("are put into exile")),
     ))
     .parse(rest)
@@ -5471,7 +5690,7 @@ fn try_parse_put_into_exile_from(
 
     let after_verb = after_verb.trim_start();
     let origin = if let Ok((after_from, ())) =
-        value((), tag::<_, _, VerboseError<&str>>("from ")).parse(after_verb)
+        value((), tag::<_, _, OracleError<'_>>("from ")).parse(after_verb)
     {
         let after_from = after_from.trim_start();
         fn parse_origin_zone(input: &str) -> OracleResult<'_, Option<Zone>> {
@@ -5513,7 +5732,7 @@ fn try_parse_one_or_more_put_into_graveyard(
     lower: &str,
 ) -> Option<(TriggerMode, TriggerDefinition)> {
     for prefix in ["whenever one or more ", "when one or more "] {
-        let Ok((rest, ())) = value((), tag::<_, _, VerboseError<&str>>(prefix)).parse(lower) else {
+        let Ok((rest, ())) = value((), tag::<_, _, OracleError<'_>>(prefix)).parse(lower) else {
             continue;
         };
 
@@ -5556,7 +5775,7 @@ fn try_parse_one_or_more_put_into_graveyard(
         // Parse optional "from [zone]" clause using nom
         let after_gy = after_gy.trim_start();
         let origin = if let Ok((after_from, ())) =
-            value((), tag::<_, _, VerboseError<&str>>("from ")).parse(after_gy)
+            value((), tag::<_, _, OracleError<'_>>("from ")).parse(after_gy)
         {
             let after_from = after_from.trim_start();
             fn parse_origin_zone_batch(input: &str) -> OracleResult<'_, Option<Zone>> {
@@ -5612,7 +5831,7 @@ fn try_parse_one_or_more_put_into_library(lower: &str) -> Option<(TriggerMode, T
         "whenever one or more cards are put into ",
         "when one or more cards are put into ",
     ] {
-        let Ok((rest, ())) = value((), tag::<_, _, VerboseError<&str>>(prefix)).parse(lower) else {
+        let Ok((rest, ())) = value((), tag::<_, _, OracleError<'_>>(prefix)).parse(lower) else {
             continue;
         };
 
@@ -5640,7 +5859,7 @@ fn try_parse_one_or_more_put_into_library(lower: &str) -> Option<(TriggerMode, T
 
         let after_lib = after_lib.trim_start();
         let origin = if let Ok((after_from, ())) =
-            value((), tag::<_, _, VerboseError<&str>>("from ")).parse(after_lib)
+            value((), tag::<_, _, OracleError<'_>>("from ")).parse(after_lib)
         {
             let after_from = after_from.trim_start();
             fn parse_origin_zone(input: &str) -> OracleResult<'_, Option<Zone>> {
@@ -5686,14 +5905,14 @@ fn try_parse_discard_trigger(
 ) -> Option<(TriggerMode, TriggerDefinition)> {
     // Strip "whenever " / "when " prefix to get the event clause
     let (event, ()) = alt((
-        value((), tag::<_, _, VerboseError<&str>>("whenever ")),
+        value((), tag::<_, _, OracleError<'_>>("whenever ")),
         value((), tag("when ")),
     ))
     .parse(lower)
     .ok()?;
 
     // CR 603.2c: Batched discard triggers — "one or more" fire once per batch.
-    if tag::<_, _, VerboseError<&str>>("you discard one or more")
+    if tag::<_, _, OracleError<'_>>("you discard one or more")
         .parse(event)
         .is_ok()
     {
@@ -5703,7 +5922,7 @@ fn try_parse_discard_trigger(
         def.batched = true;
         return Some((TriggerMode::DiscardedAll, def));
     }
-    if tag::<_, _, VerboseError<&str>>("one or more players discard one or more")
+    if tag::<_, _, OracleError<'_>>("one or more players discard one or more")
         .parse(event)
         .is_ok()
     {
@@ -5784,7 +6003,7 @@ fn try_parse_sacrifice_trigger(
 ) -> Option<(TriggerMode, TriggerDefinition)> {
     // Strip "whenever " / "when " prefix.
     let (event, ()) = alt((
-        value((), tag::<_, _, VerboseError<&str>>("whenever ")),
+        value((), tag::<_, _, OracleError<'_>>("whenever ")),
         value((), tag("when ")),
     ))
     .parse(lower)
@@ -5805,7 +6024,7 @@ fn try_parse_sacrifice_trigger(
     }
     let (after_verb, actor) = parse_sacrifice_actor.parse(event).ok()?;
 
-    let (filter, remainder) = parse_trigger_subject(after_verb);
+    let (filter, remainder) = parse_trigger_subject(after_verb, &mut ParseContext::default());
 
     // CR 603.2 + CR 603.7: Optional trailing turn constraint — "during your
     // turn", "during an opponent's turn", etc. Szarel, Genesis Shepherd and
@@ -5813,7 +6032,7 @@ fn try_parse_sacrifice_trigger(
     // narrows when the trigger fires without changing its event structure.
     // Strip the "during " conjunction with nom, then delegate to
     // `parse_turn_constraint` which recognizes the turn-possessive phrases.
-    let turn_constraint = tag::<_, _, VerboseError<&str>>("during ")
+    let turn_constraint = tag::<_, _, OracleError<'_>>("during ")
         .parse(remainder.trim())
         .ok()
         .and_then(|(body, _)| parse_turn_constraint(body));
@@ -5841,7 +6060,7 @@ fn try_parse_sacrifice_trigger(
 /// Nom combinator: parse a phase keyword from the current position.
 /// More specific phases (postcombat main, draw step) are tried before generic ones
 /// (combat, upkeep) to avoid prefix matches.
-fn parse_phase_keyword(input: &str) -> nom::IResult<&str, Phase, VerboseError<&str>> {
+fn parse_phase_keyword(input: &str) -> nom::IResult<&str, Phase, OracleError<'_>> {
     alt((
         // CR 505.1: Main phases — specific variants before generic
         value(
@@ -5875,7 +6094,7 @@ fn scan_for_phase(text: &str) -> Option<Phase> {
 fn parse_turn_constraint(phase_text: &str) -> Option<TriggerConstraint> {
     // Prefix-based: try at the start of the text
     if alt((
-        tag::<_, _, VerboseError<&str>>("each opponent's "),
+        tag::<_, _, OracleError<'_>>("each opponent's "),
         tag("each opponents\u{2019} "),
         tag("each opponents' "),
         tag("your opponent's "),
@@ -5887,7 +6106,7 @@ fn parse_turn_constraint(phase_text: &str) -> Option<TriggerConstraint> {
     {
         return Some(TriggerConstraint::OnlyDuringOpponentsTurn);
     }
-    if tag::<_, _, VerboseError<&str>>("your ")
+    if tag::<_, _, OracleError<'_>>("your ")
         .parse(phase_text)
         .is_ok()
     {
@@ -5896,7 +6115,7 @@ fn parse_turn_constraint(phase_text: &str) -> Option<TriggerConstraint> {
     // Suffix-based: "combat on your turn", "each combat on your turn"
     let mut remaining = phase_text;
     while !remaining.is_empty() {
-        if tag::<_, _, VerboseError<&str>>("on your turn")
+        if tag::<_, _, OracleError<'_>>("on your turn")
             .parse(remaining)
             .is_ok()
         {
@@ -5917,7 +6136,7 @@ fn parse_control_none_filter(text: &str) -> Option<TargetFilter> {
 
     // Check for "other" prefix → FilterProp::Another
     let (has_other, remainder) =
-        if let Ok((rest, ())) = value((), tag::<_, _, VerboseError<&str>>("other ")).parse(text) {
+        if let Ok((rest, ())) = value((), tag::<_, _, OracleError<'_>>("other ")).parse(text) {
             (true, rest)
         } else {
             (false, text)
@@ -5986,7 +6205,7 @@ pub fn try_parse_enters_prepared_rider(line: &str) -> Option<TriggerDefinition> 
             terminated(
                 preceded(
                     alt((
-                        tag::<_, _, VerboseError<&str>>("~"),
+                        tag::<_, _, OracleError<'_>>("~"),
                         tag("this creature"),
                         tag("it"),
                     )),
@@ -6017,11 +6236,12 @@ pub fn try_parse_enters_prepared_rider(line: &str) -> Option<TriggerDefinition> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::oracle_warnings::{clear_warnings, take_warnings};
+    use crate::parser::oracle_ir::context::ParseContext;
+    use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
     use crate::types::ability::{
-        AbilityCondition, Comparator, ControllerRef, DamageModification, Duration, Effect,
-        FilterProp, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef, TypeFilter,
-        TypedFilter, UnlessCost,
+        AbilityCondition, AbilityKind, Comparator, ContinuousModification, ControllerRef,
+        DamageModification, Duration, Effect, FilterProp, ObjectScope, PlayerFilter, PlayerScope,
+        PtValue, QuantityExpr, QuantityRef, TargetFilter, TypeFilter, TypedFilter, UnlessCost,
     };
     use crate::types::counter::{CounterMatch, CounterType};
     use crate::types::replacements::ReplacementEvent;
@@ -6343,12 +6563,14 @@ mod tests {
 
     #[test]
     fn trigger_subject_warns_on_any_fallback() {
-        clear_warnings();
-        let (filter, rest) = parse_single_subject("xyzzy");
+        let mut ctx = ParseContext::default();
+        let (filter, rest) = parse_single_subject("xyzzy", &mut ctx);
         assert_eq!(filter, TargetFilter::Any);
         assert_eq!(rest, "xyzzy");
-        assert!(take_warnings().iter().any(|warning| warning
-            == "target-fallback: trigger subject parse fell back to Any for 'xyzzy'"));
+        assert!(ctx.diagnostics.iter().any(
+            |d| matches!(d, OracleDiagnostic::TargetFallback { context, text, .. }
+                if context == "trigger subject parse fell back to Any" && text == "xyzzy")
+        ));
     }
 
     #[test]
@@ -6378,6 +6600,34 @@ mod tests {
             ))
         );
         assert_eq!(def.valid_target, Some(TargetFilter::Player));
+    }
+
+    #[test]
+    fn trigger_combat_damage_create_treasure_and_manifest_that_players_library() {
+        let def = parse_trigger_line(
+            "Whenever one or more creatures you control deal combat damage to a player, create a Treasure token and manifest the top card of that player's library.",
+            "Orochi Soul-Reaver",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageDoneOnceByController);
+
+        let execute = def.execute.as_ref().expect("trigger should have execute");
+        assert!(matches!(*execute.effect, Effect::Token { .. }));
+
+        let sub = execute
+            .sub_ability
+            .as_ref()
+            .expect("manifest should be chained after Treasure creation");
+        assert!(
+            matches!(
+                *sub.effect,
+                Effect::Manifest {
+                    target: TargetFilter::TriggeringPlayer,
+                    count: QuantityExpr::Fixed { value: 1 }
+                }
+            ),
+            "expected Manifest {{ TriggeringPlayer, count: 1 }}, got: {:?}",
+            sub.effect
+        );
     }
 
     #[test]
@@ -6420,6 +6670,32 @@ mod tests {
             Some(AttackTargetFilter::PlayerOrPlaneswalker)
         );
         assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    }
+
+    #[test]
+    fn opponent_attacks_that_player_library_binds_to_triggering_player() {
+        let def = parse_trigger_line(
+            "Whenever an opponent attacks you and/or one or more planeswalkers you control, exile the top card of that player's library.",
+            "Cunning Rhetoric",
+        );
+        assert_eq!(def.mode, TriggerMode::Attacks);
+        assert_eq!(
+            def.attack_target_filter,
+            Some(AttackTargetFilter::PlayerOrPlaneswalker)
+        );
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        let execute = def.execute.as_ref().expect("trigger should have effect");
+        assert!(
+            matches!(
+                execute.effect.as_ref(),
+                Effect::ExileTop {
+                    player: TargetFilter::TriggeringPlayer,
+                    count: QuantityExpr::Fixed { value: 1 },
+                }
+            ),
+            "expected ExileTop to bind to TriggeringPlayer, got {:?}",
+            execute.effect
+        );
     }
 
     #[test]
@@ -6507,6 +6783,36 @@ mod tests {
     }
 
     #[test]
+    fn trigger_gain_life_and_get_energy_chains_both_effects() {
+        let def = parse_trigger_line(
+            "Whenever another creature you control enters, you gain 1 life and get {E} (an energy counter).",
+            "Guide of Souls",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.destination, Some(Zone::Battlefield));
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::Another])
+            ))
+        );
+
+        let execute = def.execute.expect("trigger should have execute ability");
+        assert!(matches!(*execute.effect, Effect::GainLife { .. }));
+        let sub_ability = execute
+            .sub_ability
+            .expect("energy gain should be chained after life gain");
+        assert_eq!(
+            *sub_ability.effect,
+            Effect::GainEnergy {
+                amount: QuantityExpr::Fixed { value: 1 }
+            }
+        );
+    }
+
+    #[test]
     fn trigger_counter_put_on_self() {
         let def = parse_trigger_line(
             "Whenever a +1/+1 counter is put on ~, draw a card.",
@@ -6514,6 +6820,46 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::CounterAdded);
         assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn trigger_ordinal_counter_threshold_on_self() {
+        let def = parse_trigger_line(
+            "When the twelfth hour counter is put on ~, draw seven cards.",
+            "Midnight Clock",
+        );
+        assert_eq!(def.mode, TriggerMode::CounterAdded);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(
+            def.counter_filter,
+            Some(crate::types::ability::CounterTriggerFilter {
+                counter_type: crate::types::counter::CounterType::Generic("hour".to_string()),
+                threshold: Some(12),
+            })
+        );
+    }
+
+    #[test]
+    fn trigger_ordinal_counter_threshold_does_not_emit_subject_fallback() {
+        let mut ctx = ParseContext::default();
+        let def = parse_trigger_line_with_index(
+            "When the fifth plan counter is put on ~, sacrifice it.",
+            "Doom Reigns Supreme",
+            None,
+            &mut ctx,
+        );
+        assert_eq!(def.mode, TriggerMode::CounterAdded);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert!(
+            ctx.diagnostics.iter().all(|diagnostic| !matches!(
+                diagnostic,
+                OracleDiagnostic::TargetFallback { context, text, .. }
+                    if context == "trigger subject parse fell back to Any"
+                        && text == "the fifth plan counter is put on ~"
+            )),
+            "ordinal counter trigger should parse before generic subject fallback, got {:?}",
+            ctx.diagnostics
+        );
     }
 
     #[test]
@@ -6666,7 +7012,7 @@ mod tests {
     /// CR 700.6: Arbaaz Mir's "Whenever ~ or another nontoken historic
     /// permanent you control enters" must parse cleanly into a ChangesZone
     /// trigger whose `valid_card` is an `Or { SelfRef, Typed[Permanent,
-    /// Non(Token), controller=You, [Historic, Another]] }`. Regression for
+    /// controller=You, [NonToken, Historic, Another]] }`. Regression for
     /// the previously-Unknown trigger phrase.
     #[test]
     fn trigger_self_or_another_nontoken_historic_permanent_arbaaz() {
@@ -6693,12 +7039,9 @@ mod tests {
             tf.type_filters,
         );
         assert!(
-            tf.type_filters
-                .contains(&TypeFilter::Non(Box::new(TypeFilter::Subtype(
-                    "Token".to_string()
-                )))),
-            "expected Non(Subtype(Token)) in {:?}",
-            tf.type_filters,
+            tf.properties.contains(&FilterProp::NonToken),
+            "expected NonToken in {:?}",
+            tf.properties,
         );
         assert!(
             tf.properties.contains(&FilterProp::Historic),
@@ -6898,6 +7241,40 @@ mod tests {
     }
 
     #[test]
+    fn trigger_ocelot_pride_copy_each_entered_token_not_source() {
+        let def = parse_trigger_line(
+            "At the beginning of your end step, if you gained life this turn, create a 1/1 white Cat creature token. Then if you have the city's blessing, for each token you control that entered the battlefield this turn, create a token that's a copy of it.",
+            "Ocelot Pride",
+        );
+        let create_cat = def.execute.expect("token creation execute");
+        let copy_each = create_cat.sub_ability.expect("city blessing copy clause");
+        assert!(matches!(
+            copy_each.condition,
+            Some(AbilityCondition::HasCityBlessing)
+        ));
+        assert!(copy_each.repeat_for.is_none());
+        match &*copy_each.effect {
+            Effect::CopyTokenOf {
+                target,
+                source_filter: Some(TargetFilter::Typed(filter)),
+                ..
+            } => {
+                assert_eq!(*target, TargetFilter::None);
+                assert_eq!(filter.controller, Some(ControllerRef::You));
+                assert!(filter
+                    .properties
+                    .iter()
+                    .any(|prop| matches!(prop, FilterProp::Token)));
+                assert!(filter
+                    .properties
+                    .iter()
+                    .any(|prop| matches!(prop, FilterProp::EnteredThisTurn)));
+            }
+            other => panic!("expected source-filtered CopyTokenOf, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn extract_if_strips_condition_from_effect() {
         let (cleaned, cond) =
             extract_if_condition("draw a card if you've gained 3 or more life this turn.");
@@ -7020,7 +7397,7 @@ mod tests {
             "sub_ability.condition must be QuantityCheck ≥ 5, got {:?}",
             sub.condition,
         );
-        // Sub-ability effect is LoseLife targeting TriggeringPlayer with HalfRounded amount.
+        // Sub-ability effect is LoseLife targeting TriggeringPlayer with DivideRounded amount.
         match &*sub.effect {
             Effect::LoseLife { amount, target } => {
                 assert_eq!(
@@ -7031,16 +7408,213 @@ mod tests {
                 assert!(
                     matches!(
                         amount,
-                        QuantityExpr::HalfRounded {
+                        QuantityExpr::DivideRounded {
                             rounding: RoundingMode::Up,
                             ..
                         }
                     ),
-                    "amount must be HalfRounded(Up), got {amount:?}",
+                    "amount must be DivideRounded(Up), got {amount:?}",
                 );
             }
             other => panic!("sub_ability effect must be LoseLife, got {other:?}"),
         }
+    }
+
+    /// CR 208.1 + CR 107.3e + CR 603.4: Betor, Kin to All — three-tier end-step
+    /// trigger where each tier is gated on a "creatures you control have total
+    /// toughness N or greater" predicate. Before this regression test was
+    /// added, all three gates dropped silently because no parser path
+    /// recognized `Aggregate{Sum, Toughness, creatures-you-control}` in
+    /// condition position; the trigger fired unconditionally and the third
+    /// clause's "each opponent" subject collapsed onto the controller (so
+    /// "each opponent loses half their life, rounded up" hit the source
+    /// player instead).
+    ///
+    /// Asserted shape:
+    /// - Trigger-level intervening-if at `total toughness ≥ 10` (CR 603.4 —
+    ///   checked at trigger creation AND at resolution per the published
+    ///   ruling).
+    /// - First effect (Draw) is unconditional under the trigger gate.
+    /// - Second sub_ability (UntapAll) carries `QuantityCheck ≥ 20`.
+    /// - Third sub_ability (LoseLife) carries `QuantityCheck ≥ 40` and its
+    ///   target is NOT the controller — it must address each opponent.
+    #[test]
+    fn parse_betor_kin_to_all_trigger_structure() {
+        use crate::types::ability::{
+            AbilityCondition, AggregateFunction, Effect, ObjectProperty, RoundingMode,
+        };
+
+        let def = parse_trigger_line(
+            "At the beginning of your end step, if creatures you control have total toughness 10 or greater, draw a card. Then if creatures you control have total toughness 20 or greater, untap each creature you control. Then if creatures you control have total toughness 40 or greater, each opponent loses half their life, rounded up.",
+            "Betor, Kin to All",
+        );
+
+        // -- Trigger-level: intervening-if `Aggregate{Sum, Toughness, creatures-you-control} >= 10`.
+        let trigger_cond = def
+            .condition
+            .as_ref()
+            .expect("trigger.condition must be Some (intervening-if hoisted)");
+        match trigger_cond {
+            TriggerCondition::QuantityComparison {
+                lhs,
+                comparator,
+                rhs,
+            } => {
+                assert_eq!(*comparator, Comparator::GE);
+                assert_eq!(*rhs, QuantityExpr::Fixed { value: 10 });
+                match lhs {
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::Aggregate {
+                                function,
+                                property,
+                                filter,
+                            },
+                    } => {
+                        assert_eq!(*function, AggregateFunction::Sum);
+                        assert_eq!(*property, ObjectProperty::Toughness);
+                        match filter {
+                            TargetFilter::Typed(t) => {
+                                assert_eq!(t.controller, Some(ControllerRef::You));
+                                assert!(t.type_filters.contains(&TypeFilter::Creature));
+                            }
+                            other => panic!("expected Typed(Creature, you) filter, got {other:?}"),
+                        }
+                    }
+                    other => panic!("trigger lhs must be Aggregate Ref, got {other:?}"),
+                }
+            }
+            other => panic!("trigger.condition must be QuantityComparison, got {other:?}"),
+        }
+
+        // -- Walk the sub_ability chain.
+        let execute = def.execute.as_ref().expect("execute must be Some");
+
+        // First effect: Draw (no per-clause condition; gate is the trigger-level intervening-if).
+        assert!(
+            matches!(*execute.effect, Effect::Draw { .. }),
+            "first effect must be Draw, got {:?}",
+            execute.effect,
+        );
+
+        // Second tier: UntapAll under "Then if ... ≥ 20".
+        let untap_sub = execute
+            .sub_ability
+            .as_deref()
+            .expect("first sub_ability (UntapAll) must be Some");
+        match &untap_sub.condition {
+            Some(AbilityCondition::QuantityCheck {
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 20 },
+                lhs,
+            }) => {
+                assert!(
+                    matches!(
+                        lhs,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::Aggregate {
+                                function: AggregateFunction::Sum,
+                                property: ObjectProperty::Toughness,
+                                ..
+                            },
+                        }
+                    ),
+                    "untap sub_ability lhs must be Aggregate Sum/Toughness, got {lhs:?}",
+                );
+            }
+            other => panic!(
+                "untap sub_ability.condition must be QuantityCheck >= 20 over Aggregate Sum/Toughness, got {other:?}",
+            ),
+        }
+        assert!(
+            matches!(
+                *untap_sub.effect,
+                Effect::UntapAll { .. } | Effect::Untap { .. }
+            ),
+            "second tier effect must be UntapAll/Untap, got {:?}",
+            untap_sub.effect,
+        );
+
+        // Third tier: LoseLife under "Then if ... ≥ 40", targeting each opponent.
+        let lose_sub = untap_sub
+            .sub_ability
+            .as_deref()
+            .expect("second sub_ability (LoseLife) must be Some");
+        match &lose_sub.condition {
+            Some(AbilityCondition::QuantityCheck {
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 40 },
+                lhs,
+            }) => {
+                assert!(
+                    matches!(
+                        lhs,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::Aggregate {
+                                function: AggregateFunction::Sum,
+                                property: ObjectProperty::Toughness,
+                                ..
+                            },
+                        }
+                    ),
+                    "lose-life sub_ability lhs must be Aggregate Sum/Toughness, got {lhs:?}",
+                );
+            }
+            other => panic!(
+                "lose-life sub_ability.condition must be QuantityCheck >= 40 over Aggregate Sum/Toughness, got {other:?}",
+            ),
+        }
+        match &*lose_sub.effect {
+            Effect::LoseLife { amount, target } => {
+                // CR 107.1a: amount must be DivideRounded by 2, rounding Up
+                // ("half ... rounded up"). The inner ref resolves per the
+                // active player binding (CR 608.2c) when the outer
+                // player_scope iterates over each opponent.
+                assert!(
+                    matches!(
+                        amount,
+                        QuantityExpr::DivideRounded {
+                            divisor: 2,
+                            rounding: RoundingMode::Up,
+                            ..
+                        }
+                    ),
+                    "amount must be DivideRounded(2, Up), got {amount:?}",
+                );
+
+                // Critical regression: the third clause's "each opponent" subject
+                // must NOT collapse onto the controller. The bug before the fix
+                // produced a degenerate empty Typed filter (`type_filters: []`,
+                // `controller: null`, `properties: []`) that the runtime resolved
+                // to the controller, draining the source player's own life. Any
+                // such empty filter must be rejected outright.
+                if let Some(TargetFilter::Typed(t)) = target {
+                    let degenerate_empty = t.type_filters.is_empty()
+                        && t.controller.is_none()
+                        && t.properties.is_empty();
+                    assert!(
+                        !degenerate_empty,
+                        "regression: LoseLife.target collapsed to the bug-shape degenerate Typed filter (would drain the controller): {t:?}",
+                    );
+                }
+            }
+            other => {
+                panic!("third tier effect must be LoseLife addressing each opponent, got {other:?}",)
+            }
+        }
+
+        // The each-opponent dispatch lives on the sub_ability's `player_scope`,
+        // not on `LoseLife.target`. The parser's `strip_each_player_subject`
+        // strips the "each opponent " prefix and lifts `PlayerFilter::Opponent`
+        // onto the surrounding spell-execute wrapper; the runtime iterates the
+        // life-loss across opponents (CR 608.2c). This is the same encoding
+        // emitted today by Night Market Lookout's "each opponent loses 1 life"
+        // trigger.
+        assert_eq!(
+            lose_sub.player_scope,
+            Some(PlayerFilter::Opponent),
+            "third tier sub_ability.player_scope must be Some(Opponent) — each-opponent dispatch must be lifted to the wrapper, not collapsed onto the controller",
+        );
     }
 
     /// CR 608.2k: "that player discards a card" in a trigger effect must target
@@ -7542,6 +8116,36 @@ mod tests {
     }
 
     #[test]
+    fn trigger_mana_cannons_uses_triggering_spell_color_count() {
+        let def = parse_trigger_line(
+            "Whenever you cast a multicolored spell, this enchantment deals X damage to any target, where X is the number of colors that spell is.",
+            "Mana Cannons",
+        );
+        assert_eq!(def.mode, TriggerMode::SpellCast);
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Card).properties(vec![FilterProp::Multicolored])
+            ))
+        );
+        let execute = def.execute.as_deref().expect("trigger should execute");
+        match execute.effect.as_ref() {
+            Effect::DealDamage { amount, target, .. } => {
+                assert_eq!(*target, TargetFilter::Any);
+                assert_eq!(
+                    *amount,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectColorCount {
+                            scope: ObjectScope::EventSource
+                        }
+                    }
+                );
+            }
+            other => panic!("expected DealDamage, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn trigger_you_cast_aura_spell() {
         let def = parse_trigger_line(
             "Whenever you cast an Aura spell, you may draw a card.",
@@ -8002,7 +8606,10 @@ mod tests {
             def.condition,
             Some(TriggerCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::SpellsCastThisTurn { filter: None },
+                    qty: QuantityRef::SpellsCastThisTurn {
+                        scope: crate::types::ability::CountScope::Controller,
+                        filter: None
+                    },
                 },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 2 },
@@ -8201,6 +8808,26 @@ mod tests {
             Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Land)))
         );
         assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    }
+
+    #[test]
+    fn trigger_forbidden_orchard_targets_opponent_token_owner() {
+        let def = parse_trigger_line(
+            "Whenever you tap Forbidden Orchard for mana, target opponent creates a 1/1 colorless Spirit creature token.",
+            "Forbidden Orchard",
+        );
+        assert_eq!(def.mode, TriggerMode::TapsForMana);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+
+        let execute = def.execute.as_deref().expect("trigger should execute");
+        let Effect::Token { owner, .. } = execute.effect.as_ref() else {
+            panic!("expected Token effect, got {:?}", execute.effect);
+        };
+        assert_eq!(
+            *owner,
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+        );
     }
 
     #[test]
@@ -8577,7 +9204,7 @@ mod tests {
         let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
         assert_eq!(unless_pay.payer, TargetFilter::Controller);
         assert!(
-            matches!(unless_pay.cost, UnlessCost::DiscardCard),
+            matches!(unless_pay.cost, UnlessCost::DiscardCard { filter: None }),
             "cost should be DiscardCard, got {:?}",
             unless_pay.cost
         );
@@ -8636,20 +9263,83 @@ mod tests {
     }
 
     #[test]
-    fn trigger_unless_you_discard_typed_does_not_match() {
-        // Drekavac — "unless you discard a noncreature card". UnlessCost::DiscardCard
-        // doesn't carry filter info, so we deliberately fall through (preserves
-        // rules-correctness; player-chosen any-card discard would violate the
-        // "noncreature card" restriction). Coverage waits, architecture wins.
+    fn trigger_unless_they_pay_life_binds_phase_that_player_to_scoped_player() {
+        // Blood Clock — phase-scoped "that player" is the active player whose
+        // upkeep began, not an event player from a spell/action trigger.
+        let def = parse_trigger_line(
+            "At the beginning of each player's upkeep, that player returns a permanent they control to its owner's hand unless they pay 2 life.",
+            "Blood Clock",
+        );
+
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        assert_eq!(unless_pay.payer, TargetFilter::Controller);
+        assert!(
+            matches!(unless_pay.cost, UnlessCost::PayLife { amount: 2 }),
+            "cost should be PayLife {{ amount: 2 }}, got {:?}",
+            unless_pay.cost
+        );
+        let execute = def.execute.as_ref().expect("should have execute");
+        match execute.effect.as_ref() {
+            Effect::Bounce { target, .. } => match target {
+                TargetFilter::Typed(filter) => {
+                    assert_eq!(filter.controller, Some(ControllerRef::ScopedPlayer));
+                    assert!(
+                        filter.type_filters.contains(&TypeFilter::Permanent),
+                        "filter should include Permanent, got {:?}",
+                        filter.type_filters
+                    );
+                }
+                other => panic!("expected typed bounce filter, got {other:?}"),
+            },
+            other => panic!("expected Bounce effect, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn trigger_unless_they_pay_life_keeps_event_that_player_as_triggering_player() {
+        let def = parse_trigger_line(
+            "Whenever an opponent casts a spell, that player loses 5 life unless they pay 2 life.",
+            "Test Card",
+        );
+
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        assert_eq!(unless_pay.payer, TargetFilter::TriggeringPlayer);
+        assert!(
+            matches!(unless_pay.cost, UnlessCost::PayLife { amount: 2 }),
+            "cost should be PayLife {{ amount: 2 }}, got {:?}",
+            unless_pay.cost
+        );
+        let execute = def.execute.as_ref().expect("should have execute");
+        match execute.effect.as_ref() {
+            Effect::LoseLife { target, amount } => {
+                assert_eq!(*target, Some(TargetFilter::TriggeringPlayer));
+                assert_eq!(*amount, QuantityExpr::Fixed { value: 5 });
+            }
+            other => panic!("expected LoseLife effect, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn trigger_unless_you_discard_typed_preserves_filter() {
+        // Drekavac — "unless you discard a noncreature card".
         let def = parse_trigger_line(
             "When ~ enters, sacrifice it unless you discard a noncreature card.",
             "Drekavac",
         );
-        assert!(
-            def.unless_pay.is_none(),
-            "typed discard should fall through (UnlessCost::DiscardCard has no filter), got {:?}",
-            def.unless_pay
-        );
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        match &unless_pay.cost {
+            UnlessCost::DiscardCard {
+                filter: Some(TargetFilter::Typed(typed)),
+            } => assert!(
+                typed
+                    .type_filters
+                    .iter()
+                    .any(|t| matches!(t, TypeFilter::Non(inner) if matches!(**inner, TypeFilter::Creature))),
+                "filter should include noncreature, got {:?}",
+                typed.type_filters
+            ),
+            other => panic!("cost should be filtered DiscardCard, got {:?}", other),
+        }
     }
 
     #[test]
@@ -8867,6 +9557,113 @@ mod tests {
         assert!(
             def.condition.is_none(),
             "no intervening condition should be set when unless-pay handled it"
+        );
+    }
+
+    #[test]
+    fn trigger_unless_they_pay_binds_that_player_to_triggering_player() {
+        let def = parse_trigger_line(
+            "Whenever an opponent casts a creature spell, that player loses 2 life unless they pay {2}.",
+            "Isolation Cell",
+        );
+
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        assert_eq!(unless_pay.payer, TargetFilter::TriggeringPlayer);
+        assert!(
+            matches!(unless_pay.cost, UnlessCost::Fixed { .. }),
+            "cost should be Fixed mana, got {:?}",
+            unless_pay.cost
+        );
+    }
+
+    #[test]
+    fn trigger_unless_they_pay_binds_to_that_player_damage_target() {
+        let def = parse_trigger_line(
+            "Whenever an opponent casts a creature spell, this enchantment deals 2 damage to that player unless they pay {2}.",
+            "Soul Barrier",
+        );
+
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        assert_eq!(unless_pay.payer, TargetFilter::TriggeringPlayer);
+        assert!(
+            matches!(unless_pay.cost, UnlessCost::Fixed { .. }),
+            "cost should be Fixed mana, got {:?}",
+            unless_pay.cost
+        );
+    }
+
+    #[test]
+    fn trigger_unless_they_pay_binds_each_opponent_to_scoped_controller() {
+        let def = parse_trigger_line(
+            "When this creature enters, each opponent sacrifices a permanent of their choice unless they pay {2}.",
+            "Rishadan Footpad",
+        );
+
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        assert_eq!(unless_pay.payer, TargetFilter::Controller);
+        let execute = def.execute.as_ref().expect("should have execute");
+        assert_eq!(execute.player_scope, Some(PlayerFilter::Opponent));
+    }
+
+    #[test]
+    fn trigger_unless_they_pay_binds_creature_controller_to_parent_target_controller() {
+        let def = parse_trigger_line(
+            "Whenever this creature deals combat damage to a creature, that creature's controller loses 2 life unless they pay {2}.",
+            "Death Charmer",
+        );
+
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        assert_eq!(unless_pay.payer, TargetFilter::ParentTargetController);
+    }
+
+    #[test]
+    fn trigger_unless_they_discard_binds_that_player_to_triggering_player() {
+        let def = parse_trigger_line(
+            "Whenever an opponent casts a spell, that player loses 5 life unless they discard a card.",
+            "Painful Quandary",
+        );
+
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        assert_eq!(unless_pay.payer, TargetFilter::TriggeringPlayer);
+        assert!(
+            matches!(unless_pay.cost, UnlessCost::DiscardCard { filter: None }),
+            "cost should be DiscardCard, got {:?}",
+            unless_pay.cost
+        );
+    }
+
+    #[test]
+    fn trigger_unless_they_discard_multi_sentence_branch_not_terminal_cost() {
+        let def = parse_trigger_line(
+            "At the beginning of your upkeep, each opponent loses 3 life unless they discard a card. If you're the monarch, instead each opponent loses 6 life unless they discard two cards.",
+            "Court of Ambition",
+        );
+
+        assert!(
+            def.unless_pay.is_none(),
+            "multi-sentence branch should not be stripped as one terminal unless cost, got {:?}",
+            def.unless_pay
+        );
+        let execute = def.execute.as_ref().expect("should have execute");
+        assert!(
+            execute.sub_ability.is_some(),
+            "monarch branch should remain available for downstream parsing"
+        );
+    }
+
+    #[test]
+    fn trigger_unrecognized_unless_payment_preserves_clause_as_gap() {
+        let def = parse_trigger_line(
+            "When this creature enters, draw a card unless the active player compliments your hat.",
+            "Test Card",
+        );
+
+        assert!(def.unless_pay.is_none());
+        let execute = def.execute.as_ref().expect("should have execute");
+        assert!(
+            matches!(*execute.effect, Effect::Unimplemented { .. }),
+            "unrecognized unless clause must remain visible as Unimplemented, got {:?}",
+            execute.effect
         );
     }
 
@@ -9226,6 +10023,67 @@ mod tests {
     }
 
     #[test]
+    fn trigger_may_have_self_become_named_equipment_if_you_do() {
+        let def = parse_trigger_line(
+            "Whenever a legendary creature you control enters, you may have The Irencrag become a legendary Equipment artifact named Everflame, Heroes' Legacy. If you do, it gains equip {3} and \"Equipped creature gets +3/+3\" and loses all other abilities.",
+            "The Irencrag",
+        );
+
+        assert!(def.optional);
+        let execute = def.execute.as_ref().expect("trigger execute ability");
+        assert!(execute.optional);
+
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = execute.effect.as_ref()
+        else {
+            panic!("expected GenericEffect, got {:?}", execute.effect);
+        };
+        let modifications = &static_abilities[0].modifications;
+        assert!(
+            modifications.iter().any(|modification| matches!(
+                modification,
+                ContinuousModification::SetName { name } if name == "Everflame, Heroes' Legacy"
+            )),
+            "expected SetName in {modifications:?}",
+        );
+        assert!(
+            modifications.iter().any(|modification| matches!(
+                modification,
+                ContinuousModification::AddSubtype { subtype } if subtype == "Equipment"
+            )),
+            "expected AddSubtype(Equipment) in {modifications:?}",
+        );
+
+        let sub_ability = execute.sub_ability.as_ref().expect("If you do sub-ability");
+        assert!(matches!(
+            sub_ability.condition,
+            Some(AbilityCondition::IfYouDo)
+        ));
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = sub_ability.effect.as_ref()
+        else {
+            panic!(
+                "expected GenericEffect sub-ability, got {:?}",
+                sub_ability.effect
+            );
+        };
+        assert!(matches!(
+            static_abilities[0].affected,
+            Some(TargetFilter::SelfRef)
+        ));
+        let sub_modifications = &static_abilities[0].modifications;
+        assert!(
+            sub_modifications.iter().any(|modification| matches!(
+                modification,
+                ContinuousModification::RemoveAllAbilities
+            )),
+            "expected RemoveAllAbilities in {sub_modifications:?}",
+        );
+    }
+
+    #[test]
     fn trigger_another_human_you_control_enters() {
         let def = parse_trigger_line(
             "Whenever another Human you control enters, draw a card.",
@@ -9291,6 +10149,31 @@ mod tests {
     }
 
     #[test]
+    fn hope_estheim_end_step_mill_keeps_you_quantity_controller_scoped() {
+        let def = parse_trigger_line(
+            "At the beginning of your end step, each opponent mills X cards, where X is the amount of life you gained this turn.",
+            "Hope Estheim",
+        );
+        let execute = def.execute.as_ref().expect("trigger execute ability");
+
+        assert_eq!(execute.player_scope, Some(PlayerFilter::Opponent));
+        match &*execute.effect {
+            Effect::Mill { target, count, .. } => {
+                assert_eq!(*target, TargetFilter::Controller);
+                assert!(matches!(
+                    count,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::LifeGainedThisTurn {
+                            player: PlayerScope::Controller
+                        }
+                    }
+                ));
+            }
+            other => panic!("expected Mill effect, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn phase_trigger_combat_on_your_turn() {
         let def = parse_trigger_line(
             "At the beginning of combat on your turn, target creature gets +1/+1 until end of turn.",
@@ -9310,6 +10193,51 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::Phase);
         assert_eq!(def.phase, Some(Phase::Upkeep));
         assert_eq!(def.constraint, None);
+    }
+
+    #[test]
+    fn phase_trigger_that_player_sacrifices_uses_scoped_player_not_target_player() {
+        let def = parse_trigger_line(
+            "At the beginning of each player's upkeep, that player sacrifices a non-Elf creature of their choice.",
+            "Ruthless Winnower",
+        );
+
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::Upkeep));
+        assert_eq!(def.valid_target, None);
+        match def.execute.as_ref().map(|ability| ability.effect.as_ref()) {
+            Some(Effect::Sacrifice { target, .. }) => match target {
+                TargetFilter::Typed(filter) => {
+                    assert_eq!(filter.controller, Some(ControllerRef::ScopedPlayer));
+                }
+                other => panic!("expected typed sacrifice filter, got {other:?}"),
+            },
+            other => panic!("expected Sacrifice effect, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn phase_trigger_enchanted_players_first_upkeep() {
+        let def = parse_trigger_line(
+            "At the beginning of enchanted player's first upkeep each turn, that player gets an additional upkeep step after this step.",
+            "Paradox Haze",
+        );
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::Upkeep));
+        assert_eq!(def.valid_target, Some(TargetFilter::AttachedTo));
+        assert_eq!(
+            def.constraint,
+            Some(TriggerConstraint::MaxTimesPerTurn { max: 1 })
+        );
+        assert!(matches!(
+            def.execute.as_ref().map(|ability| ability.effect.as_ref()),
+            Some(Effect::AdditionalPhase {
+                target: TargetFilter::TriggeringPlayer,
+                phase: Phase::Upkeep,
+                after: Phase::Upkeep,
+                followed_by,
+            }) if followed_by.is_empty()
+        ));
     }
 
     #[test]
@@ -9759,6 +10687,67 @@ mod tests {
     }
 
     #[test]
+    fn grave_pact_scopes_sacrifice_to_other_players() {
+        let def = parse_trigger_line(
+            "Whenever a creature you control dies, each other player sacrifices a creature of their choice.",
+            "Grave Pact",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.origin, Some(Zone::Battlefield));
+        assert_eq!(def.destination, Some(Zone::Graveyard));
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You)
+            ))
+        );
+
+        let execute = def.execute.as_deref().expect("execute ability");
+        match &*execute.effect {
+            Effect::Sacrifice { target, count } => {
+                assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+                assert_eq!(
+                    *target,
+                    TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::Opponent)
+                    )
+                );
+            }
+            other => panic!("expected Sacrifice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn balefire_dragon_damages_creatures_controlled_by_damaged_player() {
+        let def = parse_trigger_line(
+            "Whenever this creature deals combat damage to a player, it deals that much damage to each creature controlled by that player.",
+            "Balefire Dragon",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageDone);
+        assert_eq!(def.damage_kind, DamageKindFilter::CombatOnly);
+        assert_eq!(def.valid_target, Some(TargetFilter::Player));
+
+        let execute = def.execute.as_deref().expect("execute ability");
+        match &*execute.effect {
+            Effect::DamageAll { amount, target, .. } => {
+                assert_eq!(
+                    *amount,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount,
+                    }
+                );
+                assert_eq!(
+                    *target,
+                    TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::TargetPlayer)
+                    )
+                );
+            }
+            other => panic!("expected DamageAll, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn ninjutsu_activation_trigger() {
         // CR 702.49a: "Whenever you activate a ninjutsu ability" → NinjutsuActivated
         let def = parse_trigger_line(
@@ -10099,19 +11088,16 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::ChangesZone);
         assert_eq!(def.destination, Some(Zone::Graveyard));
-        // Should have Non(Subtype("Token")) in the type_filters
+        // CR 111.1: "nontoken" is token identity, not a fake subtype.
         if let Some(TargetFilter::Typed(tf)) = &def.valid_card {
             assert!(
-                tf.type_filters.iter().any(|t| matches!(
-                    t,
-                    TypeFilter::Non(inner) if matches!(&**inner, TypeFilter::Subtype(s) if s == "Token")
-                )),
-                "Expected Non(Subtype(Token)) in type_filters, got {:?}",
-                tf.type_filters
+                tf.properties.contains(&FilterProp::NonToken),
+                "Expected NonToken in properties, got {:?}",
+                tf.properties
             );
         } else {
             panic!(
-                "Expected Typed filter with Non(Token), got {:?}",
+                "Expected Typed filter with NonToken, got {:?}",
                 def.valid_card
             );
         }
@@ -10679,6 +11665,67 @@ mod tests {
             }
             other => panic!("Expected PutCounter in else_ability, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn trigger_copy_token_suffix_condition_attaches_otherwise() {
+        let (effect_without_if, trigger_condition) = extract_if_condition(
+            "create a tapped token that's a copy of ~ if seven or more land cards are in your graveyard. otherwise, create a tapped 1/1 black insect creature token with flying.",
+        );
+        assert!(
+            trigger_condition.is_none(),
+            "suffix condition before otherwise must stay in effect chain, got {trigger_condition:?}"
+        );
+        assert!(
+            crate::parser::oracle_nom::primitives::scan_contains(
+                &effect_without_if,
+                "if seven or more land cards are in your graveyard"
+            ),
+            "effect text should preserve suffix condition, got {effect_without_if:?}"
+        );
+        let mut effect_ctx = ParseContext {
+            subject: Some(TargetFilter::SelfRef),
+            card_name: Some("Scouring Swarm".to_string()),
+            ..Default::default()
+        };
+        let chain_ir =
+            parse_effect_chain_ir(&effect_without_if, AbilityKind::Spell, &mut effect_ctx);
+        let chain = lower_effect_chain_ir(&chain_ir);
+        assert!(
+            chain.condition.is_some(),
+            "effect chain should carry suffix condition, got {chain:?}"
+        );
+
+        let def = parse_trigger_line(
+            "Whenever you sacrifice a land, create a tapped token that's a copy of this creature if seven or more land cards are in your graveyard. Otherwise, create a tapped 1/1 black Insect creature token with flying.",
+            "Scouring Swarm",
+        );
+        let exec = def.execute.as_ref().expect("should have execute");
+        assert!(
+            matches!(
+                &*exec.effect,
+                Effect::CopyTokenOf {
+                    tapped: true,
+                    enters_attacking: false,
+                    ..
+                }
+            ),
+            "expected tapped CopyTokenOf, got {:?}",
+            exec.effect
+        );
+        assert!(
+            exec.condition.is_some(),
+            "copy branch should carry suffix condition"
+        );
+        let else_ab = exec
+            .else_ability
+            .as_ref()
+            .expect("should have else_ability");
+        assert!(
+            matches!(&*else_ab.effect, Effect::Token { tapped: true, .. }),
+            "expected tapped token in else_ability, got {:?}",
+            else_ab.effect
+        );
     }
 
     #[test]
@@ -11510,6 +12557,26 @@ mod tests {
     }
 
     #[test]
+    fn extract_if_it_was_enchanted_or_equipped_as_zone_change_lookback() {
+        let (cleaned, cond) =
+            extract_if_condition("if it was enchanted or equipped, return it to its owner's hand");
+        assert_eq!(cleaned, "return it to its owner's hand");
+        assert_eq!(
+            cond.unwrap(),
+            TriggerCondition::ZoneChangeObjectMatchesFilter {
+                origin: Some(Zone::Battlefield),
+                destination: Zone::Graveyard,
+                filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                    FilterProp::HasAnyAttachmentOf {
+                        kinds: vec![AttachmentKind::Aura, AttachmentKind::Equipment],
+                        controller: None,
+                    },
+                ])),
+            }
+        );
+    }
+
+    #[test]
     fn extract_had_counters_untyped() {
         let (cleaned, cond) = extract_if_condition("draw a card if it had counters on it");
         assert_eq!(cleaned, "draw a card");
@@ -11792,7 +12859,8 @@ mod tests {
     fn trigger_subject_extracts_opponent_as_player() {
         // CR 608.2k: "an opponent" should be recognized as a player-type subject,
         // not fall through to parse_type_phrase returning Any.
-        let (filter, rest) = parse_single_subject("an opponent draws a card");
+        let (filter, rest) =
+            parse_single_subject("an opponent draws a card", &mut ParseContext::default());
         assert!(
             matches!(
                 &filter,
@@ -11809,7 +12877,8 @@ mod tests {
 
     #[test]
     fn trigger_subject_extracts_player() {
-        let (filter, rest) = parse_single_subject("a player casts a spell");
+        let (filter, rest) =
+            parse_single_subject("a player casts a spell", &mut ParseContext::default());
         assert_eq!(filter, TargetFilter::Player);
         assert!(
             rest.starts_with("casts"),
@@ -12332,7 +13401,7 @@ mod tests {
     /// and must put X +1/+1 counters on himself. Verify the pronoun "him"
     /// routes through `resolve_it_pronoun` → `SelfRef` (not `ParentTarget`),
     /// and that `Variable{name:"X"}` is rewritten to `CostXPaid` on both the
-    /// primary PutCounter count and the chained Draw's `HalfRounded` inner.
+    /// primary PutCounter count and the chained Draw's `DivideRounded` inner.
     #[test]
     fn wan_shi_tong_etb_cost_x_and_self_pronoun() {
         let def = parse_trigger_line(
@@ -12365,16 +13434,16 @@ mod tests {
         let sub = execute.sub_ability.as_ref().expect("sub ability");
         match sub.effect.as_ref() {
             Effect::Draw { count, .. } => match count {
-                QuantityExpr::HalfRounded { inner, .. } => {
+                QuantityExpr::DivideRounded { inner, .. } => {
                     assert_eq!(
                         **inner,
                         QuantityExpr::Ref {
                             qty: QuantityRef::CostXPaid
                         },
-                        "HalfRounded inner should be CostXPaid, got {inner:?}"
+                        "DivideRounded inner should be CostXPaid, got {inner:?}"
                     );
                 }
-                other => panic!("expected HalfRounded, got {other:?}"),
+                other => panic!("expected DivideRounded, got {other:?}"),
             },
             other => panic!("expected Draw, got {other:?}"),
         }
@@ -12463,6 +13532,7 @@ mod tests {
             "At the beginning of combat on your turn, ~ becomes a copy of up to one other target creature you control, except her name is ~ and she has this ability. Then put a +1/+1 counter on her.",
             "Irma, Part-Time Mutant",
             Some(0),
+            &mut ParseContext::default(),
         );
         // Phase + constraint: BoC on your turn.
         assert_eq!(def.mode, TriggerMode::Phase);
@@ -12545,6 +13615,7 @@ mod tests {
             "At the beginning of your upkeep, ~ becomes a copy of target creature you control, except his name is ~ and he has this ability.",
             "Test Mutant",
             Some(0),
+            &mut ParseContext::default(),
         );
         let execute = def.execute.as_deref().unwrap();
         match execute.effect.as_ref() {
@@ -12580,6 +13651,7 @@ mod tests {
             "At the beginning of your upkeep, ~ becomes a copy of another target creature, except it has this ability.",
             "Test Cloner",
             Some(0),
+            &mut ParseContext::default(),
         );
         let execute = def.execute.as_deref().unwrap();
         match execute.effect.as_ref() {
@@ -12625,5 +13697,86 @@ mod tests {
             }
             other => panic!("expected BecomeCopy, got {other:?}"),
         }
+    }
+}
+
+/// Snapshot tests locking current trigger parser output before the IR split.
+/// These verify behavioral parity: identical snapshots before and after the
+/// `parse_trigger_line_with_index_ir` / `lower_trigger_ir` refactor.
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+
+    fn parse_trigger_line(text: &str, card_name: &str) -> TriggerDefinition {
+        parse_trigger_line_with_index(text, card_name, None, &mut ParseContext::default())
+    }
+
+    #[test]
+    fn trigger_simple_etb_self() {
+        let def = parse_trigger_line(
+            "When Test Card enters the battlefield, draw a card.",
+            "Test Card",
+        );
+        insta::assert_json_snapshot!(def);
+    }
+
+    #[test]
+    fn trigger_conditional_upkeep() {
+        let def = parse_trigger_line(
+            "At the beginning of your upkeep, if you control no creatures, sacrifice Test Card.",
+            "Test Card",
+        );
+        insta::assert_json_snapshot!(def);
+    }
+
+    #[test]
+    fn trigger_compound_and_when_etb_half() {
+        let defs = parse_trigger_lines_at_index(
+            "When Test Card enters the battlefield and whenever a creature dies, draw a card.",
+            "Test Card",
+            None,
+            &mut ParseContext::default(),
+        );
+        assert_eq!(defs.len(), 2, "compound trigger should split into 2");
+        insta::assert_json_snapshot!(defs[0]);
+    }
+
+    #[test]
+    fn trigger_compound_and_when_dies_half() {
+        let defs = parse_trigger_lines_at_index(
+            "When Test Card enters the battlefield and whenever a creature dies, draw a card.",
+            "Test Card",
+            None,
+            &mut ParseContext::default(),
+        );
+        assert_eq!(defs.len(), 2, "compound trigger should split into 2");
+        insta::assert_json_snapshot!(defs[1]);
+    }
+
+    #[test]
+    fn trigger_optional_you_may() {
+        let def = parse_trigger_line(
+            "When Test Card enters the battlefield, you may draw a card.",
+            "Test Card",
+        );
+        insta::assert_json_snapshot!(def);
+    }
+
+    #[test]
+    fn trigger_once_per_turn() {
+        let def = parse_trigger_line(
+            "Whenever a creature enters the battlefield under your control for the first time each turn, draw a card.",
+            "Test Card",
+        );
+        insta::assert_json_snapshot!(def);
+    }
+
+    #[test]
+    fn trigger_unless_pay() {
+        let def = parse_trigger_line(
+            "At the beginning of your upkeep, sacrifice Test Card unless you pay {2}.",
+            "Test Card",
+        );
+        insta::assert_json_snapshot!(def);
     }
 }

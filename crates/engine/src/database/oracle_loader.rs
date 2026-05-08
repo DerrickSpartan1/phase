@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::path::{Path, PathBuf};
 
-use crate::database::card_db::CardDatabase;
+use crate::database::card_db::{build_name_alias_index, CardDatabase};
 use crate::database::legality::normalize_legalities;
 use crate::database::mtgjson::load_atomic_cards;
 use crate::database::synthesis::{
@@ -82,6 +82,7 @@ pub fn load_from_mtgjson(mtgjson_path: &Path) -> Result<CardDatabase, Box<dyn Er
 
     Ok(CardDatabase {
         cards,
+        name_alias_index: build_name_alias_index(face_index.keys()),
         face_index,
         oracle_id_index: HashMap::new(),
         layout_index: HashMap::new(),

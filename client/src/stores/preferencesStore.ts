@@ -30,7 +30,20 @@ export const DEFAULT_AI_COVERAGE_FLOOR = 90;
  *  filter the *pool* of Random picks, a concept that doesn't vary per seat. */
 export interface AiSeatPref {
   difficulty: AIDifficulty;
-  deckName: AiDeckSelection;
+  deckId: AiDeckSelection;
+}
+
+export type ArtChainEntry =
+  | { type: "set"; setCode: string; label: string }
+  | { type: "newest" }
+  | { type: "oldest" }
+  | { type: "prefer_borderless" }
+  | { type: "prefer_extended" };
+
+export interface CardArtOverride {
+  scryfallId: string;
+  setCode: string;
+  collectorNumber: string;
 }
 
 export type CardSizePreference = "small" | "medium" | "large";
@@ -46,7 +59,7 @@ export type TapRotation = "mtga" | "classic";
 export type BoardBackground = "auto-wubrg" | "random" | "none" | "custom" | (string & {});
 
 function defaultAiSeat(): AiSeatPref {
-  return { difficulty: DEFAULT_AI_DIFFICULTY, deckName: AI_DECK_RANDOM };
+  return { difficulty: DEFAULT_AI_DIFFICULTY, deckId: AI_DECK_RANDOM };
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -80,7 +93,7 @@ function buildDefaultPreferences(): PreferencesState {
   return {
     cardSize: "medium",
     hudLayout: "inline",
-    followActiveOpponent: false,
+    followActiveOpponent: true,
     logDefaultState: "closed",
     boardBackground: "auto-wubrg",
     customBackgroundUrl: "",
@@ -105,6 +118,9 @@ function buildDefaultPreferences(): PreferencesState {
     lastFormat: null,
     lastMatchType: "Bo1",
     lastPlayerCount: 2,
+    experimentalFeatures: false,
+    artChain: [] as ArtChainEntry[],
+    artOverrides: {} as Record<string, CardArtOverride>,
   };
 }
 
@@ -142,6 +158,9 @@ interface PreferencesState {
   lastFormat: GameFormat | null;
   lastMatchType: MatchType;
   lastPlayerCount: number;
+  experimentalFeatures: boolean;
+  artChain: ArtChainEntry[];
+  artOverrides: Record<string, CardArtOverride>;
 }
 
 interface PreferencesActions {
@@ -174,7 +193,7 @@ interface PreferencesActions {
   setTapRotation: (rotation: TapRotation) => void;
   setShowKeywordStrip: (show: boolean) => void;
   setAiSeatDifficulty: (index: number, difficulty: AIDifficulty) => void;
-  setAiSeatDeckName: (index: number, name: AiDeckSelection) => void;
+  setAiSeatDeckId: (index: number, id: AiDeckSelection) => void;
   /** Grow or shrink `aiSeats` to `count` slots. New slots inherit defaults;
    *  shrinking truncates trailing slots. Called whenever the player count
    *  changes so the UI always has exactly `playerCount - 1` panels to render. */
@@ -184,12 +203,48 @@ interface PreferencesActions {
   setLastFormat: (format: GameFormat) => void;
   setLastMatchType: (matchType: MatchType) => void;
   setLastPlayerCount: (count: number) => void;
+  setExperimentalFeatures: (enabled: boolean) => void;
+  addArtChainEntry: (entry: ArtChainEntry) => void;
+  removeArtChainEntry: (index: number) => void;
+  moveArtChainEntry: (fromIndex: number, toIndex: number) => void;
+  setArtChain: (chain: ArtChainEntry[]) => void;
+  setArtOverride: (oracleId: string, override: CardArtOverride) => void;
+  clearArtOverride: (oracleId: string) => void;
+  clearAllArtOverrides: () => void;
 }
 
 type LegacyFlatAiPrefs = Partial<{
   aiDifficulty: AIDifficulty;
   aiDeckName: AiDeckSelection;
 }>;
+
+type LegacyAiSeatPref = Partial<{
+  difficulty: AIDifficulty;
+  deckName: AiDeckSelection;
+  deckId: AiDeckSelection;
+}>;
+
+let strategyCacheClearFn: (() => void) | null = null;
+
+export function registerStrategyCacheClearFn(fn: () => void): void {
+  strategyCacheClearFn = fn;
+}
+
+function legacyAiDeckNameToId(name: string): string {
+  return `saved:${name}`;
+}
+
+function migrateAiSeat(seat: LegacyAiSeatPref): AiSeatPref {
+  const deckId = seat.deckId ?? (
+    seat.deckName && seat.deckName !== AI_DECK_RANDOM
+      ? legacyAiDeckNameToId(seat.deckName)
+      : AI_DECK_RANDOM
+  );
+  return {
+    difficulty: seat.difficulty ?? DEFAULT_AI_DIFFICULTY,
+    deckId,
+  };
+}
 
 export const usePreferencesStore = create<PreferencesState & PreferencesActions>()(
   persist(
@@ -245,11 +300,11 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
           next[index] = { ...next[index], difficulty };
           return { aiSeats: next };
         }),
-      setAiSeatDeckName: (index, deckName) =>
+      setAiSeatDeckId: (index, deckId) =>
         set((state) => {
           if (index < 0 || index >= state.aiSeats.length) return state;
           const next = state.aiSeats.slice();
-          next[index] = { ...next[index], deckName };
+          next[index] = { ...next[index], deckId };
           return { aiSeats: next };
         }),
       ensureAiSeatCount: (count) =>
@@ -271,10 +326,54 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       setLastFormat: (format) => set({ lastFormat: format }),
       setLastMatchType: (matchType) => set({ lastMatchType: matchType }),
       setLastPlayerCount: (count) => set({ lastPlayerCount: count }),
+      setExperimentalFeatures: (enabled) => set({ experimentalFeatures: enabled }),
+      addArtChainEntry: (entry) =>
+        set((state) => {
+          const isDuplicate = state.artChain.some((e) =>
+            e.type === entry.type && (e.type !== "set" || (entry.type === "set" && e.setCode === entry.setCode)),
+          );
+          if (isDuplicate) return state;
+          strategyCacheClearFn?.();
+          return { artChain: [...state.artChain, entry] };
+        }),
+      removeArtChainEntry: (index) =>
+        set((state) => {
+          if (index < 0 || index >= state.artChain.length) return state;
+          strategyCacheClearFn?.();
+          return { artChain: state.artChain.filter((_, i) => i !== index) };
+        }),
+      moveArtChainEntry: (fromIndex, toIndex) =>
+        set((state) => {
+          if (
+            fromIndex < 0 || fromIndex >= state.artChain.length ||
+            toIndex < 0 || toIndex >= state.artChain.length ||
+            fromIndex === toIndex
+          ) return state;
+          const next = state.artChain.slice();
+          const [moved] = next.splice(fromIndex, 1);
+          next.splice(toIndex, 0, moved);
+          strategyCacheClearFn?.();
+          return { artChain: next };
+        }),
+      setArtChain: (chain) => {
+        strategyCacheClearFn?.();
+        set({ artChain: chain });
+      },
+      setArtOverride: (oracleId, override) =>
+        set((state) => ({
+          artOverrides: { ...state.artOverrides, [oracleId]: override },
+        })),
+      clearArtOverride: (oracleId) =>
+        set((state) => {
+          const { [oracleId]: _, ...rest } = state.artOverrides;
+          void _;
+          return { artOverrides: rest };
+        }),
+      clearAllArtOverrides: () => set({ artOverrides: {} }),
     }),
     {
       name: "phase-preferences",
-      version: 3,
+      version: 6,
       // v0 → v1: flat aiDifficulty + aiDeckName become aiSeats[0].
       // v1 → v2: discrete animationSpeed/combatPacing enums become numeric
       //          animationSpeedMultiplier/combatPacingMultiplier.
@@ -283,6 +382,10 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       //          pacingMultipliers.combat so existing users keep their
       //          combat slider exactly where they left it; other
       //          categories start at the neutral 1.0 default.
+      // v3 → v4: AI deck selections become stable catalog IDs instead
+      //          of display names.
+      // v4 → v5: Add artStrategy and artOverrides for card art preferences.
+      // v5 → v6: Replace artStrategy (single enum) with artChain (ordered preference list).
       migrate: (persisted: unknown, version: number) => {
         if (!persisted || typeof persisted !== "object") return persisted;
         let migrated = persisted as Record<string, unknown>;
@@ -291,7 +394,9 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
           const legacy = migrated as LegacyFlatAiPrefs & Record<string, unknown>;
           const seat: AiSeatPref = {
             difficulty: legacy.aiDifficulty ?? DEFAULT_AI_DIFFICULTY,
-            deckName: legacy.aiDeckName ?? AI_DECK_RANDOM,
+            deckId: legacy.aiDeckName === AI_DECK_RANDOM || !legacy.aiDeckName
+              ? AI_DECK_RANDOM
+              : legacyAiDeckNameToId(legacy.aiDeckName),
           };
           const { aiDifficulty: _d, aiDeckName: _n, ...rest } = legacy;
           void _d;
@@ -331,6 +436,34 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
             ...rest,
             pacingMultipliers: { ...defaultPacingMultipliers(), combat: carried },
           };
+        }
+
+        if (version < 4) {
+          const legacy = migrated as { aiSeats?: LegacyAiSeatPref[] } & Record<string, unknown>;
+          migrated = {
+            ...legacy,
+            aiSeats: Array.isArray(legacy.aiSeats) && legacy.aiSeats.length > 0
+              ? legacy.aiSeats.map(migrateAiSeat)
+              : [defaultAiSeat()],
+          };
+        }
+
+        if (version < 5) {
+          migrated = { ...migrated, artStrategy: "default", artOverrides: {} };
+        }
+
+        if (version < 6) {
+          const oldStrategy = migrated.artStrategy as string | undefined;
+          const STRATEGY_TO_CHAIN: Record<string, ArtChainEntry[]> = {
+            newest: [{ type: "newest" }],
+            oldest: [{ type: "oldest" }],
+            prefer_borderless: [{ type: "prefer_borderless" }],
+            prefer_extended: [{ type: "prefer_extended" }],
+          };
+          const artChain = (oldStrategy && STRATEGY_TO_CHAIN[oldStrategy]) ?? [];
+          const { artStrategy: _oldStrat, ...rest } = migrated;
+          void _oldStrat;
+          migrated = { ...rest, artChain };
         }
 
         return migrated;

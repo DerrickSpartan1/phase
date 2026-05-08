@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useEngineCardData } from "../../hooks/useEngineCardData.ts";
 import type { TokenSearchFilters } from "../../services/scryfall.ts";
+import { CARD_BACK_URL } from "../../services/scryfall.ts";
 import { getBevelBorderStyle } from "./cardFrame.ts";
 
 interface CardImageProps {
@@ -14,6 +15,7 @@ interface CardImageProps {
   colors?: string[];
   isToken?: boolean;
   tokenFilters?: TokenSearchFilters;
+  faceDown?: boolean;
   /**
    * Canonical lookup id from `printed_ref.oracle_id` (battlefield call sites).
    * When provided, the image is resolved by oracle id + `faceName`, which is
@@ -38,20 +40,21 @@ export function CardImage({
   colors,
   isToken = false,
   tokenFilters,
+  faceDown = false,
   oracleId,
   faceName,
   oracleText,
 }: CardImageProps) {
-  const { src, isLoading } = useCardImage(cardName, {
+  const { src, isLoading } = useCardImage(faceDown ? "" : cardName, {
     size,
     faceIndex,
-    isToken,
-    tokenFilters,
-    oracleId,
-    faceName,
+    isToken: faceDown ? false : isToken,
+    tokenFilters: faceDown ? undefined : tokenFilters,
+    oracleId: faceDown ? undefined : oracleId,
+    faceName: faceDown ? undefined : faceName,
   });
   const [imageError, setImageError] = useState(false);
-  const fallbackData = useEngineCardData(oracleText === undefined ? cardName : null);
+  const fallbackData = useEngineCardData(!faceDown && oracleText === undefined ? cardName : null);
   const resolvedOracleText = oracleText ?? fallbackData?.oracle_text ?? undefined;
 
   const tappedStyle = tapped ? "rotate-[90deg] origin-center" : "";
@@ -61,7 +64,7 @@ export function CardImage({
     ? getBevelBorderStyle(colors)
     : undefined;
 
-  if (isLoading || !src) {
+  if (!faceDown && (isLoading || !src)) {
     return (
       <div
         className={`${baseClasses} bg-gray-700 shadow-md animate-pulse`}
@@ -71,7 +74,7 @@ export function CardImage({
     );
   }
 
-  if (imageError) {
+  if (!faceDown && imageError) {
     return (
       <div
         className={`${baseClasses} bg-gray-800 shadow-md overflow-hidden flex flex-col p-2`}
@@ -89,11 +92,14 @@ export function CardImage({
     );
   }
 
+  const renderedSrc = faceDown ? CARD_BACK_URL : (src ?? "");
+  const renderedAlt = faceDown ? "Face-down card" : cardName;
+
   return (
     <div className="relative inline-block w-fit select-none">
       <img
-        src={src}
-        alt={cardName}
+        src={renderedSrc}
+        alt={renderedAlt}
         draggable={false}
         onError={() => setImageError(true)}
         className={`${baseClasses} shadow-lg object-cover`}

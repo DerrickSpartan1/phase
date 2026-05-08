@@ -27,7 +27,12 @@ pub fn parse_oracle_cost(text: &str) -> AbilityCost {
     // Split on ", " for composite costs
     let parts: Vec<&str> = split_cost_parts(text);
     if parts.len() > 1 {
-        let costs: Vec<AbilityCost> = parts.iter().map(|p| parse_single_cost(p.trim())).collect();
+        let mut costs: Vec<AbilityCost> =
+            parts.iter().map(|p| parse_single_cost(p.trim())).collect();
+        // CR 601.2b: "Sacrifice A, B, and C" splits into ["Sacrifice A", "B", "C"].
+        // Bare noun-phrase continuations after a verb-cost are additional instances
+        // of that same cost. Applies to Sacrifice, Exile, and TapCreatures.
+        fixup_bare_noun_continuations(&mut costs);
         return AbilityCost::Composite { costs };
     }
 
@@ -70,6 +75,63 @@ fn split_cost_parts(text: &str) -> Vec<&str> {
         parts.push(last);
     }
     parts
+}
+
+/// CR 601.2b: After comma/and-splitting, bare noun-phrase segments that follow
+/// a verb-cost (Sacrifice, Exile, TapCreatures) are continuations of that verb,
+/// not independent costs. E.g., "Sacrifice a green creature, a white creature,
+/// and a blue creature" splits into three parts but only the first has the verb.
+fn fixup_bare_noun_continuations(costs: &mut [AbilityCost]) {
+    #[derive(Clone, Copy)]
+    enum PrecedingVerb {
+        Sacrifice,
+        Exile { zone: Option<Zone> },
+        TapCreatures,
+    }
+
+    let mut last_verb: Option<PrecedingVerb> = None;
+    #[allow(clippy::needless_range_loop)]
+    for i in 0..costs.len() {
+        match &costs[i] {
+            AbilityCost::Sacrifice { .. } => last_verb = Some(PrecedingVerb::Sacrifice),
+            AbilityCost::Exile { zone, .. } => {
+                last_verb = Some(PrecedingVerb::Exile { zone: *zone })
+            }
+            AbilityCost::TapCreatures { .. } => last_verb = Some(PrecedingVerb::TapCreatures),
+            AbilityCost::Unimplemented { description } if last_verb.is_some() => {
+                let lower = description.to_lowercase();
+                let stripped = strip_article(description, &lower);
+                if stripped.is_empty() {
+                    continue;
+                }
+                let (filter, _) = parse_target(&format!("target {}", stripped));
+                if matches!(filter, TargetFilter::Any) {
+                    continue;
+                }
+                match last_verb.unwrap() {
+                    PrecedingVerb::Sacrifice => {
+                        costs[i] = AbilityCost::Sacrifice {
+                            target: filter,
+                            count: 1,
+                        };
+                    }
+                    PrecedingVerb::Exile { zone } => {
+                        costs[i] = AbilityCost::Exile {
+                            count: 1,
+                            zone,
+                            filter: Some(filter),
+                        };
+                    }
+                    PrecedingVerb::TapCreatures => {
+                        costs[i] = AbilityCost::TapCreatures { count: 1, filter };
+                    }
+                }
+            }
+            _ => {
+                last_verb = None;
+            }
+        }
+    }
 }
 
 pub fn parse_single_cost(text: &str) -> AbilityCost {
@@ -503,6 +565,21 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         }
     }
 
+    // CR 118.3: Fallback — try parsing the cost text as an effect. Many
+    // activation costs are structurally identical to effects ("Put a -1/-1
+    // counter on ~", "Return a land you control to its owner's hand") and
+    // the effect parser already handles them.
+    let def = super::oracle_effect::parse_effect_chain(
+        text,
+        crate::types::ability::AbilityKind::Activated,
+    );
+    if !matches!(
+        def.effect.as_ref(),
+        crate::types::ability::Effect::Unimplemented { .. }
+    ) {
+        return AbilityCost::EffectCost { effect: def.effect };
+    }
+
     AbilityCost::Unimplemented {
         description: text.to_string(),
     }
@@ -681,6 +758,13 @@ fn try_parse_return_to_hand_cost(rest_lower: &str) -> Option<AbilityCost> {
     let filter_text = nom_on_lower(filter_text, filter_text, nom_primitives::parse_article)
         .map(|((), rest)| rest)
         .unwrap_or(filter_text);
+    // "~" is the self-reference placeholder — filter: None means "this permanent"
+    if filter_text == "~" {
+        return Some(AbilityCost::ReturnToHand {
+            count: 1,
+            filter: None,
+        });
+    }
     let target_text = format!("target {filter_text}");
     let (filter, rem) = parse_target(&target_text);
     let filter = if rem.trim().is_empty() {
@@ -829,6 +913,17 @@ mod tests {
             AbilityCost::Sacrifice {
                 target: TargetFilter::SelfRef,
                 count: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn cost_return_self_to_hand() {
+        assert_eq!(
+            parse_oracle_cost("Return ~ to its owner's hand"),
+            AbilityCost::ReturnToHand {
+                count: 1,
+                filter: None,
             }
         );
     }

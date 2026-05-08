@@ -1,7 +1,5 @@
 use std::collections::HashMap;
 
-#[cfg(test)]
-use crate::types::ability::FilterProp;
 use crate::types::ability::{
     ControllerRef, DamageKindFilter, EffectKind, TargetFilter, TargetRef, TriggerDefinition,
     TypedFilter,
@@ -48,7 +46,7 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         TriggerMode::Destroyed => match_destroyed,
         TriggerMode::TokenCreated | TriggerMode::TokenCreatedOnce => match_token_created,
         TriggerMode::TurnBegin => match_turn_begin,
-        TriggerMode::Phase => match_phase,
+        TriggerMode::Phase | TriggerMode::PayEcho => match_phase,
         TriggerMode::BecomesTarget | TriggerMode::BecomesTargetOnce => match_becomes_target,
         TriggerMode::LandPlayed => match_land_played,
         TriggerMode::ManaAdded => match_mana_added,
@@ -125,7 +123,6 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         | TriggerMode::CounterTypeAddedAll
         | TriggerMode::PayLife
         | TriggerMode::PayCumulativeUpkeep
-        | TriggerMode::PayEcho
         | TriggerMode::PhaseIn
         | TriggerMode::PhaseOut
         | TriggerMode::PhaseOutAll
@@ -222,6 +219,7 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     r.insert(TriggerMode::TokenCreatedOnce, match_token_created);
     r.insert(TriggerMode::TurnBegin, match_turn_begin);
     r.insert(TriggerMode::Phase, match_phase);
+    r.insert(TriggerMode::PayEcho, match_phase);
     r.insert(TriggerMode::BecomesTarget, match_becomes_target);
     r.insert(TriggerMode::BecomesTargetOnce, match_becomes_target);
     r.insert(TriggerMode::LandPlayed, match_land_played);
@@ -346,7 +344,6 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::CounterTypeAddedAll,
         TriggerMode::PayLife,
         TriggerMode::PayCumulativeUpkeep,
-        TriggerMode::PayEcho,
         TriggerMode::PhaseIn,
         TriggerMode::PhaseOut,
         TriggerMode::PhaseOutAll,
@@ -519,6 +516,7 @@ pub(super) fn target_filter_matches_object(
         TargetFilter::None => false,
         TargetFilter::Player => false,
         TargetFilter::Controller => false,
+        TargetFilter::ScopedPlayer => false,
         // SpecificPlayer scopes to a player, not an object — never matches an object.
         TargetFilter::SpecificPlayer { .. } => false,
         TargetFilter::TriggeringSpellController
@@ -527,8 +525,10 @@ pub(super) fn target_filter_matches_object(
         | TargetFilter::TriggeringSource
         | TargetFilter::DefendingPlayer
         | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::StackAbility
         | TargetFilter::StackSpell
         | TargetFilter::Owner => false,
@@ -541,6 +541,7 @@ pub(super) fn target_filter_matches_object(
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::AttachedTo
         | TargetFilter::LastCreated
+        | TargetFilter::CostPaidObject
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
@@ -1284,15 +1285,16 @@ pub(super) fn match_turn_begin(
 pub(super) fn match_phase(
     event: &GameEvent,
     trigger: &TriggerDefinition,
-    _source_id: ObjectId,
-    _state: &GameState,
+    source_id: ObjectId,
+    state: &GameState,
 ) -> bool {
     if let GameEvent::PhaseChanged { phase } = event {
-        if let Some(ref trigger_phase) = trigger.phase {
+        let phase_matches = if let Some(ref trigger_phase) = trigger.phase {
             phase == trigger_phase
         } else {
             true
-        }
+        };
+        phase_matches && valid_player_matches(trigger, state, state.active_player, source_id)
     } else {
         false
     }
@@ -2439,8 +2441,8 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::parser::oracle_trigger::parse_trigger_line;
     use crate::types::ability::{
-        ControllerRef, QuantityExpr, ResolvedAbility, TargetFilter, TriggerDefinition, TypeFilter,
-        TypedFilter,
+        ControllerRef, FilterProp, QuantityExpr, ResolvedAbility, TargetFilter, TriggerDefinition,
+        TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::events::{GameEvent, PlayerActionKind};
@@ -2702,6 +2704,74 @@ mod tests {
             Vec::new(),
         );
         assert!(match_changes_zone(&event, &trigger, ObjectId(1), &state));
+    }
+
+    #[test]
+    fn nontoken_artifact_etb_trigger_rejects_created_artifact_tokens() {
+        let mut state = setup();
+        let source_id = create_object(
+            &mut state,
+            CardId(30),
+            PlayerId(0),
+            "Weapons Manufacturing".to_string(),
+            Zone::Battlefield,
+        );
+        let trigger = parse_trigger_line(
+            "Whenever one or more nontoken artifacts you control enter, create a Munitions token.",
+            "Weapons Manufacturing",
+        );
+
+        let valid_card = trigger.valid_card.as_ref().expect("valid_card");
+        let TargetFilter::Typed(tf) = valid_card else {
+            panic!("expected typed valid_card, got {valid_card:?}");
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Artifact));
+        assert!(tf.properties.contains(&FilterProp::NonToken));
+
+        let nontoken_artifact = ObjectId(31);
+        let nontoken_event = GameEvent::ZoneChanged {
+            object_id: nontoken_artifact,
+            from: Some(Zone::Hand),
+            to: Zone::Battlefield,
+            record: Box::new(ZoneChangeRecord {
+                core_types: vec![CoreType::Artifact],
+                controller: PlayerId(0),
+                owner: PlayerId(0),
+                is_token: false,
+                ..ZoneChangeRecord::test_minimal(
+                    nontoken_artifact,
+                    Some(Zone::Hand),
+                    Zone::Battlefield,
+                )
+            }),
+        };
+        assert!(match_changes_zone(
+            &nontoken_event,
+            &trigger,
+            source_id,
+            &state
+        ));
+
+        let munitions = ObjectId(32);
+        let token_event = GameEvent::ZoneChanged {
+            object_id: munitions,
+            from: None,
+            to: Zone::Battlefield,
+            record: Box::new(ZoneChangeRecord {
+                name: "Munitions".to_string(),
+                core_types: vec![CoreType::Artifact],
+                controller: PlayerId(0),
+                owner: PlayerId(0),
+                is_token: true,
+                ..ZoneChangeRecord::test_minimal(munitions, None, Zone::Battlefield)
+            }),
+        };
+        assert!(!match_changes_zone(
+            &token_event,
+            &trigger,
+            source_id,
+            &state
+        ));
     }
 
     #[test]
@@ -3547,6 +3617,38 @@ mod tests {
             ObjectId(1),
             &state
         ));
+    }
+
+    #[test]
+    fn pay_echo_is_promoted_to_real_matcher() {
+        let registry = build_trigger_registry();
+        assert!(trigger_matcher(TriggerMode::PayEcho).is_some());
+        assert!(registry.contains_key(&TriggerMode::PayEcho));
+    }
+
+    #[test]
+    fn phase_trigger_valid_target_scopes_active_player() {
+        let mut state = setup();
+        let aura = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Paradox Haze".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&aura).unwrap().attached_to = Some(AttachTarget::Player(PlayerId(1)));
+        let mut trigger = make_trigger(TriggerMode::Phase);
+        trigger.phase = Some(crate::types::phase::Phase::Upkeep);
+        trigger.valid_target = Some(TargetFilter::AttachedTo);
+        let event = GameEvent::PhaseChanged {
+            phase: crate::types::phase::Phase::Upkeep,
+        };
+
+        state.active_player = PlayerId(0);
+        assert!(!match_phase(&event, &trigger, aura, &state));
+
+        state.active_player = PlayerId(1);
+        assert!(match_phase(&event, &trigger, aura, &state));
     }
 
     #[test]

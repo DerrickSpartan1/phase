@@ -120,28 +120,21 @@ pub fn choose_attackers_with_targets_with_profile(
         let best_blocker_value = opponent_blockers
             .iter()
             .filter(|&&bid| can_block_pair(state, bid, id))
-            .map(|&bid| {
-                let blocker = state.objects.get(&bid).unwrap();
-                let blocker_toughness = blocker.toughness.unwrap_or(0);
-                let blocker_power = blocker.power.unwrap_or(0);
-                (
-                    bid,
-                    evaluate_creature(state, bid),
-                    blocker_toughness,
-                    blocker_power,
-                )
-            })
+            .map(|&bid| (bid, evaluate_creature(state, bid)))
             .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
         match best_blocker_value {
             None => attacking_ids.push(id),
-            Some((_blocker_id, blocker_value, blocker_toughness, blocker_power)) => {
-                let attacker_toughness = obj.toughness.unwrap_or(0);
-                let kills_blocker = my_power >= blocker_toughness;
-                let attacker_survives = attacker_toughness > blocker_power;
-                // Free damage: attacker kills the blocker and lives to fight again
+            Some((blocker_id, blocker_value)) => {
+                // CR 702.7b + CR 702.4b + CR 702.2c: Use keyword-aware combat
+                // evaluation (first strike, double strike, deathtouch) instead of
+                // raw P/T comparison.
+                let blocker_obj = state.objects.get(&blocker_id).unwrap();
+                let (blocker_kills_attacker, blocker_survives) =
+                    evaluate_block_outcome(blocker_obj, obj);
+                let kills_blocker = !blocker_survives;
+                let attacker_survives = !blocker_kills_attacker;
                 let free_damage = kills_blocker && attacker_survives;
-                // Favorable trade: attacker kills blocker and is worth less (trading up)
                 let favorable_trade = kills_blocker && my_value <= blocker_value;
                 if should_attack_given_objective(
                     objective,
@@ -1157,6 +1150,55 @@ fn can_attack(state: &GameState, obj_id: ObjectId) -> bool {
     }
     obj.entered_battlefield_turn
         .is_some_and(|etb| etb < state.turn_number)
+}
+
+/// Returns true when the AI can deal lethal damage this turn by attacking:
+/// - All opponent creatures are tapped (no blockers available)
+/// - The AI's total untapped attackable power >= the opponent's minimum life total
+///
+/// Used in the pre-combat main phase to discourage spending resources (mana from
+/// dorks, convoke creatures) before attacking when a winning attack is available.
+pub fn is_lethal_attack_available(state: &GameState, ai_player: PlayerId) -> bool {
+    let opponents: Vec<PlayerId> = players::opponents(state, ai_player);
+    if opponents.is_empty() {
+        return false;
+    }
+    let min_opp_life = opponents
+        .iter()
+        .map(|&opp| state.players[opp.0 as usize].life)
+        .min()
+        .unwrap_or(20);
+    if min_opp_life <= 0 {
+        return false;
+    }
+    // Check if ANY opponent creature is untapped (would be a potential blocker).
+    let any_untapped_blocker = opponents.iter().any(|&opp| {
+        state.battlefield.iter().any(|&id| {
+            state.objects.get(&id).is_some_and(|o| {
+                o.controller == opp
+                    && o.card_types.core_types.contains(&CoreType::Creature)
+                    && !o.tapped
+            })
+        })
+    });
+    if any_untapped_blocker {
+        return false;
+    }
+    // Sum all AI creatures that could attack right now.
+    let attack_power: i32 = state
+        .battlefield
+        .iter()
+        .filter_map(|&id| {
+            if can_attack(state, id) {
+                let obj = state.objects.get(&id)?;
+                if obj.controller == ai_player {
+                    return obj.power;
+                }
+            }
+            None
+        })
+        .sum();
+    attack_power >= min_opp_life
 }
 
 /// Check if a creature has the absolute "can't be blocked" static ability.

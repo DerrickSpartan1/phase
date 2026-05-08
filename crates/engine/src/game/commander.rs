@@ -79,28 +79,31 @@ pub fn commander_lethal_headroom(
     Some(u32::from(threshold).saturating_sub(existing))
 }
 
-/// CR 903.9a + CR 408.1: Commander owner may put it into the command zone instead of graveyard or exile.
-/// CR 408.1: The command zone is reserved for specialized objects that have an overarching effect on the game.
+/// CR 903.9a: Find commanders in graveyard or exile that were put there since
+/// the last SBA check. Their owner may put them into the command zone. Returns
+/// the first eligible `(ObjectId, PlayerId, Zone)` tuple, or `None`.
 ///
-/// Returns true if an object is a commander and its destination is Graveyard or Exile,
-/// meaning it should be redirected to the command zone instead.
-pub fn should_redirect_to_command_zone(
-    state: &GameState,
-    object_id: ObjectId,
-    destination: Zone,
-) -> bool {
-    // Only redirect commanders
-    let obj = match state.objects.get(&object_id) {
-        Some(obj) => obj,
-        None => return false,
-    };
-
-    if !obj.is_commander {
-        return false;
-    }
-
-    // Only redirect when going to graveyard or exile
-    matches!(destination, Zone::Graveyard | Zone::Exile)
+/// CR 903.9b (hand/library) is also covered here — while the CR models it as a
+/// replacement effect, the SBA approach is functionally equivalent and avoids
+/// deep interception of every `move_to_zone` call site.
+pub fn commander_eligible_for_zone_return(state: &GameState) -> Option<(ObjectId, PlayerId, Zone)> {
+    state.objects.values().find_map(|obj| {
+        if !obj.is_commander {
+            return None;
+        }
+        // CR 903.9a: graveyard or exile; CR 903.9b: hand or library.
+        if !matches!(
+            obj.zone,
+            Zone::Graveyard | Zone::Exile | Zone::Hand | Zone::Library
+        ) {
+            return None;
+        }
+        // Skip if the owner already declined this SBA cycle.
+        if state.commander_declined_zone_return.contains(&obj.id) {
+            return None;
+        }
+        Some((obj.id, obj.owner, obj.zone))
+    })
 }
 
 /// CR 903.4: Compute the combined color identity of `player`'s commander(s).
@@ -392,65 +395,83 @@ mod tests {
         assert_eq!(commander_casts_from_command_zone(&state, PlayerId(1)), 1);
     }
 
-    // --- Zone Redirection Tests ---
+    // --- Zone Return Eligibility Tests (CR 903.9a/b) ---
 
     #[test]
-    fn redirect_commander_from_graveyard() {
+    fn eligible_when_commander_in_graveyard() {
         let mut state = setup_commander_game();
         let cmd_id = create_commander_in_command_zone(&mut state, PlayerId(0), "Kaalia", vec![]);
+        // Simulate the commander dying — move to graveyard.
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, cmd_id, Zone::Battlefield, &mut events);
+        crate::game::zones::move_to_zone(&mut state, cmd_id, Zone::Graveyard, &mut events);
 
-        assert!(should_redirect_to_command_zone(
-            &state,
-            cmd_id,
-            Zone::Graveyard
-        ));
+        let result = commander_eligible_for_zone_return(&state);
+        assert!(result.is_some());
+        let (id, owner, zone) = result.unwrap();
+        assert_eq!(id, cmd_id);
+        assert_eq!(owner, PlayerId(0));
+        assert_eq!(zone, Zone::Graveyard);
     }
 
     #[test]
-    fn redirect_commander_from_exile() {
+    fn eligible_when_commander_in_exile() {
         let mut state = setup_commander_game();
         let cmd_id = create_commander_in_command_zone(&mut state, PlayerId(0), "Kaalia", vec![]);
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, cmd_id, Zone::Battlefield, &mut events);
+        crate::game::zones::move_to_zone(&mut state, cmd_id, Zone::Exile, &mut events);
 
-        assert!(should_redirect_to_command_zone(&state, cmd_id, Zone::Exile));
+        let result = commander_eligible_for_zone_return(&state);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().2, Zone::Exile);
     }
 
     #[test]
-    fn no_redirect_to_hand() {
+    fn eligible_when_commander_in_hand() {
         let mut state = setup_commander_game();
         let cmd_id = create_commander_in_command_zone(&mut state, PlayerId(0), "Kaalia", vec![]);
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, cmd_id, Zone::Battlefield, &mut events);
+        crate::game::zones::move_to_zone(&mut state, cmd_id, Zone::Hand, &mut events);
 
-        assert!(!should_redirect_to_command_zone(&state, cmd_id, Zone::Hand));
+        let result = commander_eligible_for_zone_return(&state);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().2, Zone::Hand);
     }
 
     #[test]
-    fn no_redirect_to_library() {
+    fn not_eligible_on_battlefield() {
         let mut state = setup_commander_game();
         let cmd_id = create_commander_in_command_zone(&mut state, PlayerId(0), "Kaalia", vec![]);
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, cmd_id, Zone::Battlefield, &mut events);
 
-        assert!(!should_redirect_to_command_zone(
-            &state,
-            cmd_id,
-            Zone::Library
-        ));
+        assert!(commander_eligible_for_zone_return(&state).is_none());
     }
 
     #[test]
-    fn no_redirect_for_non_commander() {
+    fn not_eligible_in_command_zone() {
+        let mut state = setup_commander_game();
+        create_commander_in_command_zone(&mut state, PlayerId(0), "Kaalia", vec![]);
+
+        assert!(commander_eligible_for_zone_return(&state).is_none());
+    }
+
+    #[test]
+    fn not_eligible_for_non_commander() {
         let mut state = setup_commander_game();
         let obj_id = create_object(
             &mut state,
             CardId(50),
             PlayerId(0),
             "Bear".to_string(),
-            Zone::Battlefield,
+            Zone::Graveyard,
         );
         // is_commander defaults to false
 
-        assert!(!should_redirect_to_command_zone(
-            &state,
-            obj_id,
-            Zone::Graveyard
-        ));
+        assert!(commander_eligible_for_zone_return(&state).is_none());
+        let _ = obj_id; // suppress unused warning
     }
 
     // --- Color Identity Tests ---
@@ -871,8 +892,9 @@ mod tests {
     }
 
     #[test]
-    fn integration_commander_zone_redirection_on_death() {
-        use crate::types::events::GameEvent;
+    fn integration_commander_sba_offers_zone_choice_on_death() {
+        use crate::game::sba::check_state_based_actions;
+        use crate::types::game_state::WaitingFor;
 
         let mut state = setup_commander_game();
 
@@ -884,26 +906,116 @@ mod tests {
             vec![ManaColor::Red],
         );
 
-        // Move commander to battlefield first
+        // Move commander to battlefield, then to graveyard (simulating death)
         let mut events = Vec::new();
         crate::game::zones::move_to_zone(&mut state, cmd_id, Zone::Battlefield, &mut events);
-        assert_eq!(state.objects[&cmd_id].zone, Zone::Battlefield);
-
-        // Now "destroy" it (move to graveyard) -- should redirect to command zone
-        events.clear();
         crate::game::zones::move_to_zone(&mut state, cmd_id, Zone::Graveyard, &mut events);
 
-        // Commander should be in command zone, not graveyard
-        assert_eq!(state.objects[&cmd_id].zone, Zone::Command);
+        // Commander should be in graveyard (no auto-redirect)
+        assert_eq!(state.objects[&cmd_id].zone, Zone::Graveyard);
 
-        // ZoneChanged event should show it went to Command, not Graveyard
-        let zone_changed = events
-            .iter()
-            .find(|e| matches!(e, GameEvent::ZoneChanged { .. }));
-        assert!(zone_changed.is_some());
-        if let Some(GameEvent::ZoneChanged { to, .. }) = zone_changed {
-            assert_eq!(*to, Zone::Command);
+        // Run SBA — should pause with CommanderZoneChoice
+        events.clear();
+        check_state_based_actions(&mut state, &mut events);
+
+        match &state.waiting_for {
+            WaitingFor::CommanderZoneChoice {
+                player,
+                commander_id,
+                current_zone,
+            } => {
+                assert_eq!(*player, PlayerId(0));
+                assert_eq!(*commander_id, cmd_id);
+                assert_eq!(*current_zone, Zone::Graveyard);
+            }
+            other => panic!("Expected CommanderZoneChoice, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn integration_commander_zone_choice_accept_moves_to_command() {
+        use crate::game::sba::check_state_based_actions;
+        use crate::types::actions::GameAction;
+        use crate::types::game_state::WaitingFor;
+
+        let mut state = setup_commander_game();
+        state.active_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let cmd_id = create_commander_in_command_zone(
+            &mut state,
+            PlayerId(0),
+            "Kaalia",
+            vec![ManaColor::Red],
+        );
+
+        // Move to battlefield then graveyard
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, cmd_id, Zone::Battlefield, &mut events);
+        crate::game::zones::move_to_zone(&mut state, cmd_id, Zone::Graveyard, &mut events);
+
+        // Run SBA to get the choice
+        check_state_based_actions(&mut state, &mut events);
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::CommanderZoneChoice { .. }
+        ));
+
+        // Accept the choice via the engine
+        let result = crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::DecideOptionalEffect { accept: true },
+        );
+        assert!(result.is_ok());
+
+        // Commander should now be in the command zone
+        assert_eq!(state.objects[&cmd_id].zone, Zone::Command);
+    }
+
+    #[test]
+    fn integration_commander_zone_choice_decline_leaves_in_graveyard() {
+        use crate::game::sba::check_state_based_actions;
+        use crate::types::actions::GameAction;
+        use crate::types::game_state::WaitingFor;
+
+        let mut state = setup_commander_game();
+        state.active_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let cmd_id = create_commander_in_command_zone(
+            &mut state,
+            PlayerId(0),
+            "Kaalia",
+            vec![ManaColor::Red],
+        );
+
+        // Move to battlefield then graveyard
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, cmd_id, Zone::Battlefield, &mut events);
+        crate::game::zones::move_to_zone(&mut state, cmd_id, Zone::Graveyard, &mut events);
+
+        // Run SBA to get the choice
+        check_state_based_actions(&mut state, &mut events);
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::CommanderZoneChoice { .. }
+        ));
+
+        // Decline the choice
+        let result = crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::DecideOptionalEffect { accept: false },
+        );
+        assert!(result.is_ok());
+
+        // Commander should remain in graveyard
+        assert_eq!(state.objects[&cmd_id].zone, Zone::Graveyard);
     }
 
     #[test]
@@ -972,6 +1084,7 @@ mod tests {
             parse_warnings: vec![],
             brawl_commander: false,
             metadata: Default::default(),
+            rarities: Default::default(),
         };
 
         let obj_id = create_commander_from_card_face(&mut state, &face, PlayerId(0));

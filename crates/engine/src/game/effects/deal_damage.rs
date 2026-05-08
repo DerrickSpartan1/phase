@@ -185,6 +185,7 @@ pub(crate) fn apply_damage_to_target(
                     events,
                 );
                 state.post_replacement_event_source = None;
+                state.post_replacement_event_target = None;
             }
             Ok(DamageResult::Applied(0))
         }
@@ -510,8 +511,12 @@ pub fn resolve(
     // Resolve effective targets: use explicit targets if present, otherwise derive
     // implicit target from the TargetFilter for non-targeted damage ("to you", "to itself").
     let implicit;
-    let effective_targets = if !ability.targets.is_empty() {
-        &ability.targets
+    let effective_targets: &[TargetRef] = if !ability.targets.is_empty() {
+        if matches!(damage_source, Some(DamageSource::Target)) && ability.targets.len() > 1 {
+            &ability.targets[1..]
+        } else {
+            &ability.targets
+        }
     } else {
         implicit = match target_filter {
             TargetFilter::Controller => vec![TargetRef::Player(ability.controller)],
@@ -698,6 +703,17 @@ fn collect_matching_players(
                     PlayerFilter::Controller => p.id == source_controller,
                     PlayerFilter::All => true,
                     PlayerFilter::Opponent => p.id != source_controller,
+                    PlayerFilter::DefendingPlayer => {
+                        crate::game::targeting::resolve_event_context_target_for_event_or_state(
+                            state,
+                            &TargetFilter::DefendingPlayer,
+                            source_id,
+                            state.current_trigger_event.as_ref(),
+                        )
+                        .is_some_and(
+                            |target| matches!(target, TargetRef::Player(pid) if pid == p.id),
+                        )
+                    }
                     PlayerFilter::OpponentLostLife => {
                         p.id != source_controller && p.life_lost_this_turn > 0
                     }
@@ -780,6 +796,17 @@ pub fn resolve_each_player(
                     PlayerFilter::Controller => p.id == ability.controller,
                     PlayerFilter::All => true,
                     PlayerFilter::Opponent => p.id != ability.controller,
+                    PlayerFilter::DefendingPlayer => {
+                        crate::game::targeting::resolve_event_context_target_for_event_or_state(
+                            state,
+                            &TargetFilter::DefendingPlayer,
+                            ability.source_id,
+                            state.current_trigger_event.as_ref(),
+                        )
+                        .is_some_and(
+                            |target| matches!(target, TargetRef::Player(pid) if pid == p.id),
+                        )
+                    }
                     PlayerFilter::OpponentLostLife => {
                         p.id != ability.controller && p.life_lost_this_turn > 0
                     }
@@ -885,7 +912,7 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        FilterProp, QuantityExpr, QuantityRef, TargetFilter, TypeFilter, TypedFilter,
+        FilterProp, ObjectScope, QuantityExpr, QuantityRef, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::events::GameEvent;
@@ -925,6 +952,51 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
 
         assert_eq!(state.objects[&obj_id].damage_marked, 3);
+    }
+
+    #[test]
+    fn target_damage_source_damages_recipient_targets_only() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Source Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let recipient = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(1),
+            "Recipient Creature".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [source, recipient] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(3);
+            obj.base_power = Some(3);
+        }
+        let ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::Target,
+                    },
+                },
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                damage_source: Some(DamageSource::Target),
+            },
+            vec![TargetRef::Object(source), TargetRef::Object(recipient)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.objects[&source].damage_marked, 0);
+        assert_eq!(state.objects[&recipient].damage_marked, 3);
     }
 
     #[test]
@@ -1083,6 +1155,103 @@ mod tests {
                 .any(|e| matches!(e, GameEvent::DamageDealt { .. })),
             "must not emit DamageDealt for fully prevented damage"
         );
+    }
+
+    /// CR 615.5: Crumbling Sanctuary-class prevention follow-ups resolve "that
+    /// player" from the prevented damage event's target and "that many" from
+    /// the prevented damage amount.
+    #[test]
+    fn damage_to_player_prevention_exiles_from_that_players_library() {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, DamageTargetFilter, DamageTargetPlayerScope,
+            PreventionAmount, QuantityExpr, QuantityRef, ReplacementDefinition,
+        };
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new_two_player(42);
+        let sanctuary = create_object(
+            &mut state,
+            CardId(42),
+            PlayerId(0),
+            "Crumbling Sanctuary".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&sanctuary)
+            .unwrap()
+            .replacement_definitions
+            .push(
+                ReplacementDefinition::new(ReplacementEvent::DamageDone)
+                    .prevention_shield(PreventionAmount::All)
+                    .damage_target_filter(DamageTargetFilter::Player {
+                        player: DamageTargetPlayerScope::Any,
+                    })
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::ExileTop {
+                            player: TargetFilter::PostReplacementDamageTarget,
+                            count: QuantityExpr::Ref {
+                                qty: QuantityRef::EventContextAmount,
+                            },
+                        },
+                    ))
+                    .description("Crumbling Sanctuary prevention shield".to_string()),
+            );
+
+        let first = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "First card".to_string(),
+            Zone::Library,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Second card".to_string(),
+            Zone::Library,
+        );
+        let third = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Third card".to_string(),
+            Zone::Library,
+        );
+
+        let life_before = state.players[1].life;
+        let ability = make_ability(2, vec![TargetRef::Player(PlayerId(1))]);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.players[1].life, life_before);
+        assert_eq!(
+            state.objects.get(&first).map(|obj| obj.zone),
+            Some(Zone::Exile)
+        );
+        assert_eq!(
+            state.objects.get(&second).map(|obj| obj.zone),
+            Some(Zone::Exile)
+        );
+        assert_eq!(
+            state.objects.get(&third).map(|obj| obj.zone),
+            Some(Zone::Library)
+        );
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                GameEvent::DamagePrevented {
+                    target: TargetRef::Player(PlayerId(1)),
+                    amount: 2,
+                    ..
+                }
+            )
+        }));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, GameEvent::DamageDealt { .. })));
     }
 
     /// CR 615.5: A 0-damage event should not fire the post-replacement

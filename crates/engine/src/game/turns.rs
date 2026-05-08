@@ -222,6 +222,7 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.hand_cast_free_permissions_used.clear();
     // CR 702.94a: Reset per-player first-card-drawn-this-turn tracking for miracle.
     state.first_card_drawn_this_turn.clear();
+    state.cards_drawn_this_turn.clear();
     // CR 702.94a: Any miracle offers that outlived priority without being
     // flushed are stale (the "first card drawn this turn" condition no longer
     // applies after the turn ends). Drop them so we never surface a prompt for
@@ -615,6 +616,9 @@ pub fn execute_draw(state: &mut GameState, events: &mut Vec<GameEvent>) -> Optio
                         object_id: obj_id,
                         nth_in_step,
                     });
+                    crate::game::effects::drawn_this_turn_choice::record_drawn_card(
+                        state, player_id, obj_id,
+                    );
                 }
             }
         }
@@ -689,8 +693,9 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
 
     let active = state.active_player;
 
-    // CR 514.1 + CR 402.2: Discard down to maximum hand size.
-    // If the player has "no maximum hand size" (CR 402.2), skip the discard check entirely.
+    // CR 514.1 + CR 402.2: Only the *active* player discards down to maximum hand size.
+    // Non-active players keep their cards regardless of hand size until their own cleanup.
+    // If the active player has "no maximum hand size" (CR 402.2), skip the discard check.
     let has_no_max = super::static_abilities::check_static_ability(
         state,
         StaticMode::NoMaximumHandSize,
@@ -873,12 +878,12 @@ pub fn finish_cleanup_discard(
 /// CR 103.8a: The player who goes first skips their first draw step.
 /// CR 614.1b + CR 614.10: Also skip if a "skip your draw step" static is active.
 pub fn should_skip_draw(state: &GameState) -> bool {
-    state.turn_number == 1 || should_skip_step(state, Phase::Draw)
+    state.turn_number == 1 || should_skip_step_static(state, Phase::Draw)
 }
 
 /// CR 614.1b + CR 614.10: Check whether the active player should skip the given step
 /// due to a "skip your [step] step" static ability on a permanent they control.
-fn should_skip_step(state: &GameState, step: Phase) -> bool {
+fn should_skip_step_static(state: &GameState, step: Phase) -> bool {
     let active = state.active_player;
     // CR 702.26b + CR 604.1: `active_static_definitions` owns the gating.
     state.battlefield.iter().any(|id| {
@@ -888,6 +893,30 @@ fn should_skip_step(state: &GameState, step: Phase) -> bool {
                     .any(|sd| sd.mode == StaticMode::SkipStep { step })
         })
     })
+}
+
+/// CR 614.10a: Consume a one-shot "skip your next [step] step" only when that
+/// step would otherwise occur. Static step skips are checked first by callers.
+fn consume_next_step_skip(state: &mut GameState, step: Phase) -> bool {
+    let idx = state.active_player.0 as usize;
+    let Some(skips) = state.steps_to_skip.get_mut(idx) else {
+        return false;
+    };
+    let Some(count) = skips.get_mut(&step) else {
+        return false;
+    };
+    if *count == 0 {
+        return false;
+    }
+    *count -= 1;
+    if *count == 0 {
+        skips.remove(&step);
+    }
+    true
+}
+
+fn should_skip_step_now(state: &mut GameState, step: Phase) -> bool {
+    should_skip_step_static(state, step) || consume_next_step_skip(state, step)
 }
 
 /// CR 714.3b: As the precombat main phase begins, put a lore counter on each Saga
@@ -938,16 +967,29 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
             return state.waiting_for.clone();
         }
 
+        // CR 800.4: If the active player has been eliminated, skip their
+        // remaining phases and proceed to the next player's turn.
+        if !super::players::is_alive(state, state.active_player) {
+            state.phase = Phase::Cleanup;
+            advance_phase(state, events);
+            continue;
+        }
+
         match state.phase {
             Phase::Untap => {
-                // CR 614.1b: Skip the untap step if a "skip your untap step" static is active.
-                if !should_skip_step(state, Phase::Untap) {
+                // CR 614.1b + CR 614.10a: Skip the untap step if a static or
+                // one-shot "skip your next untap step" replacement applies.
+                if !should_skip_step_now(state, Phase::Untap) {
                     execute_untap(state, events);
                 }
                 // CR 502.4 / CR 117.3a: No player receives priority during the untap step.
                 advance_phase(state, events);
             }
             Phase::Upkeep => {
+                if should_skip_step_now(state, Phase::Upkeep) {
+                    advance_phase(state, events);
+                    continue;
+                }
                 // CR 503.1a: "At the beginning of [your] upkeep" triggers fire here.
                 if process_phase_triggers(state) {
                     return WaitingFor::Priority {
@@ -957,7 +999,8 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                 advance_phase(state, events);
             }
             Phase::Draw => {
-                if !should_skip_draw(state) {
+                let skip_draw = state.turn_number == 1 || should_skip_step_now(state, Phase::Draw);
+                if !skip_draw {
                     if let Some(wf) = execute_draw(state, events) {
                         return wf;
                     }
@@ -1514,7 +1557,7 @@ mod tests {
 
         let mut state = setup();
         state.phase = Phase::DeclareAttackers;
-        // Mirror `additional_combat::resolve` push order with `with_main_phase = true`.
+        // Mirror `additional_phase::resolve` push order with PostCombatMain as a follow-up.
         state.extra_phases.push(ExtraPhase {
             anchor: Phase::EndCombat,
             phase: Phase::PostCombatMain,
@@ -2144,6 +2187,42 @@ mod tests {
     }
 
     #[test]
+    fn one_shot_step_skip_consumes_matching_step() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.steps_to_skip[0].insert(Phase::Untap, 1);
+
+        assert!(consume_next_step_skip(&mut state, Phase::Untap));
+        assert!(!state.steps_to_skip[0].contains_key(&Phase::Untap));
+    }
+
+    #[test]
+    fn static_step_skip_does_not_consume_next_step_skip() {
+        use crate::types::statics::StaticMode;
+
+        let mut state = setup();
+        let enchant_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Static Skip".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&enchant_id)
+            .unwrap()
+            .static_definitions
+            .push(crate::types::ability::StaticDefinition::new(
+                StaticMode::SkipStep { step: Phase::Untap },
+            ));
+        state.steps_to_skip[0].insert(Phase::Untap, 1);
+
+        assert!(should_skip_step_now(&mut state, Phase::Untap));
+        assert_eq!(state.steps_to_skip[0].get(&Phase::Untap), Some(&1));
+    }
+
+    #[test]
     fn auto_advance_skips_combat_phases() {
         let mut state = setup();
         state.phase = Phase::BeginCombat;
@@ -2252,6 +2331,37 @@ mod tests {
             ),
             "state.waiting_for should be GameOver, got {:?}",
             state.waiting_for
+        );
+    }
+
+    /// CR 800.4: When the active player is eliminated mid-turn in multiplayer,
+    /// their remaining phases are skipped and the next player's turn begins.
+    #[test]
+    fn auto_advance_skips_eliminated_active_player_turn() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 3, 42);
+        state.turn_number = 2;
+        state.active_player = PlayerId(1);
+        state.phase = Phase::PreCombatMain;
+
+        // Mark P1 as eliminated (as if SBA just fired)
+        state.players[1].is_eliminated = true;
+        state.eliminated_players.push(PlayerId(1));
+
+        let mut events = Vec::new();
+        let wf = auto_advance(&mut state, &mut events);
+
+        // Should have advanced to the next living player's turn
+        assert_ne!(
+            state.active_player,
+            PlayerId(1),
+            "eliminated player should no longer be active"
+        );
+        // Next living player after P1 is P2
+        assert_eq!(state.active_player, PlayerId(2));
+        // Game should not be over (P0 and P2 still alive)
+        assert!(
+            !matches!(wf, WaitingFor::GameOver { .. }),
+            "game should continue with 2 living players"
         );
     }
 
@@ -2655,6 +2765,96 @@ mod tests {
             }
             other => panic!("Expected DiscardToHandSize, got {:?}", other),
         }
+    }
+
+    /// CR 514.1: Only the *active* player discards during the cleanup step.
+    /// A non-active player with more than seven cards keeps them until their
+    /// own turn's cleanup.
+    #[test]
+    fn execute_cleanup_ignores_non_active_player_hand_size() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        // Give the NON-active player (P1) 9 cards in hand — well over the
+        // default maximum of 7.
+        for i in 0..9 {
+            create_object(
+                &mut state,
+                CardId(i),
+                PlayerId(1),
+                format!("Card {}", i),
+                Zone::Hand,
+            );
+        }
+        // Active player (P0) has 0 cards — no discard needed for them.
+        assert_eq!(state.players[0].hand.len(), 0);
+        assert_eq!(state.players[1].hand.len(), 9);
+
+        let mut events = Vec::new();
+        let result = execute_cleanup(&mut state, &mut events);
+
+        // CR 514.1: Only the active player's hand size is checked.
+        // P1 is not the active player, so cleanup must complete without a
+        // discard prompt.
+        assert!(
+            result.is_none(),
+            "Non-active player should not be prompted to discard, got {:?}",
+            result
+        );
+        // P1's hand is untouched.
+        assert_eq!(state.players[1].hand.len(), 9);
+    }
+
+    /// CR 514.1: When both players exceed maximum hand size, only the active
+    /// player is prompted to discard during that turn's cleanup step.
+    #[test]
+    fn execute_cleanup_only_prompts_active_player_when_both_exceed_max() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        // Both players have 9 cards in hand.
+        for i in 0..9 {
+            create_object(
+                &mut state,
+                CardId(i),
+                PlayerId(0),
+                format!("P0 Card {}", i),
+                Zone::Hand,
+            );
+        }
+        for i in 10..19 {
+            create_object(
+                &mut state,
+                CardId(i),
+                PlayerId(1),
+                format!("P1 Card {}", i),
+                Zone::Hand,
+            );
+        }
+        assert_eq!(state.players[0].hand.len(), 9);
+        assert_eq!(state.players[1].hand.len(), 9);
+
+        let mut events = Vec::new();
+        let result = execute_cleanup(&mut state, &mut events);
+
+        // Only the active player (P0) should be prompted.
+        match result {
+            Some(WaitingFor::DiscardToHandSize {
+                player,
+                count,
+                cards,
+            }) => {
+                assert_eq!(player, PlayerId(0), "Only active player should discard");
+                assert_eq!(count, 2);
+                assert_eq!(cards.len(), 9);
+            }
+            other => panic!(
+                "Expected DiscardToHandSize for active player, got {:?}",
+                other
+            ),
+        }
+        // P1's hand is completely untouched.
+        assert_eq!(state.players[1].hand.len(), 9);
     }
 
     #[test]

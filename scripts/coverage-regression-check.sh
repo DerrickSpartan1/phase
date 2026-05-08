@@ -188,4 +188,57 @@ if [[ "$FAIL_ON_ENGINE" -eq 1 && "$engine_count" -gt 0 ]]; then
     exit 1
 fi
 
+# Diagnostic count ratchet (D-09): flag regressions in diagnostic categories.
+# Tolerates proportional increases when total_cards grew (new MTGJSON cards with
+# pre-existing gap patterns are not a parser regression).
+# Skip entirely when the baseline has no diagnostics field (first measurement).
+baseline_has_diag=0
+if jq -e '.diagnostics | keys | length > 0' "$BASELINE" > /dev/null 2>&1; then
+    baseline_has_diag=1
+fi
+
+diag_fail=0
+if [[ "$baseline_has_diag" -eq 1 ]]; then
+    base_total=$(jq -r '.total_cards // 0' "$BASELINE" 2>/dev/null)
+    curr_total=$(jq -r '.total_cards // 0' "$CURRENT" 2>/dev/null)
+    new_cards=$((curr_total - base_total))
+    if [[ "$new_cards" -lt 0 ]]; then
+        new_cards=0
+    fi
+
+    while IFS='=' read -r cat count; do
+        base_count=$(jq -r ".diagnostics[\"$cat\"] // 0" "$BASELINE" 2>/dev/null)
+        if [[ "$count" -gt "$base_count" ]]; then
+            increase=$((count - base_count))
+            # Allow up to (new_cards) increase per category — each new card
+            # can contribute at most 1 diagnostic per category. If the increase
+            # exceeds what new cards explain, it's a real parser regression.
+            if [[ "$increase" -gt "$new_cards" ]]; then
+                echo "DIAGNOSTIC REGRESSION: $cat increased from $base_count to $count (exceeds new-card allowance of +$new_cards)" >&2
+                diag_fail=1
+            else
+                echo "DIAGNOSTIC NOTE: $cat increased from $base_count to $count (+$increase, within new-card allowance of +$new_cards)"
+            fi
+        elif [[ "$count" -lt "$base_count" ]]; then
+            echo "DIAGNOSTIC IMPROVEMENT: $cat decreased from $base_count to $count"
+        fi
+    done < <(jq -r '.diagnostics // {} | to_entries[] | "\(.key)=\(.value)"' "$CURRENT" 2>/dev/null)
+
+    # Also check for new categories not in baseline
+    while IFS='=' read -r cat count; do
+        if ! jq -e ".diagnostics[\"$cat\"]" "$BASELINE" > /dev/null 2>&1; then
+            echo "DIAGNOSTIC REGRESSION: new category $cat with count $count (not in baseline)" >&2
+            diag_fail=1
+        fi
+    done < <(jq -r '.diagnostics // {} | to_entries[] | "\(.key)=\(.value)"' "$CURRENT" 2>/dev/null)
+else
+    echo "INFO: baseline has no diagnostics field — seeding ratchet with current counts." >&2
+    jq -r '.diagnostics // {} | to_entries[] | "  \(.key): \(.value)"' "$CURRENT" 2>/dev/null >&2
+fi
+
+if [[ "$diag_fail" -eq 1 ]]; then
+    echo "FAIL: one or more diagnostic categories regressed." >&2
+    exit 1
+fi
+
 exit 0

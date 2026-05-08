@@ -19,20 +19,22 @@ use crate::types::zones::Zone;
 ///   sacrifice. Per CR 701.16a, each affected player chooses their own
 ///   permanent; this resolver handles the single-opponent two-player case by
 ///   routing both filter scope and chooser to that opponent.
+/// - `ScopedPlayer`: an event-context player such as the active player for
+///   upkeep triggers.
 /// - `TargetPlayer`: the first `TargetRef::Player` in `ability.targets` —
-///   matches the "target player sacrifices" / "that player sacrifices" pattern
-///   used by Korvold, Ruthless Winnower, and similar cards.
+///   matches explicit "target player sacrifices" patterns.
 fn resolve_sacrifice_scope(
     state: &GameState,
     ability: &ResolvedAbility,
     filter: &TargetFilter,
 ) -> Vec<PlayerId> {
-    let scope = match filter {
-        TargetFilter::Typed(t) => t.controller.clone(),
-        _ => None,
-    };
+    let scope = sacrifice_controller_scope(filter);
     match scope {
         None | Some(ControllerRef::You) => vec![ability.controller],
+        Some(ControllerRef::ScopedPlayer) => {
+            let scoped = trigger_event_scoped_player(state, ability);
+            vec![scoped.unwrap_or(ability.controller)]
+        }
         Some(ControllerRef::Opponent) => state
             .players
             .iter()
@@ -56,6 +58,22 @@ fn resolve_sacrifice_scope(
     }
 }
 
+fn sacrifice_controller_scope(filter: &TargetFilter) -> Option<ControllerRef> {
+    match filter {
+        TargetFilter::Typed(t) => t.controller.clone(),
+        _ => None,
+    }
+}
+
+fn trigger_event_scoped_player(state: &GameState, ability: &ResolvedAbility) -> Option<PlayerId> {
+    ability.scoped_player.or_else(|| {
+        state
+            .current_trigger_event
+            .as_ref()
+            .and_then(|event| crate::game::targeting::extract_player_from_event(event, state))
+    })
+}
+
 /// CR 701.21a: To sacrifice a permanent, its controller moves it to its owner's graveyard.
 pub fn resolve(
     state: &mut GameState,
@@ -69,7 +87,7 @@ pub fn resolve(
     // compatibility branch below preserves existing behavior.
     // CR 701.21a + CR 608.2d: Peel `UpTo` from the count expression to derive
     // the upper-bound expression and the may-pick-fewer flag. Plain
-    // `QuantityExpr` (Fixed/Ref/HalfRounded/...) means a mandatory count;
+    // `QuantityExpr` (Fixed/Ref/DivideRounded/...) means a mandatory count;
     // wrapped in `UpTo` means the player may select 0..=count.
     let default_count = QuantityExpr::Fixed { value: 1 };
     let (filter, count_expr, up_to) = match &ability.effect {
@@ -79,16 +97,27 @@ pub fn resolve(
         }
         _ => (&TargetFilter::Any, &default_count, false),
     };
+    let scoped_ability;
+    let ability = if matches!(
+        sacrifice_controller_scope(filter),
+        Some(ControllerRef::ScopedPlayer)
+    ) {
+        if let Some(player) = trigger_event_scoped_player(state, ability) {
+            scoped_ability = {
+                let mut scoped = ability.clone();
+                scoped.set_scoped_player_recursive(player);
+                scoped
+            };
+            &scoped_ability
+        } else {
+            ability
+        }
+    } else {
+        ability
+    };
     let count = resolve_quantity_with_targets(state, count_expr, ability).max(0) as usize;
 
-    let targeted_objects: Vec<ObjectId> = ability
-        .targets
-        .iter()
-        .filter_map(|target| match target {
-            TargetRef::Object(obj_id) => Some(*obj_id),
-            _ => None,
-        })
-        .collect();
+    let targeted_objects = crate::game::effects::effect_object_targets(filter, &ability.targets);
 
     if targeted_objects.is_empty() {
         // CR 701.16a: Derive the player(s) whose permanents are in scope from
@@ -211,6 +240,14 @@ pub fn resolve(
 
         // CR 701.21a: A player can't sacrifice something that isn't a permanent.
         if obj.zone != Zone::Battlefield {
+            continue;
+        }
+
+        // CR 701.21a: Defense-in-depth — a player can only sacrifice permanents
+        // they control. The primary fix is that Sacrifice no longer creates
+        // target slots (see extract_target_filter_from_effect), but if this
+        // path is ever reached, enforce controller ownership.
+        if obj.controller != ability.controller {
             continue;
         }
 
@@ -490,6 +527,79 @@ mod tests {
             }
             other => panic!("expected EffectZoneChoice, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn scoped_player_scope_uses_trigger_event_player() {
+        let mut state = GameState::new_two_player(42);
+        state.active_player = PlayerId(1);
+        state.current_trigger_event = Some(GameEvent::PhaseChanged {
+            phase: crate::types::phase::Phase::Upkeep,
+        });
+        let _own = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Mine".to_string(),
+            Zone::Battlefield,
+        );
+        let scoped_a = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "ScopedA".to_string(),
+            Zone::Battlefield,
+        );
+        let scoped_b = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "ScopedB".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = make_scoped_sacrifice_ability(ControllerRef::ScopedPlayer, vec![]);
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::EffectZoneChoice { player, cards, .. } => {
+                assert_eq!(*player, PlayerId(1));
+                assert!(cards.contains(&scoped_a) && cards.contains(&scoped_b));
+                assert_eq!(cards.len(), 2);
+            }
+            other => panic!("expected EffectZoneChoice, got {other:?}"),
+        }
+    }
+
+    /// CR 701.21a: Even if the targeted path is reached (defense-in-depth),
+    /// sacrifice must skip permanents not controlled by the ability controller.
+    #[test]
+    fn targeted_path_skips_opponent_permanents() {
+        let mut state = GameState::new_two_player(42);
+        // Create a permanent controlled by the opponent
+        let opp_obj = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Opponent Creature".to_string(),
+            Zone::Battlefield,
+        );
+        // Simulate the targeted path with an opponent's object as target
+        let ability = make_sacrifice_ability(opp_obj);
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // The opponent's permanent must NOT be sacrificed
+        assert!(
+            state.battlefield.contains(&opp_obj),
+            "opponent's permanent should remain on battlefield"
+        );
+        assert!(
+            !state.players[1].graveyard.contains(&opp_obj),
+            "opponent's permanent should not be in graveyard"
+        );
     }
 
     #[test]

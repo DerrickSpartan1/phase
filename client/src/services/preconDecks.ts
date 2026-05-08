@@ -2,7 +2,7 @@ import { STORAGE_KEY_PREFIX } from "../constants/storage";
 import type { DeckEntry } from "../hooks/useDecks";
 import type { ParsedDeck } from "./deckParser";
 
-function deckEntryToParsedDeck(deck: DeckEntry): ParsedDeck {
+export function preconDeckEntryToParsedDeck(deck: DeckEntry): ParsedDeck {
   return {
     main: deck.mainBoard.map((c) => ({ name: c.name, count: c.count })),
     sideboard: (deck.sideBoard ?? []).map((c) => ({ name: c.name, count: c.count })),
@@ -23,6 +23,6 @@ export function preconExists(savedName: string): boolean {
  * flows without any precon-specific branching downstream.
  */
 export function savePreconDeck(savedName: string, deck: DeckEntry): void {
-  const parsed = deckEntryToParsedDeck(deck);
+  const parsed = preconDeckEntryToParsedDeck(deck);
   localStorage.setItem(STORAGE_KEY_PREFIX + savedName, JSON.stringify(parsed));
 }

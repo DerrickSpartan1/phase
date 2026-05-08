@@ -4,6 +4,7 @@ import { motion } from "framer-motion";
 import type { PlayerId, WaitingFor } from "../../adapter/types.ts";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
+import { getSeatColor } from "../../hooks/useSeatColor.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { getPlayerDisplayName } from "../../stores/multiplayerStore.ts";
 import { ChoiceOverlay, ConfirmButton } from "./ChoiceOverlay.tsx";
@@ -36,6 +37,7 @@ function BattleProtectorContent({ data }: { data: BattleProtectorChoice["data"] 
   const battleName = useGameStore(
     (s) => s.gameState?.objects[data.battle_id]?.name ?? "Battle",
   );
+  const seatOrder = useGameStore((s) => s.gameState?.seat_order);
   const [selected, setSelected] = useState<PlayerId | null>(null);
 
   const handleConfirm = useCallback(() => {
@@ -53,8 +55,13 @@ function BattleProtectorContent({ data }: { data: BattleProtectorChoice["data"] 
       footer={<ConfirmButton onClick={handleConfirm} disabled={selected == null} />}
     >
       <div className="mx-auto mb-6 flex w-fit max-w-3xl flex-wrap items-center justify-center gap-3 sm:mb-10">
-        {data.candidates.map((candidateId, index) => {
+        {[...data.candidates].sort((a, b) => {
+          const aIdx = seatOrder?.indexOf(a) ?? a;
+          const bIdx = seatOrder?.indexOf(b) ?? b;
+          return aIdx - bIdx;
+        }).map((candidateId, index) => {
           const isSelected = selected === candidateId;
+          const color = getSeatColor(candidateId, seatOrder);
           return (
             <motion.button
               key={candidateId}
@@ -69,7 +76,7 @@ function BattleProtectorContent({ data }: { data: BattleProtectorChoice["data"] 
               whileHover={{ scale: 1.05 }}
               onClick={() => setSelected(isSelected ? null : candidateId)}
             >
-              {getPlayerDisplayName(candidateId)}
+              <span style={{ color }}>{getPlayerDisplayName(candidateId)}</span>
             </motion.button>
           );
         })}

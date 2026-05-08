@@ -1,13 +1,14 @@
-use crate::game::casting;
 use crate::game::life_costs::{pay_life_as_cost, PayLifeCostResult};
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::speed::{effective_speed, set_speed};
 use crate::game::targeting::resolve_effect_player_ref;
+use crate::game::{casting, casting_costs};
 use crate::types::ability::{
     AbilityCost, Effect, EffectKind, PaymentCost, QuantityExpr, QuantityRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PayableResource, WaitingFor};
+use crate::types::mana::{ManaCost, ManaCostShard};
 use crate::types::player::PlayerId;
 
 use super::{EffectError, ResolvedAbility};
@@ -47,6 +48,20 @@ pub fn resolve(
 
     match cost {
         PaymentCost::Mana { cost: mana_cost } => {
+            if payment_ability.chosen_x.is_none() && casting_costs::cost_has_x(mana_cost) {
+                let per_x = mana_x_shard_count(mana_cost);
+                let max = casting_costs::max_x_value(state, payer, mana_cost);
+                let max = trigger_event_amount(state).map_or(max, |amount| max.min(amount));
+                state.waiting_for = WaitingFor::PayAmountChoice {
+                    player: payer,
+                    resource: PayableResource::ManaGeneric { per_x },
+                    min: 0,
+                    max,
+                    accumulated: 0,
+                    source_id: ability.source_id,
+                };
+                return Ok(());
+            }
             // CR 117.1: Pre-check affordability on a cloned state to avoid
             // partial mutations (auto_tap_lands runs before the can_pay check
             // inside pay_mana_cost). Only commit if the player can pay.
@@ -106,6 +121,8 @@ pub fn resolve(
                     resource: PayableResource::Energy,
                     min: 0,
                     max,
+                    accumulated: 0,
+                    source_id: ability.source_id,
                 };
                 return Ok(());
             }
@@ -203,6 +220,24 @@ fn resolve_ability_cost_payment(
         }
     }
     Ok(())
+}
+
+fn mana_x_shard_count(cost: &ManaCost) -> u32 {
+    match cost {
+        ManaCost::Cost { shards, .. } => shards
+            .iter()
+            .filter(|shard| matches!(shard, ManaCostShard::X))
+            .count() as u32,
+        ManaCost::NoCost | ManaCost::SelfManaCost => 0,
+    }
+}
+
+fn trigger_event_amount(state: &GameState) -> Option<u32> {
+    state
+        .current_trigger_event
+        .as_ref()
+        .and_then(crate::game::targeting::extract_amount_from_event)
+        .and_then(|amount| u32::try_from(amount.max(0)).ok())
 }
 
 #[cfg(test)]
@@ -498,6 +533,7 @@ mod tests {
                 resource,
                 min,
                 max,
+                ..
             } => {
                 assert_eq!(*player, PlayerId(0));
                 assert_eq!(*resource, PayableResource::Energy);
@@ -607,6 +643,235 @@ mod tests {
             Some(2),
             "Galvanic Discharge dealt 2 damage (the chosen amount)"
         );
+    }
+
+    #[test]
+    fn pay_x_mana_from_life_gain_trigger_draws_chosen_x_cards() {
+        use crate::game::effects::resolve_ability_chain;
+        use crate::game::engine_resolution_choices::{
+            handle_resolution_choice, ResolutionChoiceOutcome,
+        };
+        use crate::game::zones::create_object;
+        use crate::types::actions::GameAction;
+        use crate::types::events::GameEvent;
+        use crate::types::identifiers::CardId;
+        use crate::types::mana::ManaCostShard;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(500),
+            PlayerId(0),
+            "Well of Lost Dreams".to_string(),
+            Zone::Battlefield,
+        );
+        for n in 0..5 {
+            create_object(
+                &mut state,
+                CardId(100 + n),
+                PlayerId(0),
+                format!("Card {n}"),
+                Zone::Library,
+            );
+        }
+        for _ in 0..3 {
+            state.players[0].mana_pool.add(ManaUnit {
+                color: ManaType::Colorless,
+                source_id: ObjectId(0),
+                snow: false,
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+            });
+        }
+        state.current_trigger_event = Some(GameEvent::LifeChanged {
+            player_id: PlayerId(0),
+            amount: 3,
+        });
+
+        let draw = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        let mut pay = ResolvedAbility::new(
+            Effect::PayCost {
+                cost: PaymentCost::Mana {
+                    cost: ManaCost::Cost {
+                        shards: vec![ManaCostShard::X],
+                        generic: 0,
+                    },
+                },
+                payer: TargetFilter::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        pay.sub_ability = Some(Box::new(draw));
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &pay, &mut events, 0).unwrap();
+        match &state.waiting_for {
+            WaitingFor::PayAmountChoice { resource, max, .. } => {
+                assert_eq!(*resource, PayableResource::ManaGeneric { per_x: 1 });
+                assert_eq!(*max, 3);
+            }
+            other => panic!("expected PayAmountChoice, got {other:?}"),
+        }
+
+        let waiting_for = state.waiting_for.clone();
+        let outcome = handle_resolution_choice(
+            &mut state,
+            waiting_for,
+            GameAction::SubmitPayAmount { amount: 2 },
+            &mut events,
+        )
+        .unwrap();
+        assert!(matches!(
+            outcome,
+            ResolutionChoiceOutcome::WaitingFor(_) | ResolutionChoiceOutcome::ActionResult(_)
+        ));
+        assert_eq!(state.players[0].hand.len(), 2);
+        assert_eq!(state.players[0].mana_pool.mana.len(), 1);
+    }
+
+    #[test]
+    fn player_scope_pay_any_mana_accumulates_chosen_x_for_tail() {
+        use crate::game::effects::resolve_ability_chain;
+        use crate::game::engine_resolution_choices::handle_resolution_choice;
+        use crate::game::zones::create_object;
+        use crate::types::actions::GameAction;
+        use crate::types::identifiers::CardId;
+        use crate::types::mana::ManaCostShard;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(500),
+            PlayerId(0),
+            "Join Forces Source".to_string(),
+            Zone::Battlefield,
+        );
+        for n in 0..5 {
+            create_object(
+                &mut state,
+                CardId(100 + n),
+                PlayerId(0),
+                format!("Card {n}"),
+                Zone::Library,
+            );
+        }
+        for _ in 0..2 {
+            state.players[0].mana_pool.add(ManaUnit {
+                color: ManaType::Colorless,
+                source_id: ObjectId(0),
+                snow: false,
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+            });
+        }
+        for _ in 0..3 {
+            state.players[1].mana_pool.add(ManaUnit {
+                color: ManaType::Colorless,
+                source_id: ObjectId(0),
+                snow: false,
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+            });
+        }
+
+        let draw = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        let mut pay = ResolvedAbility::new(
+            Effect::PayCost {
+                cost: PaymentCost::Mana {
+                    cost: ManaCost::Cost {
+                        shards: vec![ManaCostShard::X],
+                        generic: 0,
+                    },
+                },
+                payer: TargetFilter::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        pay.player_scope = Some(crate::types::ability::PlayerFilter::All);
+        pay.sub_ability = Some(Box::new(draw));
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &pay, &mut events, 0).unwrap();
+        match &state.waiting_for {
+            WaitingFor::PayAmountChoice {
+                player,
+                max,
+                accumulated,
+                ..
+            } => {
+                assert_eq!(*player, PlayerId(0));
+                assert_eq!(*max, 2);
+                assert_eq!(*accumulated, 0);
+            }
+            other => panic!("expected first PayAmountChoice, got {other:?}"),
+        }
+
+        let waiting_for = state.waiting_for.clone();
+        handle_resolution_choice(
+            &mut state,
+            waiting_for,
+            GameAction::SubmitPayAmount { amount: 2 },
+            &mut events,
+        )
+        .unwrap();
+        match &state.waiting_for {
+            WaitingFor::PayAmountChoice {
+                player,
+                max,
+                accumulated,
+                ..
+            } => {
+                assert_eq!(*player, PlayerId(1));
+                assert_eq!(*max, 3);
+                assert_eq!(*accumulated, 2);
+            }
+            other => panic!("expected second PayAmountChoice, got {other:?}"),
+        }
+
+        let waiting_for = state.waiting_for.clone();
+        handle_resolution_choice(
+            &mut state,
+            waiting_for,
+            GameAction::SubmitPayAmount { amount: 1 },
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!(state.players[0].hand.len(), 3);
+        assert_eq!(state.players[0].mana_pool.mana.len(), 0);
+        assert_eq!(state.players[1].mana_pool.mana.len(), 2);
     }
 
     /// CR 107.1c: "Pay any amount" with zero energy still pauses with

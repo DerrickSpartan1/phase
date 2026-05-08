@@ -113,6 +113,16 @@ pub fn selection_satisfies_constraint(
                 None => false,
             })
         }
+        SearchSelectionConstraint::TotalManaValue { comparator, value } => {
+            let mut total = 0;
+            for id in chosen {
+                let Some(obj) = state.objects.get(id) else {
+                    return false;
+                };
+                total += obj.mana_cost.mana_value() as i32;
+            }
+            comparator.evaluate(total, *value)
+        }
     }
 }
 
@@ -247,7 +257,7 @@ pub fn resolve(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{QuantityExpr, TypedFilter};
+    use crate::types::ability::{Comparator, QuantityExpr, TypedFilter};
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
@@ -869,6 +879,29 @@ mod tests {
         obj.card_types.core_types.push(CoreType::Creature);
         obj.mana_cost = ManaCost::generic(cmc);
         id
+    }
+
+    #[test]
+    fn total_mana_value_selection_constraint_checks_chosen_set_sum() {
+        let mut state = GameState::new_two_player(42);
+        let cmc2 = add_library_creature_with_cmc(&mut state, 1, PlayerId(0), "Small", 2);
+        let cmc4 = add_library_creature_with_cmc(&mut state, 2, PlayerId(0), "Mid", 4);
+        let cmc5 = add_library_creature_with_cmc(&mut state, 3, PlayerId(0), "Large", 5);
+        let constraint = SearchSelectionConstraint::TotalManaValue {
+            comparator: Comparator::LE,
+            value: 6,
+        };
+
+        assert!(selection_satisfies_constraint(
+            &state,
+            &[cmc2, cmc4],
+            &constraint
+        ));
+        assert!(!selection_satisfies_constraint(
+            &state,
+            &[cmc2, cmc5],
+            &constraint
+        ));
     }
 
     /// CR 107.3a + CR 601.2b: Nature's Rhythm — search for a creature card with mana

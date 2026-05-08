@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
+import { arcPath } from "../../hooks/useAttackerArrowPositions.ts";
 
 interface BlockerArrowProps {
   blockerId: number;
@@ -45,6 +46,7 @@ export function BlockerArrow({ blockerId, attackerId }: BlockerArrowProps) {
   const dy = positions.to.y - positions.from.y;
   const length = Math.sqrt(dx * dx + dy * dy);
   const isMinimal = vfxQuality === "minimal";
+  const d = arcPath(positions.from, positions.to);
 
   return (
     <svg
@@ -55,34 +57,49 @@ export function BlockerArrow({ blockerId, attackerId }: BlockerArrowProps) {
       <defs>
         <marker
           id={`blocker-arrow-${blockerId}`}
-          markerWidth="8"
-          markerHeight="6"
-          refX="8"
-          refY="3"
+          markerWidth="6"
+          markerHeight="5"
+          refX="6"
+          refY="2.5"
           orient="auto"
         >
-          <path d="M0,0 L8,3 L0,6 Z" fill="rgba(249,115,22,0.8)" />
+          <path d="M0,0 L6,2.5 L0,5 Z" fill="rgba(249,115,22,0.9)" />
         </marker>
+        {!isMinimal && (
+          <filter id={`blocker-glow-${blockerId}`}>
+            <feGaussianBlur stdDeviation="3" result="blur" />
+            <feMerge>
+              <feMergeNode in="blur" />
+              <feMergeNode in="SourceGraphic" />
+            </feMerge>
+          </filter>
+        )}
       </defs>
+      <path
+        d={d}
+        stroke="black"
+        strokeWidth={isMinimal ? 3 : 5}
+        fill="none"
+        strokeLinecap="round"
+      />
       {isMinimal ? (
-        <line
-          x1={positions.from.x}
-          y1={positions.from.y}
-          x2={positions.to.x}
-          y2={positions.to.y}
-          stroke="rgba(249,115,22,0.5)"
-          strokeWidth={1.5}
+        <path
+          d={d}
+          stroke="rgba(249,115,22,0.9)"
+          strokeWidth={2}
+          fill="none"
+          strokeLinecap="round"
           markerEnd={`url(#blocker-arrow-${blockerId})`}
         />
       ) : (
-        <motion.line
-          x1={positions.from.x}
-          y1={positions.from.y}
-          x2={positions.to.x}
-          y2={positions.to.y}
-          stroke="rgba(249,115,22,0.6)"
-          strokeWidth={2.5}
+        <motion.path
+          d={d}
+          stroke="rgba(249,115,22,0.95)"
+          strokeWidth={2}
+          fill="none"
+          strokeLinecap="round"
           markerEnd={`url(#blocker-arrow-${blockerId})`}
+          filter={`url(#blocker-glow-${blockerId})`}
           initial={{ pathLength: 0, opacity: 0 }}
           animate={{ pathLength: 1, opacity: 1 }}
           transition={{

@@ -49,7 +49,7 @@ fn capture_attachment_snapshot(
 /// Handles: LKI snapshot (CR 400.7), transform revert (CR 712.14),
 /// exile permission clearing (CR 113.6e), monstrous reset (CR 701.37b),
 /// counter clearing (CR 122.2), layer pruning, and mana-tap cleanup.
-fn apply_zone_exit_cleanup(state: &mut GameState, object_id: ObjectId, from: Zone) {
+fn apply_zone_exit_cleanup(state: &mut GameState, object_id: ObjectId, from: Zone, to: Zone) {
     state.revealed_cards.remove(&object_id);
 
     // CR 400.7: Snapshot LKI before zone change from battlefield or exile.
@@ -121,6 +121,40 @@ fn apply_zone_exit_cleanup(state: &mut GameState, object_id: ObjectId, from: Zon
             obj_mut.reset_for_battlefield_exit();
         }
 
+        // CR 702.103b: A bestowed Aura's type-changing effect lasts until the
+        // spell or permanent ceases to be bestowed (CR 702.103e–g). The form
+        // is applied at cast-prepare time on the hand object, so it must
+        // persist through every zone change while the spell/permanent is in a
+        // "live bestow" state — that is, on its way to the stack from hand,
+        // on the stack as a bestowed Aura spell, and on the battlefield as
+        // the bestowed Aura permanent. Revert only when the object leaves
+        // those live zones to a "dead" zone:
+        //   * Stack → Graveyard / Hand / Library / Exile / Command (countered,
+        //     bounced, exiled — the spell ceases to exist as a bestow Aura).
+        //   * Battlefield → anywhere (death, exile, bounce — the printed
+        //     creature face is restored for graveyard / exile-cast / future
+        //     interactions).
+        // CR 702.103f's unattach exception keeps the form on the battlefield
+        // through SBA-driven unattach (handled in sba.rs::check_unattached_auras
+        // by calling `revert_bestow_form` before the SBA runs).
+        // Idempotent — a no-op if the flag is already false (e.g., the
+        // CR 702.103e illegal-target path reverts before move_to_zone fires).
+        let preserve_bestow_form = match from {
+            // Hand / Library / Graveyard / Exile / Command → Stack: cast
+            // bestowed; the form was just applied during cast preparation
+            // and must persist as the spell enters the stack.
+            _ if to == Zone::Stack => true,
+            // Stack → Battlefield: bestowed Aura resolves as the bestowed
+            // permanent (CR 702.103b "the permanent it becomes as it resolves
+            // will be a bestowed Aura").
+            Zone::Stack if to == Zone::Battlefield => true,
+            _ => false,
+        };
+        if !preserve_bestow_form && obj_mut.bestow_form.is_some() {
+            super::casting::revert_bestow_aura_form(obj_mut);
+            state.layers_dirty = true;
+        }
+
         // CR 122.2: Counters cease to exist when an object changes zones.
         obj_mut.counters.clear();
     }
@@ -190,14 +224,9 @@ pub fn move_to_zone(
     to: Zone,
     events: &mut Vec<GameEvent>,
 ) {
-    // CR 903.9a: Commander may be redirected to the command zone instead of graveyard/exile.
-    let to = if state.format_config.command_zone
-        && super::commander::should_redirect_to_command_zone(state, object_id, to)
-    {
-        Zone::Command
-    } else {
-        to
-    };
+    // CR 903.9a: A fresh zone change resets the "declined zone return" flag
+    // so the owner gets a new choice opportunity if the commander moves again.
+    state.commander_declined_zone_return.remove(&object_id);
 
     // CR 614.1d: Check CantEnterBattlefieldFrom statics before allowing the move.
     // e.g., Grafdigger's Cage: "Creature cards in graveyards and libraries can't enter the battlefield."
@@ -243,7 +272,7 @@ pub fn move_to_zone(
         capture_linked_exile_snapshot(state, object_id, from);
     zone_change_record.combat_status = capture_combat_status(state, object_id);
 
-    apply_zone_exit_cleanup(state, object_id, from);
+    apply_zone_exit_cleanup(state, object_id, from, to);
 
     remove_from_zone(state, object_id, from, owner);
     add_to_zone(state, object_id, to, owner);
@@ -391,6 +420,9 @@ pub fn move_to_library_at_index(
     index: Option<usize>,
     events: &mut Vec<GameEvent>,
 ) {
+    // CR 903.9a: A fresh zone change resets the "declined zone return" flag.
+    state.commander_declined_zone_return.remove(&object_id);
+
     let obj = state.objects.get(&object_id).expect("object exists");
     let from = obj.zone;
     let owner = obj.owner;
@@ -399,7 +431,7 @@ pub fn move_to_library_at_index(
     zone_change_record.attachments = capture_attachment_snapshot(state, obj);
     zone_change_record.combat_status = capture_combat_status(state, object_id);
 
-    apply_zone_exit_cleanup(state, object_id, from);
+    apply_zone_exit_cleanup(state, object_id, from, Zone::Library);
 
     remove_from_zone(state, object_id, from, owner);
 

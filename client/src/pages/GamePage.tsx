@@ -10,6 +10,11 @@ import { useLocation, useNavigate, useParams, useSearchParams } from "react-rout
 import { AnimatePresence, motion } from "framer-motion";
 
 import type { DeckCardCount, GameFormat, MatchConfig } from "../adapter/types";
+import { useDraftStore } from "../stores/draftStore";
+import { loadActiveQuickDraft } from "../services/quickDraftPersistence";
+import type { DraftMatchResult } from "../services/quickDraftPersistence";
+import { useIsCompactHeight } from "../hooks/useIsCompactHeight.ts";
+import { useIsMobile } from "../hooks/useIsMobile.ts";
 import { BetweenGamesSideboardModal } from "../components/multiplayer/BetweenGamesSideboardModal.tsx";
 import { audioManager } from "../audio/AudioManager.ts";
 import { useAudioContext } from "../audio/useAudioContext.ts";
@@ -17,6 +22,7 @@ import { AnimationOverlay } from "../components/animation/AnimationOverlay.tsx";
 import { TurnBanner } from "../components/animation/TurnBanner.tsx";
 import { BattlefieldBackground } from "../components/board/BattlefieldBackground.tsx";
 import { BoardContextMenu } from "../components/board/BoardContextMenu.tsx";
+import { DebugCardContextMenu } from "../components/chrome/DebugCardContextMenu.tsx";
 import { AttackTargetLines } from "../components/board/AttackTargetLines.tsx";
 import { BlockAssignmentLines } from "../components/board/BlockAssignmentLines.tsx";
 import { GameBoard } from "../components/board/GameBoard.tsx";
@@ -27,10 +33,12 @@ import { FullControlToggle } from "../components/controls/FullControlToggle.tsx"
 import { CombatPhaseIndicator } from "../components/controls/PhaseStopBar.tsx";
 import { OpponentHand } from "../components/hand/OpponentHand.tsx";
 import { MobileHandDrawer } from "../components/hand/MobileHandDrawer.tsx";
+import { HandBadge } from "../components/hand/HandBadge.tsx";
 import { PlayerHand } from "../components/hand/PlayerHand.tsx";
 import { GameLogPanel } from "../components/log/GameLogPanel.tsx";
 import { ChooseXValueUI } from "../components/mana/ChooseXValueUI.tsx";
 import { ManaPaymentUI } from "../components/mana/ManaPaymentUI.tsx";
+import { PayAmountChoiceUI } from "../components/mana/PayAmountChoiceUI.tsx";
 import { CardDataMissingModal } from "../components/modal/CardDataMissingModal.tsx";
 import { AdventureCastModal } from "../components/modal/AdventureCastModal.tsx";
 import { CascadeChoiceModal } from "../components/modal/CascadeChoiceModal.tsx";
@@ -39,6 +47,8 @@ import { WarpCostModal } from "../components/modal/WarpCostModal.tsx";
 import { MiracleRevealModal } from "../components/modal/MiracleRevealModal.tsx";
 import { CardChoiceModal } from "../components/modal/CardChoiceModal.tsx";
 import { ChoiceModal } from "../components/modal/ChoiceModal.tsx";
+import { OptionalEffectModalContent } from "../components/modal/OptionalEffectModal.tsx";
+import { ChooseOneOfBranchModal } from "../components/modal/ChooseOneOfBranchModal.tsx";
 import { ModeChoiceModal } from "../components/modal/ModeChoiceModal.tsx";
 import { ReplacementModal } from "../components/modal/ReplacementModal.tsx";
 import { BattleProtectorModal } from "../components/modal/BattleProtectorModal.tsx";
@@ -46,13 +56,14 @@ import { TributeModal } from "../components/modal/TributeModal.tsx";
 import { CombatTaxModal } from "../components/modal/CombatTaxModal.tsx";
 import { DialogHost } from "../components/modal/DialogHost.tsx";
 import { EvokeCostModal } from "../components/modal/EvokeCostModal.tsx";
+import { BestowCostModal } from "../components/modal/BestowCostModal.tsx";
 import { StackDisplay } from "../components/stack/StackDisplay.tsx";
 import { TargetingOverlay } from "../components/targeting/TargetingOverlay.tsx";
 import { PlayerHud } from "../components/hud/PlayerHud.tsx";
 import { OpponentHud } from "../components/hud/OpponentHud.tsx";
 import { GraveyardPile } from "../components/zone/GraveyardPile.tsx";
 import { LibraryPile } from "../components/zone/LibraryPile.tsx";
-import { ZoneIndicator } from "../components/zone/ZoneIndicator.tsx";
+import { ExilePile } from "../components/zone/ExilePile.tsx";
 import { CompanionZone } from "../components/zone/CompanionZone.tsx";
 import { ZoneHand } from "../components/hand/ZoneHand.tsx";
 import { ZoneViewer } from "../components/zone/ZoneViewer.tsx";
@@ -139,6 +150,8 @@ export function GamePage() {
   const matchParam = searchParams.get("match");
   const firstParam = searchParams.get("first");
   const roomNameParam = searchParams.get("roomName");
+  const sourceParam = searchParams.get("source") ?? undefined;
+  const draftIdParam = searchParams.get("draftId") ?? undefined;
   const playerCount = playersParam ? Number(playersParam) : undefined;
   // Memoize so the `GameProvider` `useEffect` dep array doesn't
   // tear-down/rebuild the P2P session on every parent re-render. Without
@@ -488,7 +501,11 @@ export function GamePage() {
     setWaitingForOpponent(false);
   }, []);
 
-  const handleNoDeck = useCallback(() => {
+  const handleNoDeck = useCallback((reason?: string) => {
+    if (reason) {
+      navigate("/setup", { state: { setupError: reason } });
+      return;
+    }
     navigate("/");
   }, [navigate]);
 
@@ -515,6 +532,8 @@ export function GamePage() {
       firstPlayer={firstPlayer}
       useBroker={useBroker}
       roomName={roomNameParam ?? undefined}
+      source={sourceParam}
+      draftId={draftIdParam}
       onWsEvent={mode === "online" ? handleWsEvent : undefined}
       onP2PEvent={
         mode === "p2p-host" || mode === "p2p-join" ? handleP2PEvent : undefined
@@ -612,6 +631,8 @@ function GamePageContent({
   const waitingFor = useGameStore((s) => s.waitingFor);
   const lobbyProgress = useGameStore((s) => s.lobbyProgress);
   const dispatch = useGameDispatch();
+  const isMobile = useIsMobile();
+  const isCompactHeight = useIsCompactHeight();
   const inspectedObjectId = useUiStore((s) => s.inspectedObjectId);
   const objects = useGameStore((s) => s.gameState?.objects);
   const seatOrder = useGameStore((s) => s.gameState?.seat_order);
@@ -687,13 +708,13 @@ function GamePageContent({
   // obj.name to the back-face name — cardImageLookup recovers the front name
   // from obj.back_face. See services/cardImageLookup.ts (issue #90).
   const inspectedLookup = inspectedObj ? cardImageLookup(inspectedObj) : null;
-  const inspectedCardName = inspectedObj
+  const inspectedCardName = inspectedObj && !inspectedObj.face_down
     ? inspectedFaceIndex === 1 && inspectedObj.back_face
       ? inspectedObj.back_face.name
       : inspectedLookup?.name ?? inspectedObj.name
     : null;
   // The "other" face: when viewing front, this is back_face; when viewing back, this is the front
-  const inspectedOtherFaceName = inspectedObj?.back_face
+  const inspectedOtherFaceName = inspectedObj?.back_face && !inspectedObj.face_down
     ? inspectedFaceIndex === 1 ? inspectedObj.name : inspectedObj.back_face.name
     : null;
 
@@ -797,15 +818,19 @@ function GamePageContent({
     [dispatch],
   );
 
+
+
   const isReconnecting = reconnectState.status !== "idle";
   const topOverlayOffsetPx = reconnectState.status === "idle" ? 0 : 56;
   const gamePageStyle = {
     "--game-top-overlay-offset": `${topOverlayOffsetPx}px`,
   } as CSSProperties;
-  const playerZoneRailStyle: ZoneRailStyle = {
-    "--card-w": "clamp(60px, 7vw, 95px)",
-    "--card-h": "clamp(84px, 9.8vw, 133px)",
-  };
+  const playerZoneRailStyle: ZoneRailStyle = isMobile
+    ? { "--card-w": "28px", "--card-h": "39px" }
+    : { "--card-w": "clamp(45px, 4.5vw, 70px)", "--card-h": "clamp(63px, 6.3vw, 98px)" };
+  const pileSize = isMobile
+    ? { width: "38px", height: "53px" }
+    : { width: "clamp(45px, 4.5vw, 70px)", height: "clamp(63px, 6.3vw, 98px)" };
 
   return (
     <div
@@ -853,26 +878,53 @@ function GamePageContent({
         </div>
       )}
 
-      {/* Full-screen board layout */}
+      <DebugModeBanner />
+
+      {/* Full-screen board layout — CSS Grid with 3 rows: opp hand, battlefield, player hand */}
       <div
-        className={`relative z-10 flex h-full flex-col${isReconnecting ? " pointer-events-none" : ""}`}
-        style={{ paddingTop: "var(--game-top-overlay-offset, 0px)" }}
+        className={`relative z-10 grid min-w-0 h-full${isReconnecting ? " pointer-events-none" : ""}`}
+        style={{
+          paddingTop: "var(--game-top-overlay-offset, 0px)",
+          gridTemplateRows: isCompactHeight
+            ? "minmax(0,12%) 1fr minmax(0,18%)"
+            : "minmax(0,min(12%,100px)) 1fr minmax(0,min(18%,150px))",
+          gridTemplateColumns: "1fr",
+        }}
       >
-        {/* Opponent hand + zones at top */}
-        <div className="relative z-20 w-full shrink-0" data-debug-label="Opp Top">
-          <OpponentHand showCards={showAiHand} />
-          {/* Opponent HUD — bottom-center of opp container */}
-          <div className="pointer-events-none absolute bottom-0 left-0 right-0 z-20 flex justify-center" data-debug-label="Opp HUD">
-            <div className="pointer-events-auto">
+        {/* Row 1: Opponent hand + zone piles (flow layout — piles take real space) */}
+        <div className="relative z-20 min-w-0 flex w-full overflow-visible">
+          <div className="min-w-0 flex-1">
+            <OpponentHand showCards={showAiHand} />
+          </div>
+          <div
+            className="flex shrink-0 items-start gap-1.5 px-1 py-1"
+            style={playerZoneRailStyle}
+          >
+            <ExilePile
+              playerId={activeOpponentId}
+              size={pileSize}
+              onClick={() => setViewingZone({ zone: "exile", playerId: activeOpponentId })}
+            />
+            <LibraryPile playerId={activeOpponentId} size={pileSize} />
+            <GraveyardPile
+              playerId={activeOpponentId}
+              size={pileSize}
+              onClick={() =>
+                setViewingZone({ zone: "graveyard", playerId: activeOpponentId })
+              }
+            />
+          </div>
+        </div>
+
+        {/* Row 2: Battlefield — takes remaining space; HUDs passed inline to PlayerAreas */}
+        <div className="relative z-30 flex min-h-0 min-w-0 flex-col">
+          <GameBoard
+            oppHud={
               <OpponentHud
                 opponentName={isOnlineMode ? opponentDisplayName : undefined}
                 onKickPlayer={
                   isP2PHost
                     ? (pid) => {
-                        // The host adapter is exposed via the game store.
-                        // We type-cast to the host-specific surface; if the
-                        // game isn't actually a P2P host (mode mismatch), the
-                        // optional method call is a no-op.
                         const adapter = useGameStore.getState().adapter as
                           | { kickPlayer?: (pid: number) => Promise<void> }
                           | null;
@@ -881,85 +933,44 @@ function GamePageContent({
                     : undefined
                 }
               />
-            </div>
-          </div>
-          <div
-            className="pointer-events-none absolute right-0 top-0 z-10 flex w-fit flex-col items-end gap-2 px-2 py-1 [&>*]:pointer-events-auto [&>div>*]:pointer-events-auto"
-            style={playerZoneRailStyle}
-            data-debug-label="Opp Zones"
-          >
-            <div className="flex items-start gap-2">
-              <LibraryPile playerId={activeOpponentId} />
-              <GraveyardPile
-                playerId={activeOpponentId}
-                onClick={() =>
-                  setViewingZone({ zone: "graveyard", playerId: activeOpponentId })
-                }
-              />
-            </div>
-            <div className="relative z-10">
-              <ZoneIndicator
-                zone="exile"
-                playerId={activeOpponentId}
-                onClick={() =>
-                  setViewingZone({ zone: "exile", playerId: activeOpponentId })
-                }
-              />
-            </div>
-          </div>
+            }
+            playerHud={<PlayerHud />}
+          />
         </div>
 
-        {/* Battlefield */}
-        <div className="relative z-10 flex min-h-0 flex-1 flex-col" data-debug-label="Battlefield">
-          <GameBoard />
-        </div>
-
-        {/* Player hand + zones at bottom — negative margin pushes hand content
-             below viewport edge so cards peek from the bottom (clipped by page root overflow-hidden).
-             Zones are anchored to top-0 so they stay in the visible area. */}
-        <div className="relative shrink-0 pt-4 mb-[calc(var(--card-h)*-0.25)] sm:mb-[calc(var(--card-h)*-0.25)] md:mb-[calc(var(--card-h)*-0.35)] [@media(max-height:500px)]:!mb-0 [@media(max-height:500px)]:!pt-1" data-debug-label="Player Bottom">
-          {/* Player HUD — top-center of player bottom container */}
-          <div className="pointer-events-none absolute top-0 left-0 right-0 z-20 flex justify-center" data-debug-label="Player HUD">
-            <div className="pointer-events-auto">
-              <PlayerHud />
-            </div>
-          </div>
+        {/* Row 3: Player hand + zones */}
+        <div className="relative min-w-0 overflow-visible">
           <div className="flex items-end justify-center">
             <ZoneHand zone="exile" />
             <PlayerHand />
             <ZoneHand zone="graveyard" />
           </div>
           <div
-            className="pointer-events-none absolute left-0 top-0 bottom-[calc(var(--card-h)*0.25)] sm:bottom-[calc(var(--card-h)*0.25)] md:bottom-[calc(var(--card-h)*0.35)] [@media(max-height:500px)]:!bottom-0 z-10 flex w-fit flex-col items-start justify-end gap-0.5 p-1 lg:gap-1 lg:p-3 [&>*]:pointer-events-auto [&>div>*]:pointer-events-auto"
+            className="pointer-events-none absolute left-0 top-0 bottom-0 z-10 flex w-fit flex-col items-start justify-end gap-0.5 p-1 lg:gap-1 lg:p-3 [&>*]:pointer-events-auto [&>div>*]:pointer-events-auto"
             style={playerZoneRailStyle}
-            data-debug-label="Player Zones"
           >
-            <div className="relative z-10">
-              <ZoneIndicator
-                zone="exile"
+            <div className="flex items-end gap-2">
+              <ExilePile
                 playerId={perspectivePlayerId}
+                size={pileSize}
                 onClick={() => setViewingZone({ zone: "exile", playerId: perspectivePlayerId })}
               />
-            </div>
-            <div className="flex items-end gap-2">
               <GraveyardPile
                 playerId={perspectivePlayerId}
+                size={pileSize}
                 onClick={() => setViewingZone({ zone: "graveyard", playerId: perspectivePlayerId })}
               />
-              <LibraryPile playerId={perspectivePlayerId} />
+              <LibraryPile playerId={perspectivePlayerId} size={pileSize} />
             </div>
           </div>
-          {/* Companion zone — right side, Arena-style */}
           <div
-            className="pointer-events-none absolute right-0 top-0 bottom-[calc(var(--card-h)*0.15)] sm:bottom-[calc(var(--card-h)*0.25)] md:bottom-[calc(var(--card-h)*0.35)] [@media(max-height:500px)]:!bottom-0 z-10 flex w-fit flex-col items-end justify-end gap-0.5 p-1 lg:gap-1 lg:p-3 [&>*]:pointer-events-auto"
+            className="pointer-events-none absolute right-0 top-0 bottom-0 z-10 flex w-fit flex-col items-end justify-end gap-0.5 p-1 lg:gap-1 lg:p-3 [&>*]:pointer-events-auto"
             style={playerZoneRailStyle}
           >
             <CompanionZone playerId={perspectivePlayerId} />
           </div>
         </div>
       </div>
-
-      {/* Opponent zones are now inline in the Opp Top row above */}
 
       {/* Right-side fixed UI stack: combat phases → full control → action buttons → log */}
       <div
@@ -970,7 +981,10 @@ function GamePageContent({
         }}
       >
         <CombatPhaseIndicator />
-        <FullControlToggle />
+        <div className="flex items-center gap-1.5">
+          <HandBadge />
+          <FullControlToggle />
+        </div>
         <ActionButton />
       </div>
 
@@ -1110,6 +1124,8 @@ function GamePageContent({
         />
       )}
 
+      <DebugCardContextMenu />
+
       {/* Animation overlay (above board, below modals) */}
       <AnimationOverlay containerRef={containerRef} />
       <TurnBanner />
@@ -1133,13 +1149,17 @@ function GamePageContent({
           canActForWaitingState && <ManaPaymentUI />}
         {waitingFor?.type === "ChooseXValue" &&
           canActForWaitingState && <ChooseXValueUI />}
+        {waitingFor?.type === "PayAmountChoice" &&
+          canActForWaitingState && <PayAmountChoiceUI />}
         {waitingFor?.type === "ReplacementChoice" &&
           canActForWaitingState && <ReplacementModal />}
         <BattleProtectorModal />
         <TributeModal />
         <CombatTaxModal />
         <EvokeCostModal />
+        <BestowCostModal />
         <ModeChoiceModal />
+        <ChooseOneOfBranchModal />
         <AdventureCastModal />
         <CascadeChoiceModal />
         <ModalFaceModal />
@@ -1762,6 +1782,24 @@ function GameOverScreen({
       ? "radial-gradient(ellipse at center, rgba(60,50,10,0.6) 0%, rgba(0,0,0,0.95) 70%)"
       : "radial-gradient(ellipse at center, rgba(60,10,10,0.5) 0%, rgba(0,0,0,0.95) 70%)";
 
+  const source = searchParams.get("source");
+  const draftId = searchParams.get("draftId");
+  const isDraft = source === "draft" && !!draftId;
+  const gameId = useGameStore((s) => s.gameId);
+
+  const [resultRecorded, setResultRecorded] = useState(false);
+  const [runOver, setRunOver] = useState(false);
+
+  useEffect(() => {
+    if (!isDraft || !gameId || resultRecorded) return;
+    const result: DraftMatchResult = isDraw ? "draw" : isVictory ? "win" : "loss";
+    useDraftStore.getState().recordMatchResult(gameId, result).then(() => {
+      setResultRecorded(true);
+      const meta = loadActiveQuickDraft();
+      if (meta?.phase === "complete") setRunOver(true);
+    });
+  }, [isDraft, gameId, isDraw, isVictory, resultRecorded]);
+
   const handleRematch = () => {
     const newId = crypto.randomUUID();
     const params = new URLSearchParams();
@@ -1770,15 +1808,17 @@ function GameOverScreen({
     navigate(`/game/${newId}?${params.toString()}`);
   };
 
+  const handleBackToDraft = () => {
+    navigate("/draft/quick?resume=1");
+  };
+
   return (
     <div
       className="fixed inset-0 z-50 flex flex-col items-center justify-center px-4"
       style={{ background: bgGradient }}
     >
-      {/* Victory particles */}
       {isVictory && <VictoryParticles />}
 
-      {/* Title text */}
       <motion.h2
         className="relative z-10 text-4xl font-black tracking-[0.24em] text-center sm:text-6xl sm:tracking-widest"
         style={{ color: titleColor, textShadow }}
@@ -1795,7 +1835,6 @@ function GameOverScreen({
         {titleText}
       </motion.h2>
 
-      {/* Life totals and game stats */}
       <AnimatePresence>
         {buttonsVisible && (
           <motion.div
@@ -1828,7 +1867,6 @@ function GameOverScreen({
         )}
       </AnimatePresence>
 
-      {/* Buttons */}
       <AnimatePresence>
         {buttonsVisible && (
           <motion.div
@@ -1837,7 +1875,20 @@ function GameOverScreen({
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 0.15, duration: 0.3 }}
           >
-            {isOnlineMode ? (
+            {isDraft ? (
+              <button
+                disabled={!resultRecorded}
+                onClick={handleBackToDraft}
+                className={gameButtonClass({
+                  tone: isVictory ? "emerald" : "slate",
+                  size: "lg",
+                  disabled: !resultRecorded,
+                  className: "w-full justify-center sm:w-auto sm:min-w-[12rem]",
+                })}
+              >
+                {runOver ? "Back to Draft" : "Continue Run"}
+              </button>
+            ) : isOnlineMode ? (
               <button
                 onClick={() => navigate("/?view=lobby")}
                 className={gameButtonClass({
@@ -1849,27 +1900,29 @@ function GameOverScreen({
                 Back to Lobby
               </button>
             ) : (
-              <button
-                onClick={() => navigate("/")}
-                className={gameButtonClass({
-                  tone: isVictory ? "amber" : "slate",
-                  size: "lg",
-                  className: "w-full justify-center sm:w-auto sm:min-w-[12rem]",
-                })}
-              >
-                Return to Menu
-              </button>
+              <>
+                <button
+                  onClick={() => navigate("/")}
+                  className={gameButtonClass({
+                    tone: isVictory ? "amber" : "slate",
+                    size: "lg",
+                    className: "w-full justify-center sm:w-auto sm:min-w-[12rem]",
+                  })}
+                >
+                  Return to Menu
+                </button>
+                <button
+                  onClick={handleRematch}
+                  className={gameButtonClass({
+                    tone: isVictory ? "emerald" : "neutral",
+                    size: "lg",
+                    className: "w-full justify-center sm:w-auto sm:min-w-[12rem]",
+                  })}
+                >
+                  Rematch
+                </button>
+              </>
             )}
-            <button
-              onClick={handleRematch}
-              className={gameButtonClass({
-                tone: isVictory ? "emerald" : "neutral",
-                size: "lg",
-                className: "w-full justify-center sm:w-auto sm:min-w-[12rem]",
-              })}
-            >
-              Rematch
-            </button>
           </motion.div>
         )}
       </AnimatePresence>
@@ -1985,23 +2038,7 @@ function OptionalEffectModal() {
 
   if (waitingFor?.type !== "OptionalEffectChoice" && waitingFor?.type !== "OpponentMayChoice") return null;
 
-  const sourceObj = objects?.[waitingFor.data.source_id];
-  const sourceName = sourceObj?.name ?? "Effect";
-  const description = waitingFor.data.description as string | undefined;
-
-  return (
-    <ChoiceModal
-      title={`${sourceName} — Optional Effect`}
-      subtitle={description}
-      options={[
-        { id: "accept", label: "Yes" },
-        { id: "decline", label: "No" },
-      ]}
-      onChoose={(id) =>
-        dispatch({ type: "DecideOptionalEffect", data: { accept: id === "accept" } })
-      }
-    />
-  );
+  return <OptionalEffectModalContent waitingFor={waitingFor} objects={objects} dispatch={dispatch} />;
 }
 
 // ── Unless Payment Modal (CR 118.12) ────────────────────────────────────
@@ -2058,5 +2095,23 @@ function UnlessPaymentModal() {
         dispatch({ type: "PayUnlessCost", data: { pay: id === "pay" } })
       }
     />
+  );
+}
+
+function DebugModeBanner() {
+  const active = useUiStore((s) => s.debugInteractionMode);
+  const toggle = useUiStore((s) => s.toggleDebugInteractionMode);
+
+  if (!active) return null;
+
+  return (
+    <div className="fixed left-1/2 top-2 z-50 -translate-x-1/2">
+      <button
+        onClick={toggle}
+        className="rounded-full border border-amber-500/40 bg-amber-950/80 px-4 py-1.5 font-mono text-xs font-semibold text-amber-300 shadow-lg backdrop-blur-sm transition-colors hover:bg-amber-900/80"
+      >
+        DEBUG MODE - Click any card
+      </button>
+    </div>
   );
 }

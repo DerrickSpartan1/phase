@@ -1,9 +1,9 @@
+use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::combinator::{opt, rest, value};
+use nom::combinator::{eof, map, opt, rest, value};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
-use nom_language::error::VerboseError;
 
 use super::counter::{
     try_parse_double_effect, try_parse_move_counters_from, try_parse_put_counter,
@@ -11,16 +11,16 @@ use super::counter::{
 };
 use super::mana::{try_parse_activate_only_condition, try_parse_add_mana_effect};
 use super::token::try_parse_token;
-use super::types::*;
 use super::{
     attach_controller_if_absent, is_bare_object_pronoun, resolve_it_pronoun, ParseContext,
 };
+use crate::parser::oracle_ir::ast::*;
+use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_nom::bridge::nom_on_lower;
 use crate::parser::oracle_nom::primitives as nom_primitives;
 use crate::parser::oracle_static::{
     parse_continuous_modifications, parse_quoted_ability_modifications,
 };
-use crate::parser::oracle_warnings::push_warning;
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, CategoryChooserScope, ChoiceType, Chooser,
     ContinuousModification, ControllerRef, Duration, Effect, GainLifePlayer, LibraryPosition,
@@ -29,11 +29,12 @@ use crate::types::ability::{
     TypedFilter,
 };
 use crate::types::card_type::CoreType;
+use crate::types::phase::Phase;
 use crate::types::player::PlayerCounterKind;
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
-use super::super::oracle_target::parse_target;
+use super::super::oracle_target::{parse_target, parse_target_with_ctx};
 use super::super::oracle_util::{
     contains_object_pronoun, contains_possessive, parse_count_expr, parse_mana_symbols,
     parse_ordinal, split_around, starts_with_possessive, strip_after, TextPair,
@@ -63,13 +64,13 @@ fn try_parse_control_next_turn_suffix(_text: &str, rest: &str) -> Option<(Target
     let (target_text, _) = super::strip_optional_target_prefix(rest);
     let (target, rem) = parse_target(target_text);
     let rem_lower = rem.to_ascii_lowercase();
-    tag::<_, _, VerboseError<&str>>(" during that player's next turn")
+    tag::<_, _, OracleError<'_>>(" during that player's next turn")
         .parse(rem_lower.as_str())
         .ok()?;
     let rem_after_during = &rem[" during that player's next turn".len()..];
     let rem_after_during_lower = rem_after_during.to_ascii_lowercase();
     let (_tail, grant_extra_turn_after) = if let Ok((tail, _)) = alt((
-        tag::<_, _, VerboseError<&str>>(". after that turn, that player takes an extra turn"),
+        tag::<_, _, OracleError<'_>>(". after that turn, that player takes an extra turn"),
         tag(" after that turn, that player takes an extra turn"),
         tag("after that turn, that player takes an extra turn"),
     ))
@@ -83,7 +84,7 @@ fn try_parse_control_next_turn_suffix(_text: &str, rest: &str) -> Option<(Target
         (rem_after_during, false)
     };
     #[cfg(debug_assertions)]
-    super::types::assert_no_compound_remainder(_tail, _text);
+    assert_no_compound_remainder(_tail, _text);
     Some((target, grant_extra_turn_after))
 }
 
@@ -137,10 +138,10 @@ pub(super) fn parse_earthbend_count_expr(
         let target = resolve_earthbend_target(text, target_text, true);
         return (target, QuantityExpr::Fixed { value: n as i32 });
     }
-    if let Ok((rem, _)) = tag::<_, _, VerboseError<&str>>("x").parse(lower_rest) {
+    if let Ok((rem, _)) = tag::<_, _, OracleError<'_>>("x").parse(lower_rest) {
         // CR 122.1: "X, where X is the number of <kind> counters <possessor>".
         if let Ok((rem2, qty)) = preceded(
-            tag::<_, _, VerboseError<&str>>(", where x is "),
+            tag::<_, _, OracleError<'_>>(", where x is "),
             crate::parser::oracle_nom::quantity::parse_the_number_of_player_counters,
         )
         .parse(rem)
@@ -179,12 +180,10 @@ fn resolve_earthbend_target(
         let trimmed =
             target_text.trim_matches(|c: char| c.is_ascii_punctuation() || c.is_whitespace());
         !trimmed.is_empty()
-            && tag::<_, _, VerboseError<&str>>("then ")
+            && tag::<_, _, OracleError<'_>>("then ")
                 .parse(trimmed)
                 .is_err()
-            && tag::<_, _, VerboseError<&str>>("and ")
-                .parse(trimmed)
-                .is_err()
+            && tag::<_, _, OracleError<'_>>("and ").parse(trimmed).is_err()
     };
     if has_explicit_target {
         let (t, _) = parse_target(&text[text.len() - target_text.len()..]);
@@ -207,7 +206,7 @@ fn resolve_earthbend_target(
 /// re-implemented per verb.
 fn parse_dynamic_count_phrase(lower: &str) -> Option<QuantityExpr> {
     if let Ok((qty_tail, _)) = alt((
-        tag::<_, _, VerboseError<&str>>("cards equal to "),
+        tag::<_, _, OracleError<'_>>("cards equal to "),
         tag("a card equal to "),
     ))
     .parse(lower)
@@ -218,7 +217,7 @@ fn parse_dynamic_count_phrase(lower: &str) -> Option<QuantityExpr> {
         }
     }
     if let Ok((rest, _)) = alt((
-        tag::<_, _, VerboseError<&str>>("that many cards"),
+        tag::<_, _, OracleError<'_>>("that many cards"),
         tag("that many"),
     ))
     .parse(lower)
@@ -242,7 +241,7 @@ pub(super) fn parse_numeric_imperative_ast(
         .or_else(|| {
             nom_on_lower(text, lower, |input| {
                 let (rest, _) = (
-                    take_until::<_, _, VerboseError<&str>>(" draws "),
+                    take_until::<_, _, OracleError<'_>>(" draws "),
                     tag(" draws "),
                 )
                     .parse(input)?;
@@ -300,7 +299,7 @@ pub(super) fn parse_numeric_imperative_ast(
         .or_else(|| {
             nom_on_lower(text, lower, |input| {
                 let (rest, _) = (
-                    take_until::<_, _, VerboseError<&str>>(" gains "),
+                    take_until::<_, _, OracleError<'_>>(" gains "),
                     tag(" gains "),
                 )
                     .parse(input)?;
@@ -316,10 +315,10 @@ pub(super) fn parse_numeric_imperative_ast(
             // quantity parser so "that much" resolves to `EventContextAmount`
             // rather than defaulting to 1.
             let after_lower = after_gain.to_ascii_lowercase();
-            let amount_phrase = take_until::<_, _, VerboseError<&str>>(" life")
+            let amount_phrase = take_until::<_, _, OracleError<'_>>(" life")
                 .parse(after_lower.as_str())
                 .map(|(_, before)| before.trim())
-                .unwrap_or_else(|_: nom::Err<VerboseError<&str>>| {
+                .unwrap_or_else(|_: nom::Err<OracleError<'_>>| {
                     after_lower.trim_end_matches('.').trim()
                 });
             if let Some(qty) =
@@ -361,7 +360,7 @@ pub(super) fn parse_numeric_imperative_ast(
         // CR 603.7c + CR 119.3: "lose that much life" / "lose that many life" —
         // amount is the triggering event's amount. Probe for event-context phrases
         // before falling back to the numeric last-word extractor.
-        if let Ok((_, before_life)) = take_until::<_, _, VerboseError<&str>>("life").parse(lower) {
+        if let Ok((_, before_life)) = take_until::<_, _, OracleError<'_>>("life").parse(lower) {
             let after_verb = nom_on_lower(text, lower, |input| {
                 value((), alt((tag("you lose "), tag("lose ")))).parse(input)
             })
@@ -369,10 +368,10 @@ pub(super) fn parse_numeric_imperative_ast(
             .unwrap_or("");
             if !after_verb.is_empty() {
                 let after_lower = after_verb.to_ascii_lowercase();
-                let amount_phrase = take_until::<_, _, VerboseError<&str>>(" life")
+                let amount_phrase = take_until::<_, _, OracleError<'_>>(" life")
                     .parse(after_lower.as_str())
                     .map(|(_, before)| before.trim())
-                    .unwrap_or_else(|_: nom::Err<VerboseError<&str>>| {
+                    .unwrap_or_else(|_: nom::Err<OracleError<'_>>| {
                         after_lower.trim_end_matches('.').trim()
                     });
                 if let Some(qty) =
@@ -450,7 +449,7 @@ pub(super) fn parse_numeric_imperative_ast(
 }
 
 /// CR 107.1a: Parse "lose(s) half [possessive] life, rounded up/down" →
-/// `HalfRounded` expression by delegating to the shared quantity combinator.
+/// `DivideRounded` expression by delegating to the shared quantity combinator.
 ///
 /// Strips the `lose(s) ` verb prefix, then runs
 /// [`super::super::oracle_nom::quantity::parse_half_rounded`] over the
@@ -462,7 +461,7 @@ pub(super) fn parse_numeric_imperative_ast(
 /// routing through the shared combinator.
 fn try_parse_half_life_amount(lower: &str) -> Option<QuantityExpr> {
     // Strip "lose " / "loses " and any intervening whitespace.
-    let (after_verb, _) = alt((tag::<_, _, VerboseError<&str>>("lose "), tag("loses ")))
+    let (after_verb, _) = alt((tag::<_, _, OracleError<'_>>("lose "), tag("loses ")))
         .parse(lower)
         .ok()?;
     let after_verb = after_verb.trim_start();
@@ -540,7 +539,7 @@ fn strip_article(text: &str) -> &str {
 /// `ObjectCount` quantity expression. Used by the sacrifice AST builder to
 /// lift "half the permanents they control" → ObjectCount's filter into the
 /// effect's target, so eligibility matches the same set the count was
-/// computed against. Recurses through `HalfRounded` / `Multiply` / `Offset`
+/// computed against. Recurses through `DivideRounded` / `Multiply` / `Offset`
 /// wrappers since the filter belongs to the innermost ObjectCount; returns
 /// `None` for expressions that carry no filter (Fixed, Variable(X), etc.).
 fn extract_object_count_filter(expr: &QuantityExpr) -> Option<TargetFilter> {
@@ -548,7 +547,7 @@ fn extract_object_count_filter(expr: &QuantityExpr) -> Option<TargetFilter> {
         QuantityExpr::Ref {
             qty: QuantityRef::ObjectCount { filter },
         } => Some(filter.clone()),
-        QuantityExpr::HalfRounded { inner, .. }
+        QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::Multiply { inner, .. }
         | QuantityExpr::Offset { inner, .. } => extract_object_count_filter(inner),
         _ => None,
@@ -606,7 +605,7 @@ fn parse_discard_unless_filter<'a>(
 /// Mirrors `AbilityCost::Discard.filter` so the trigger-effect discard on
 /// Dokuchi Silencer ("you may discard a creature card") preserves the same
 /// filter data as cost-form discards like "Discard a creature card:".
-fn parse_discard_card_filter(tail: &str) -> Option<TargetFilter> {
+pub(crate) fn parse_discard_card_filter(tail: &str) -> Option<TargetFilter> {
     // Find the " card" / " cards" suffix — the type phrase lies before it.
     // No suffix or empty before-suffix → no type qualifier.
     let type_phrase = tail
@@ -631,7 +630,7 @@ fn parse_discard_card_filter(tail: &str) -> Option<TargetFilter> {
 /// treats `controller: None` as Any — letting the actor sacrifice / discard /
 /// return any object on the battlefield, violating CR 701.21a (sacrifice) and
 /// the analogous owner / controller restrictions on other actor-bound verbs.
-fn apply_actor_default(filter: &mut TargetFilter, ctx: &ParseContext) {
+fn apply_actor_default(filter: &mut TargetFilter, ctx: &mut ParseContext) {
     if let Some(actor) = ctx.actor.as_ref() {
         attach_controller_if_absent(filter, actor.clone());
     }
@@ -665,29 +664,56 @@ fn strip_sacrifice_choice_marker(target_text: &str) -> String {
     target_text.to_string()
 }
 
+fn strip_sacrifice_count_suffix(target_text: &str) -> String {
+    let trimmed = target_text.trim_start();
+    let lower = trimmed.to_lowercase();
+    if nom_on_lower(trimmed, &lower, |input| {
+        value(
+            (),
+            (
+                alt((
+                    tag::<_, _, OracleError<'_>>(", rounded up"),
+                    tag(", rounded down"),
+                    tag(", round up"),
+                    tag(", round down"),
+                )),
+                opt(tag(".")),
+                eof,
+            ),
+        )
+        .parse(input)
+    })
+    .is_some()
+    {
+        String::new()
+    } else {
+        target_text.to_string()
+    }
+}
+
 /// NOTE: Shares verb prefixes with `try_parse_verb_and_target` in `mod.rs`.
 /// When adding a new targeted verb here, check if it also needs to be added there
 /// (for compound action splitting like "tap target creature and put a counter on it").
 pub(super) fn parse_targeted_action_ast(
     text: &str,
     lower: &str,
-    ctx: &ParseContext,
+    ctx: &mut ParseContext,
 ) -> Option<TargetedImperativeAst> {
     // CR 701.26a/b: Tap/untap all — mass variants must be checked before single-target
     if let Some((_, rest)) = nom_on_lower(text, lower, |input| {
         value((), alt((tag("tap all "), tag("tap each ")))).parse(input)
     }) {
-        let (target, _rem) = parse_target(rest);
+        let (target, _rem) = parse_target_with_ctx(rest, ctx);
         #[cfg(debug_assertions)]
-        super::types::assert_no_compound_remainder(_rem, text);
+        assert_no_compound_remainder(_rem, text);
         return Some(TargetedImperativeAst::TapAll { target });
     }
     if let Some((_, rest)) = nom_on_lower(text, lower, |input| {
         value((), alt((tag("untap all "), tag("untap each ")))).parse(input)
     }) {
-        let (target, _rem) = parse_target(rest);
+        let (target, _rem) = parse_target_with_ctx(rest, ctx);
         #[cfg(debug_assertions)]
-        super::types::assert_no_compound_remainder(_rem, text);
+        assert_no_compound_remainder(_rem, text);
         return Some(TargetedImperativeAst::UntapAll { target });
     }
     // CR 701.16a: "sacrifice [count] <filter> [of their choice]" —
@@ -710,7 +736,7 @@ pub(super) fn parse_targeted_action_ast(
         // they control of their choice" — split at the leading space), and
         // (2) the count subsumes the filter and only the phrase is left
         // ("of their choice" — treat the entire remainder as the phrase).
-        let target_text = strip_sacrifice_choice_marker(target_text);
+        let target_text = strip_sacrifice_count_suffix(&strip_sacrifice_choice_marker(target_text));
         // CR 107.2: Skip `parse_target` on an empty remainder — the count
         // subsumed the filter ("sacrifice half the permanents they control
         // of their choice"), so there is nothing left to classify. Avoids
@@ -732,9 +758,9 @@ pub(super) fn parse_targeted_action_ast(
         } else if ctx.subject.is_some() && is_bare_object_pronoun(target_text.trim()) {
             resolve_it_pronoun(ctx)
         } else {
-            let (target, _rem) = parse_target(&target_text);
+            let (target, _rem) = parse_target_with_ctx(&target_text, ctx);
             #[cfg(debug_assertions)]
-            super::types::assert_no_compound_remainder(_rem, text);
+            assert_no_compound_remainder(_rem, text);
             target
         };
         // CR 701.16a: When the count expression already carries a typed filter
@@ -760,9 +786,9 @@ pub(super) fn parse_targeted_action_ast(
         alt((value("tap", tag("tap ")), value("untap", tag("untap ")))).parse(input)
     }) {
         let (target_text, _) = super::strip_optional_target_prefix(strip_article(rest));
-        let (target, _rem) = parse_target(target_text);
+        let (target, _rem) = parse_target_with_ctx(target_text, ctx);
         #[cfg(debug_assertions)]
-        super::types::assert_no_compound_remainder(_rem, text);
+        assert_no_compound_remainder(_rem, text);
         return match verb {
             "tap" => Some(TargetedImperativeAst::Tap { target }),
             "untap" => Some(TargetedImperativeAst::Untap { target }),
@@ -779,7 +805,7 @@ pub(super) fn parse_targeted_action_ast(
         // be checked before the player-choice count-based discard path, since
         // "that card" is not a count phrase.
         if alt((
-            tag::<_, _, VerboseError<&str>>("that card"),
+            tag::<_, _, OracleError<'_>>("that card"),
             tag("those cards"),
         ))
         .parse(after_discard)
@@ -793,14 +819,14 @@ pub(super) fn parse_targeted_action_ast(
         let random = nom_primitives::scan_contains(after_discard, "at random");
         // CR 701.9b: Detect "up to" prefix for optional partial discard.
         let (after_discard, up_to) =
-            match tag::<_, _, VerboseError<&str>>("up to ").parse(after_discard) {
+            match tag::<_, _, OracleError<'_>>("up to ").parse(after_discard) {
                 Ok((rest, _)) => (rest, true),
                 Err(_) => (after_discard, false),
             };
         // Strip "all the cards in " / "all cards in " prefix compositionally for
         // patterns like "discard all the cards in your hand" / "discards all cards in their hand".
         let after_discard = alt((
-            tag::<_, _, VerboseError<&str>>("all the cards in "),
+            tag::<_, _, OracleError<'_>>("all the cards in "),
             tag("all cards in "),
         ))
         .parse(after_discard)
@@ -809,7 +835,7 @@ pub(super) fn parse_targeted_action_ast(
         // Detect whole-hand discard patterns before falling through to count parsing.
         // Uses tag prefix (not contains) to avoid matching "discard a card from your hand".
         if alt((
-            tag::<_, _, VerboseError<&str>>("your hand"),
+            tag::<_, _, OracleError<'_>>("your hand"),
             tag("their hand"),
             tag("his or her hand"),
         ))
@@ -833,9 +859,7 @@ pub(super) fn parse_targeted_action_ast(
         // count = HandSize with up_to = true so the controller chooses how
         // many to actually discard. Mind Maggots ("discard any number of
         // creature cards"), Fervent Mastery, Sirocco-class chains.
-        if let Ok((rest, _)) =
-            tag::<_, _, VerboseError<&str>>("any number of ").parse(after_discard)
-        {
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("any number of ").parse(after_discard) {
             let filter = parse_discard_card_filter(rest);
             return Some(TargetedImperativeAst::Discard {
                 count: QuantityExpr::Ref {
@@ -912,11 +936,17 @@ pub(super) fn parse_targeted_action_ast(
         .parse(input)
     }) {
         let rest_lower = &lower[lower.len() - rest.len()..];
-        let (target_text, dest) = super::strip_return_destination_ext(rest);
-        let (target, _rem) = parse_target(target_text);
+        let (trailing_target_text, trailing_dest) = super::strip_return_destination_ext(rest);
+        let (leading_target_text, leading_dest) = super::strip_leading_return_destination_ext(rest);
+        let (target_text, dest) = if trailing_dest.is_some() {
+            (trailing_target_text, trailing_dest)
+        } else {
+            (leading_target_text, leading_dest)
+        };
+        let (target, _rem) = parse_target_with_ctx(target_text, ctx);
         let origin = super::infer_origin_zone(rest_lower);
         #[cfg(debug_assertions)]
-        super::types::assert_no_compound_remainder(_rem, text);
+        assert_no_compound_remainder(_rem, text);
 
         // CR 400.7: Battlefield destination ⇒ ChangeZone (single-target until
         // a separate ChangeZoneAll-shape extension lands). Non-hand non-
@@ -931,6 +961,7 @@ pub(super) fn parse_targeted_action_ast(
                     enter_transformed: d.transformed,
                     under_your_control: d.under_your_control,
                     enter_tapped: d.enter_tapped,
+                    enter_with_counters: d.enter_with_counters,
                 })
             }
             Some(d) if d.zone == Zone::Hand => {
@@ -972,9 +1003,9 @@ pub(super) fn parse_targeted_action_ast(
         nom_on_lower(text, lower, |input| value((), tag("fight ")).parse(input))
     {
         let (target_text, _) = super::strip_optional_target_prefix(rest);
-        let (target, _rem) = parse_target(target_text);
+        let (target, _rem) = parse_target_with_ctx(target_text, ctx);
         #[cfg(debug_assertions)]
-        super::types::assert_no_compound_remainder(_rem, text);
+        assert_no_compound_remainder(_rem, text);
         return Some(TargetedImperativeAst::Fight { target });
     }
     // CR 722.1: "You control target player during that player's next turn"
@@ -1007,9 +1038,9 @@ pub(super) fn parse_targeted_action_ast(
             });
         }
         let (target_text, _) = super::strip_optional_target_prefix(rest);
-        let (target, _rem) = parse_target(target_text);
+        let (target, _rem) = parse_target_with_ctx(target_text, ctx);
         #[cfg(debug_assertions)]
-        super::types::assert_no_compound_remainder(_rem, text);
+        assert_no_compound_remainder(_rem, text);
         return Some(TargetedImperativeAst::GainControl { target });
     }
     // Earthbend: "earthbend [N] [target <type>]"
@@ -1029,7 +1060,7 @@ pub(super) fn parse_targeted_action_ast(
         nom_on_lower(text, lower, |input| value((), tag("airbend ")).parse(input))
     {
         let (target_text, _) = super::strip_optional_target_prefix(original_rest);
-        let (target, after_target) = parse_target(target_text);
+        let (target, after_target) = parse_target_with_ctx(target_text, ctx);
         let cost = parse_mana_symbols(after_target.trim_start())
             .map(|(c, _)| c)
             .unwrap_or(crate::types::mana::ManaCost::Cost {
@@ -1094,6 +1125,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             enter_transformed,
             under_your_control,
             enter_tapped,
+            enter_with_counters,
         } => Effect::ChangeZone {
             origin,
             destination: Zone::Battlefield,
@@ -1104,7 +1136,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             enter_tapped,
             enters_attacking: false,
             up_to: false,
-            enter_with_counters: vec![],
+            enter_with_counters,
         },
         // CR 400.6: Return to a non-hand, non-battlefield zone (graveyard, library).
         TargetedImperativeAst::ReturnToZone {
@@ -1177,11 +1209,11 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
 /// are fixed by the matched pattern). Returns `None` for any other shape so
 /// the regular library-search branch can run.
 fn try_parse_multi_zone_same_name_exile(lower: &str) -> Option<()> {
-    fn run(input: &str) -> Result<(&str, ()), nom::Err<VerboseError<&str>>> {
+    fn run(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
         // search <possessive> graveyard, hand, and library
-        let (input, _) = tag::<_, _, VerboseError<&str>>("search ").parse(input)?;
+        let (input, _) = tag::<_, _, OracleError<'_>>("search ").parse(input)?;
         let (input, _) = alt((
-            tag::<_, _, VerboseError<&str>>("its owner's "),
+            tag::<_, _, OracleError<'_>>("its owner's "),
             tag("their "),
             tag("that player's "),
             tag("target player's "),
@@ -1191,7 +1223,7 @@ fn try_parse_multi_zone_same_name_exile(lower: &str) -> Option<()> {
         ))
         .parse(input)?;
         let (input, _) = alt((
-            tag::<_, _, VerboseError<&str>>("graveyard, hand, and library"),
+            tag::<_, _, OracleError<'_>>("graveyard, hand, and library"),
             tag("graveyard, hand and library"),
             tag("graveyard, library, and hand"),
             tag("hand, graveyard, and library"),
@@ -1199,9 +1231,9 @@ fn try_parse_multi_zone_same_name_exile(lower: &str) -> Option<()> {
         ))
         .parse(input)?;
         // for [any number of] cards with that name and exile them
-        let (input, _) = tag::<_, _, VerboseError<&str>>(" for ").parse(input)?;
+        let (input, _) = tag::<_, _, OracleError<'_>>(" for ").parse(input)?;
         let (input, _) = alt((
-            value((), tag::<_, _, VerboseError<&str>>("any number of cards")),
+            value((), tag::<_, _, OracleError<'_>>("any number of cards")),
             value((), tag("all cards")),
             value((), tag("a card")),
         ))
@@ -1212,7 +1244,7 @@ fn try_parse_multi_zone_same_name_exile(lower: &str) -> Option<()> {
         let (input, _) = alt((
             value(
                 (),
-                tag::<_, _, VerboseError<&str>>(" with that name and exile them"),
+                tag::<_, _, OracleError<'_>>(" with that name and exile them"),
             ),
             value((), tag(" with the same name as that card and exile them")),
         ))
@@ -1225,12 +1257,14 @@ fn try_parse_multi_zone_same_name_exile(lower: &str) -> Option<()> {
 pub(super) fn parse_search_and_creation_ast(
     text: &str,
     lower: &str,
+    ctx: &mut ParseContext,
 ) -> Option<SearchCreationImperativeAst> {
     if let Some((_, _)) = nom_on_lower(text, lower, |input| value((), tag("seek ")).parse(input)) {
-        let details = super::parse_seek_details(lower);
+        let details = super::parse_seek_details(lower, ctx);
         return Some(SearchCreationImperativeAst::Seek {
             filter: details.filter,
             count: details.count,
+            from_top: details.from_top,
             destination: details.destination,
             enter_tapped: details.enter_tapped,
         });
@@ -1253,7 +1287,7 @@ pub(super) fn parse_search_and_creation_ast(
         })
         .is_some()
     {
-        let details = super::parse_search_library_details(lower);
+        let details = super::parse_search_library_details(lower, ctx);
         return Some(SearchCreationImperativeAst::SearchLibrary {
             filter: details.filter,
             count: details.count,
@@ -1282,10 +1316,7 @@ pub(super) fn parse_search_and_creation_ast(
         // resolved later by apply_where_x_effect_expression.
         let count = if let Ok((_, n)) = nom_primitives::parse_number.parse(rest_lower) {
             QuantityExpr::Fixed { value: n as i32 }
-        } else if tag::<_, _, VerboseError<&str>>("x")
-            .parse(rest_lower)
-            .is_ok()
-        {
+        } else if tag::<_, _, OracleError<'_>>("x").parse(rest_lower).is_ok() {
             QuantityExpr::Ref {
                 qty: QuantityRef::Variable {
                     name: "X".to_string(),
@@ -1318,14 +1349,21 @@ pub(super) fn parse_search_and_creation_ast(
     }
     if let Some((_, _)) = nom_on_lower(text, lower, |input| value((), tag("create ")).parse(input))
     {
-        return match try_parse_token(lower, text) {
+        return match try_parse_token(lower, text, ctx) {
             Some(Effect::CopyTokenOf {
                 target,
+                source_filter,
+                enters_attacking,
+                tapped,
+                count,
                 extra_keywords,
                 additional_modifications,
-                ..
             }) => Some(SearchCreationImperativeAst::CopyTokenOf {
                 target,
+                count,
+                source_filter,
+                enters_attacking,
+                tapped,
                 extra_keywords,
                 additional_modifications,
             }),
@@ -1406,13 +1444,18 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
         },
         SearchCreationImperativeAst::CopyTokenOf {
             target,
+            count,
+            source_filter,
+            enters_attacking,
+            tapped,
             extra_keywords,
             additional_modifications,
         } => Effect::CopyTokenOf {
             target,
-            enters_attacking: false,
-            tapped: false,
-            count: QuantityExpr::Fixed { value: 1 },
+            source_filter,
+            enters_attacking,
+            tapped,
+            count,
             extra_keywords,
             additional_modifications,
         },
@@ -1435,11 +1478,13 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
         SearchCreationImperativeAst::Seek {
             filter,
             count,
+            from_top,
             destination,
             enter_tapped,
         } => Effect::Seek {
             filter,
             count,
+            from_top,
             destination,
             enter_tapped,
         },
@@ -1462,24 +1507,43 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
     }
 }
 
-pub(super) fn parse_hand_reveal_ast(text: &str, lower: &str) -> Option<HandRevealImperativeAst> {
+pub(super) fn parse_hand_reveal_ast(
+    text: &str,
+    lower: &str,
+    _ctx: &mut ParseContext,
+) -> Option<HandRevealImperativeAst> {
     if nom_on_lower(text, lower, |input| value((), tag("look at ")).parse(input)).is_some()
         && nom_primitives::scan_contains(lower, "hand")
     {
         if contains_possessive(lower, "look at", "hand") {
-            // CR 603.7c: "that player's hand" / "their hand" resolves to the player
-            // from the triggering event or prior instruction context.
-            let target = if nom_primitives::scan_contains(lower, "that player's hand")
-                || nom_primitives::scan_contains(lower, "their hand")
-            {
-                TargetFilter::TriggeringPlayer
-            } else {
-                push_warning(format!(
-                    "target-fallback: unrecognized look-at target in '{}'",
-                    lower
-                ));
-                TargetFilter::Any
-            };
+            // CR 400.1/400.2 + CR 508.5 + CR 608.2c: Possessive hand phrases are
+            // player references, not object targets. Map the reusable player
+            // axes explicitly so combat-trigger forms like "defending player's
+            // hand" do not fall back to `Any`.
+            let target = nom_on_lower(text, lower, |input| {
+                preceded(
+                    tag("look at "),
+                    alt((
+                        value(TargetFilter::Controller, tag("your hand")),
+                        value(TargetFilter::Player, tag("target player's hand")),
+                        value(
+                            TargetFilter::Typed(
+                                TypedFilter::default().controller(ControllerRef::Opponent),
+                            ),
+                            tag("target opponent's hand"),
+                        ),
+                        value(TargetFilter::TriggeringPlayer, tag("that player's hand")),
+                        value(TargetFilter::TriggeringPlayer, tag("their hand")),
+                        value(
+                            TargetFilter::DefendingPlayer,
+                            tag("defending player's hand"),
+                        ),
+                    )),
+                )
+                .parse(input)
+            })
+            .map(|(target, _)| target);
+            let target = target?;
             return Some(HandRevealImperativeAst::LookAt { target });
         }
 
@@ -1499,7 +1563,7 @@ pub(super) fn parse_hand_reveal_ast(text: &str, lower: &str) -> Option<HandRevea
     // (Frost Augur, Archghoul of Thraben, Leaf-Crowned Elder).
     let after_reveal_lower = &lower[lower.len() - after_reveal.len()..];
     if alt((
-        tag::<_, _, VerboseError<&str>>("it"),
+        tag::<_, _, OracleError<'_>>("it"),
         tag("that card"),
         tag("those cards"),
     ))
@@ -1561,7 +1625,11 @@ pub(super) fn lower_hand_reveal_ast(ast: HandRevealImperativeAst) -> Effect {
     }
 }
 
-pub(super) fn parse_choose_ast(text: &str, lower: &str) -> Option<ChooseImperativeAst> {
+pub(super) fn parse_choose_ast(
+    text: &str,
+    lower: &str,
+    ctx: &mut ParseContext,
+) -> Option<ChooseImperativeAst> {
     if let Some((_, rest)) =
         nom_on_lower(text, lower, |input| value((), tag("choose ")).parse(input))
     {
@@ -1609,7 +1677,7 @@ pub(super) fn parse_choose_ast(text: &str, lower: &str) -> Option<ChooseImperati
         })
         .is_some();
         return Some(ChooseImperativeAst::RevealHandFilter {
-            card_filter: super::parse_choose_filter(lower),
+            card_filter: super::parse_choose_filter(lower, ctx),
             choice_optional,
         });
     }
@@ -1653,7 +1721,7 @@ pub(super) fn parse_choose_ast(text: &str, lower: &str) -> Option<ChooseImperati
 /// targeting phrase (`is_choose_as_targeting`-style check) — caller handles
 /// the single-target fallback.
 fn try_parse_two_targets(rest: &str) -> Option<ChooseImperativeAst> {
-    type E<'a> = VerboseError<&'a str>;
+    type E<'a> = OracleError<'a>;
 
     // CR 601.2c connector parser: "and target " or "and another target ".
     // `scan_split_at_phrase` advances at word boundaries (jumping past each
@@ -1698,7 +1766,7 @@ fn try_parse_two_targets(rest: &str) -> Option<ChooseImperativeAst> {
 /// Parse anaphoric "choose N of them/those [cards]" patterns using nom combinators.
 /// Returns (count, chooser) if the pattern matches.
 fn parse_choose_anaphoric(lower: &str) -> Option<(u32, Chooser)> {
-    type E<'a> = VerboseError<&'a str>;
+    type E<'a> = OracleError<'a>;
 
     // Determine chooser from prefix: "an opponent chooses" / "target opponent chooses" → Opponent,
     // "you choose" / bare "choose" → Controller.
@@ -1763,7 +1831,7 @@ pub(super) fn parse_category_and_sacrifice_rest_pub(
 /// - `take_until("from among")` + category parsing for pattern 2
 /// - Category list: `parse_category_item` composed with comma + "and" separator
 fn parse_category_and_sacrifice_rest(rest_lower: &str) -> Option<ChooseImperativeAst> {
-    type E<'a> = VerboseError<&'a str>;
+    type E<'a> = OracleError<'a>;
 
     // Pattern 1: "from among the permanents [they/that player] control[s] an artifact, ..."
     if let Ok((after_from_among, _)) = tag::<_, _, E>("from among ").parse(rest_lower) {
@@ -1792,7 +1860,7 @@ fn parse_category_and_sacrifice_rest(rest_lower: &str) -> Option<ChooseImperativ
 /// Skip past "the permanents they control" / "the [nonland] permanents that player controls"
 /// clauses to find the category list that follows.
 fn skip_permanent_clause(input: &str) -> Option<&str> {
-    type E<'a> = VerboseError<&'a str>;
+    type E<'a> = OracleError<'a>;
 
     // "the permanents they control " / "the permanents that player controls "
     // / "the nonland permanents they control "
@@ -1826,7 +1894,7 @@ fn skip_permanent_clause(input: &str) -> Option<&str> {
 /// Parse a comma-separated category list: "an artifact, a creature, an enchantment, and a land"
 /// Uses nom combinators for each category item.
 fn parse_category_list(input: &str) -> Option<Vec<CoreType>> {
-    type E<'a> = VerboseError<&'a str>;
+    type E<'a> = OracleError<'a>;
 
     let mut categories = Vec::new();
     let mut remaining = input.trim();
@@ -1867,7 +1935,7 @@ fn parse_category_list(input: &str) -> Option<Vec<CoreType>> {
 
 /// Parse a core type name from lowercase text using nom combinators.
 fn parse_core_type_name(input: &str) -> Option<(&str, CoreType)> {
-    type E<'a> = VerboseError<&'a str>;
+    type E<'a> = OracleError<'a>;
 
     // Ordered longest-first to prevent prefix collisions.
     alt((
@@ -1954,7 +2022,7 @@ pub(super) fn parse_utility_imperative_ast(
             "copy" => {
                 let (target, _rem) = parse_target(rest);
                 #[cfg(debug_assertions)]
-                super::types::assert_no_compound_remainder(_rem, text);
+                assert_no_compound_remainder(_rem, text);
                 Some(UtilityImperativeAst::Copy { target })
             }
             _ => unreachable!(),
@@ -2005,10 +2073,10 @@ pub(super) fn parse_utility_imperative_ast(
         let (target, rem) = parse_target(rest);
         // Consume "'s power and toughness" or " power and toughness" suffix
         let rem_lower = rem.to_lowercase();
-        if tag::<_, _, VerboseError<&str>>("'s power and toughness")
+        if tag::<_, _, OracleError<'_>>("'s power and toughness")
             .parse(rem_lower.as_str())
             .is_ok()
-            || tag::<_, _, VerboseError<&str>>(" power and toughness")
+            || tag::<_, _, OracleError<'_>>(" power and toughness")
                 .parse(rem_lower.as_str())
                 .is_ok()
         {
@@ -2025,13 +2093,13 @@ pub(super) fn parse_utility_imperative_ast(
     if let Some(((attachment_text, target_text), rem)) =
         nom_on_lower(text, lower, parse_explicit_targeted_attach)
     {
-        if rem.trim().is_empty() && nom_primitives::scan_contains(&attachment_text, "target ") {
+        if rem.trim().is_empty() {
             let (attachment, _attachment_rem) = parse_target(&attachment_text);
             let (target, _target_rem) = parse_attach_recipient(&target_text);
             #[cfg(debug_assertions)]
-            super::types::assert_no_compound_remainder(_attachment_rem, text);
+            assert_no_compound_remainder(_attachment_rem, text);
             #[cfg(debug_assertions)]
-            super::types::assert_no_compound_remainder(_target_rem, text);
+            assert_no_compound_remainder(_target_rem, text);
             return Some(UtilityImperativeAst::Attach { attachment, target });
         }
     }
@@ -2042,7 +2110,7 @@ pub(super) fn parse_utility_imperative_ast(
         let after_to = tp.strip_after(" to ").map(|tp| tp.original).unwrap_or(rest);
         let (target, _rem) = parse_target(after_to);
         #[cfg(debug_assertions)]
-        super::types::assert_no_compound_remainder(_rem, text);
+        assert_no_compound_remainder(_rem, text);
         return Some(UtilityImperativeAst::Attach {
             attachment: TargetFilter::SelfRef,
             target,
@@ -2053,7 +2121,7 @@ pub(super) fn parse_utility_imperative_ast(
 
 fn parse_explicit_targeted_attach(
     input: &str,
-) -> nom::IResult<&str, (String, String), VerboseError<&str>> {
+) -> nom::IResult<&str, (String, String), OracleError<'_>> {
     let (input, _) = tag("attach ").parse(input)?;
     let (input, _) = opt(alt((
         tag("up to one "),
@@ -2082,7 +2150,7 @@ fn parse_attach_recipient(text: &str) -> (TargetFilter, &str) {
 
 fn parse_attach_anaphor_to_token(
     input: &str,
-) -> nom::IResult<&str, (TargetFilter, TargetFilter), VerboseError<&str>> {
+) -> nom::IResult<&str, (TargetFilter, TargetFilter), OracleError<'_>> {
     let (input, attachment) = alt((
         value(
             TargetFilter::TriggeringSource,
@@ -2116,7 +2184,7 @@ pub(super) fn lower_utility_imperative_ast(ast: UtilityImperativeAst) -> Effect 
         UtilityImperativeAst::Prevent { text } => parse_prevent_effect(&text),
         UtilityImperativeAst::Regenerate { text } => {
             let lower = text.to_lowercase();
-            let rest = tag::<_, _, VerboseError<&str>>("regenerate ")
+            let rest = tag::<_, _, OracleError<'_>>("regenerate ")
                 .parse(&*lower)
                 .map(|(r, _)| r)
                 .unwrap_or(&lower);
@@ -2142,7 +2210,7 @@ pub(super) fn lower_utility_imperative_ast(ast: UtilityImperativeAst) -> Effect 
 /// - "prevent the next N damage that would be dealt to target creature"
 fn parse_prevent_effect(text: &str) -> Effect {
     let lower = text.to_lowercase();
-    let rest = tag::<_, _, VerboseError<&str>>("prevent ")
+    let rest = tag::<_, _, OracleError<'_>>("prevent ")
         .parse(&*lower)
         .map(|(r, _)| r)
         .unwrap_or(&lower);
@@ -2155,9 +2223,9 @@ fn parse_prevent_effect(text: &str) -> Effect {
     };
 
     // Determine amount: "all damage" vs "the next N damage"
-    let amount = if tag::<_, _, VerboseError<&str>>("all ").parse(rest).is_ok() {
+    let amount = if tag::<_, _, OracleError<'_>>("all ").parse(rest).is_ok() {
         PreventionAmount::All
-    } else if let Ok((after_next, _)) = tag::<_, _, VerboseError<&str>>("the next ").parse(rest) {
+    } else if let Ok((after_next, _)) = tag::<_, _, OracleError<'_>>("the next ").parse(rest) {
         let n = nom_primitives::parse_number
             .parse(after_next)
             .map(|(_, n)| n)
@@ -2180,7 +2248,7 @@ fn parse_prevent_effect(text: &str) -> Effect {
     {
         // Extract the target from the text
         let tp = TextPair::new(text, &lower);
-        if let Ok((_, before)) = take_until::<_, _, VerboseError<&str>>("target ").parse(tp.lower) {
+        if let Ok((_, before)) = take_until::<_, _, OracleError<'_>>("target ").parse(tp.lower) {
             let (_, from_target) = tp.split_at(before.len());
             let (t, _) = parse_target(from_target.original);
             t
@@ -2288,9 +2356,9 @@ pub(super) fn lower_imperative_ast(ast: ImperativeAst) -> Effect {
 }
 
 pub(super) fn parse_put_ast(text: &str, lower: &str) -> Option<PutImperativeAst> {
-    tag::<_, _, VerboseError<&str>>("put ").parse(lower).ok()?;
+    tag::<_, _, OracleError<'_>>("put ").parse(lower).ok()?;
 
-    if let Ok((after, _)) = tag::<_, _, VerboseError<&str>>("put the top ").parse(lower) {
+    if let Ok((after, _)) = tag::<_, _, OracleError<'_>>("put the top ").parse(lower) {
         if nom_primitives::scan_contains(lower, "graveyard") {
             let count = nom_primitives::parse_number
                 .parse(after)
@@ -2339,9 +2407,7 @@ pub(super) fn parse_put_ast(text: &str, lower: &str) -> Option<PutImperativeAst>
 
     // CR 701.24g: "put X into Y's library Nth from the top" —
     // specific positional placement (God-Eternals, Approach, Bury in Books).
-    if let Ok((_, before_from)) =
-        take_until::<_, _, VerboseError<&str>>("from the top").parse(lower)
-    {
+    if let Ok((_, before_from)) = take_until::<_, _, OracleError<'_>>("from the top").parse(lower) {
         {
             // Look backwards from "from the top" to find the ordinal
             let before = before_from.trim_end();
@@ -2360,6 +2426,7 @@ pub(super) fn parse_put_ast(text: &str, lower: &str) -> Option<PutImperativeAst>
         target,
         under_your_control,
         enter_tapped,
+        enter_transformed,
         enters_attacking,
         enter_with_counters,
         ..
@@ -2371,6 +2438,7 @@ pub(super) fn parse_put_ast(text: &str, lower: &str) -> Option<PutImperativeAst>
             target,
             under_your_control,
             enter_tapped,
+            enter_transformed,
             enters_attacking,
             enter_with_counters,
         });
@@ -2395,6 +2463,7 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
             target,
             under_your_control,
             enter_tapped,
+            enter_transformed,
             enters_attacking,
             enter_with_counters,
         } => {
@@ -2420,7 +2489,7 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
                     destination,
                     target,
                     owner_library: false,
-                    enter_transformed: false,
+                    enter_transformed,
                     under_your_control,
                     enter_tapped,
                     // CR 508.4: Propagated from the inline-tail patcher in
@@ -2457,8 +2526,8 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
 /// Parse "put that many {type} counter(s) on {target}" — dynamic counter count from event context.
 /// CR 120.1: "that many" references the amount from the triggering event (e.g., damage dealt).
 /// Produces PutCounter with count=0 as a sentinel for event-context resolution.
-fn try_parse_that_many_counters(lower: &str, ctx: &ParseContext) -> Option<Effect> {
-    let (rest, _) = tag::<_, _, VerboseError<&str>>("put that many ")
+fn try_parse_that_many_counters(lower: &str, ctx: &mut ParseContext) -> Option<Effect> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("put that many ")
         .parse(lower)
         .ok()?;
     // Next word(s) are counter type: "+1/+1", "charge", "loyalty", etc.
@@ -2468,33 +2537,33 @@ fn try_parse_that_many_counters(lower: &str, ctx: &ParseContext) -> Option<Effec
 
     // Skip "counter" or "counters" keyword
     let after_type = rest[type_end..].trim_start();
-    let after_counter = alt((tag::<_, _, VerboseError<&str>>("counters"), tag("counter")))
+    let after_counter = alt((tag::<_, _, OracleError<'_>>("counters"), tag("counter")))
         .parse(after_type)
         .map(|(r, _)| r)
         .unwrap_or(after_type)
         .trim_start();
 
     // Parse target after "on"
-    let target =
-        if let Ok((on_rest, _)) = tag::<_, _, VerboseError<&str>>("on ").parse(after_counter) {
-            if alt((tag::<_, _, VerboseError<&str>>("~"), tag("this ")))
-                .parse(on_rest)
-                .is_ok()
-            {
-                TargetFilter::SelfRef
-            } else if alt((tag::<_, _, VerboseError<&str>>("it"), tag("itself")))
-                .parse(on_rest)
-                .is_ok()
-            {
-                // CR 608.2k: Bare pronoun — context-dependent
-                resolve_it_pronoun(ctx)
-            } else {
-                let (t, _) = parse_target(on_rest);
-                t
-            }
-        } else {
+    let target = if let Ok((on_rest, _)) = tag::<_, _, OracleError<'_>>("on ").parse(after_counter)
+    {
+        if alt((tag::<_, _, OracleError<'_>>("~"), tag("this ")))
+            .parse(on_rest)
+            .is_ok()
+        {
             TargetFilter::SelfRef
-        };
+        } else if alt((tag::<_, _, OracleError<'_>>("it"), tag("itself")))
+            .parse(on_rest)
+            .is_ok()
+        {
+            // CR 608.2k: Bare pronoun — context-dependent
+            resolve_it_pronoun(ctx)
+        } else {
+            let (t, _) = parse_target(on_rest);
+            t
+        }
+    } else {
+        TargetFilter::SelfRef
+    };
 
     // CR 603.7c: "that many" — resolve from trigger event context at runtime.
     Some(Effect::PutCounter {
@@ -2509,11 +2578,9 @@ fn try_parse_that_many_counters(lower: &str, ctx: &ParseContext) -> Option<Effec
 /// CR 506.4: Parse "remove [target] from combat" patterns.
 /// Matches: "remove it from combat", "remove ~ from combat",
 /// "remove target [creature] from combat", "remove that creature from combat".
-fn parse_remove_from_combat_ast(lower: &str) -> Option<TargetFilter> {
+fn parse_remove_from_combat_ast(lower: &str, ctx: &mut ParseContext) -> Option<TargetFilter> {
     // Strip the "remove " prefix
-    let (rest, _) = tag::<_, _, VerboseError<&str>>("remove ")
-        .parse(lower)
-        .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("remove ").parse(lower).ok()?;
     // Check that "from combat" appears in the remainder
     let from_combat_pos = rest.find("from combat")?;
     let subject = rest[..from_combat_pos].trim();
@@ -2531,10 +2598,11 @@ fn parse_remove_from_combat_ast(lower: &str) -> Option<TargetFilter> {
             }
             // structural: not dispatch — mirrors guard above for warning diagnostic
             if matches!(tf, TargetFilter::Any) && subject.starts_with("target") {
-                push_warning(format!(
-                    "target-fallback: 'target' prefix but unrecognized filter in '{}'",
-                    subject
-                ));
+                ctx.push_diagnostic(OracleDiagnostic::TargetFallback {
+                    context: "'target' prefix but unrecognized filter".into(),
+                    text: subject.into(),
+                    line_index: 0,
+                });
             }
             tf
         }
@@ -2546,7 +2614,7 @@ fn parse_remove_from_combat_ast(lower: &str) -> Option<TargetFilter> {
 ///
 /// Accepts: "your", "their", "its owner's", "that player's". These are the possessives
 /// that can precede a zone reference in a "shuffle X into Y" phrase.
-fn parse_possessive_determiner(input: &str) -> nom::IResult<&str, (), VerboseError<&str>> {
+fn parse_possessive_determiner(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
     value(
         (),
         alt((
@@ -2559,7 +2627,7 @@ fn parse_possessive_determiner(input: &str) -> nom::IResult<&str, (), VerboseErr
     .parse(input)
 }
 
-fn parse_shuffle_origin_zones(input: &str) -> nom::IResult<&str, Vec<Zone>, VerboseError<&str>> {
+fn parse_shuffle_origin_zones(input: &str) -> nom::IResult<&str, Vec<Zone>, OracleError<'_>> {
     alt((
         value(vec![Zone::Hand, Zone::Graveyard], tag("hand and graveyard")),
         value(vec![Zone::Graveyard, Zone::Hand], tag("graveyard and hand")),
@@ -2581,25 +2649,21 @@ fn parse_shuffle_origin_zones(input: &str) -> nom::IResult<&str, Vec<Zone>, Verb
 ///
 /// Supports zones: hand, graveyard, exile. Returns None for any other structure.
 fn parse_mass_zones_to_library(lower: &str) -> Option<Vec<Zone>> {
-    let (rest, _) = tag::<_, _, VerboseError<&str>>("shuffle ")
-        .parse(lower)
-        .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("shuffle ").parse(lower).ok()?;
     let (rest, _) = opt(preceded(
-        tag::<_, _, VerboseError<&str>>("the cards "),
+        tag::<_, _, OracleError<'_>>("the cards "),
         alt((tag("from "), tag("in "))),
     ))
     .parse(rest)
     .ok()?;
     // "{possessive} "
     let (rest, _) = parse_possessive_determiner(rest).ok()?;
-    let (rest, _) = tag::<_, _, VerboseError<&str>>(" ").parse(rest).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" ").parse(rest).ok()?;
     let (rest, origins) = parse_shuffle_origin_zones(rest).ok()?;
     // " into {possessive} library"
-    let (rest, _) = tag::<_, _, VerboseError<&str>>(" into ").parse(rest).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" into ").parse(rest).ok()?;
     let (rest, _) = parse_possessive_determiner(rest).ok()?;
-    let (_rest, _) = tag::<_, _, VerboseError<&str>>(" library")
-        .parse(rest)
-        .ok()?;
+    let (_rest, _) = tag::<_, _, OracleError<'_>>(" library").parse(rest).ok()?;
     Some(origins)
 }
 
@@ -2626,7 +2690,7 @@ pub(super) fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImpera
             target: TargetFilter::Player,
         });
     }
-    if tag::<_, _, VerboseError<&str>>("shuffle")
+    if tag::<_, _, OracleError<'_>>("shuffle")
         .parse(lower)
         .is_err()
         || !nom_primitives::scan_contains(lower, "library")
@@ -2637,7 +2701,7 @@ pub(super) fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImpera
     // "shuffle {possessive} library" — extract the possessive word to determine the target.
     // Only matches the exact form "shuffle your library" / "shuffle their library" etc.;
     // compound forms like "shuffle your graveyard into your library" fall through.
-    if let Some(possessive) = tag::<_, _, VerboseError<&str>>("shuffle ")
+    if let Some(possessive) = tag::<_, _, OracleError<'_>>("shuffle ")
         .parse(lower)
         .ok()
         .map(|(rest, _)| rest)
@@ -2672,11 +2736,8 @@ pub(super) fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImpera
         // matched a pronoun the inner combinator didn't recognize — defensive
         // and also matches the existing "shuffle this creature into …" form.
         let target = nom_primitives::scan_at_word_boundaries(lower, |input| {
-            let (rest, _) = alt((
-                tag::<_, _, VerboseError<&str>>("shuffle "),
-                tag("shuffles "),
-            ))
-            .parse(input)?;
+            let (rest, _) =
+                alt((tag::<_, _, OracleError<'_>>("shuffle "), tag("shuffles "))).parse(input)?;
             alt((
                 value(TargetFilter::ParentTarget, tag("them")),
                 value(TargetFilter::ParentTarget, tag("that card")),
@@ -2701,7 +2762,7 @@ pub(super) fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImpera
         // to accept an owner-of-target binding (separate commit).
         let owner_library = nom_primitives::scan_at_word_boundaries(lower, |input| {
             alt((
-                value((), tag::<_, _, VerboseError<&str>>("its owner's library")),
+                value((), tag::<_, _, OracleError<'_>>("its owner's library")),
                 value((), tag("their owner's library")),
                 value((), tag("their owners' libraries")),
             ))
@@ -3061,7 +3122,7 @@ pub(super) fn parse_destroy_ast(text: &str, lower: &str) -> Option<ZoneCounterIm
         let (_, rest) = nom_on_lower(text, lower, |input| value((), tag("destroy ")).parse(input))?;
         let (target, _rem) = parse_target(rest);
         #[cfg(debug_assertions)]
-        super::types::assert_no_compound_remainder(_rem, text);
+        assert_no_compound_remainder(_rem, text);
         return Some(ZoneCounterImperativeAst::Destroy { target, all: true });
     }
     if let Some((_, rest)) =
@@ -3069,7 +3130,7 @@ pub(super) fn parse_destroy_ast(text: &str, lower: &str) -> Option<ZoneCounterIm
     {
         let (target, _rem) = parse_target(rest);
         #[cfg(debug_assertions)]
-        super::types::assert_no_compound_remainder(_rem, text);
+        assert_no_compound_remainder(_rem, text);
         return Some(ZoneCounterImperativeAst::Destroy { target, all: false });
     }
     None
@@ -3084,7 +3145,7 @@ pub(super) fn parse_destroy_ast(text: &str, lower: &str) -> Option<ZoneCounterIm
 /// Bog, Tormod's Crypt, Cremate, Faerie Macabre, etc. — so we recognize them
 /// here at the dispatch site rather than widening `POSSESSIVES` globally.
 fn starts_with_target_possessive_zone(rest_lower: &str) -> bool {
-    fn inner(i: &str) -> nom::IResult<&str, &str, VerboseError<&str>> {
+    fn inner(i: &str) -> nom::IResult<&str, &str, OracleError<'_>> {
         preceded(
             alt((tag("target player's "), tag("target opponent's "))),
             alt((tag("graveyard"), tag("library"), tag("hand"))),
@@ -3094,11 +3155,15 @@ fn starts_with_target_possessive_zone(rest_lower: &str) -> bool {
     inner(rest_lower).is_ok()
 }
 
-pub(super) fn parse_exile_ast(text: &str, lower: &str) -> Option<ZoneCounterImperativeAst> {
-    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("exile the top ").parse(lower) {
+pub(super) fn parse_exile_ast(
+    text: &str,
+    lower: &str,
+    ctx: &ParseContext,
+) -> Option<ZoneCounterImperativeAst> {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("exile the top ").parse(lower) {
         let (count, remainder) = if let Ok((rem, n)) = nom_primitives::parse_number.parse(rest) {
             (QuantityExpr::Fixed { value: n as i32 }, rem.trim_start())
-        } else if let Ok((rem, _)) = tag::<_, _, VerboseError<&str>>("x").parse(rest) {
+        } else if let Ok((rem, _)) = tag::<_, _, OracleError<'_>>("x").parse(rest) {
             (
                 QuantityExpr::Ref {
                     qty: QuantityRef::Variable {
@@ -3110,13 +3175,14 @@ pub(super) fn parse_exile_ast(text: &str, lower: &str) -> Option<ZoneCounterImpe
         } else {
             (QuantityExpr::Fixed { value: 1 }, rest)
         };
+        let that_player = that_player_library_filter(ctx);
         for (pattern, player) in [
             ("card of your library", TargetFilter::Controller),
             ("cards of your library", TargetFilter::Controller),
-            ("card of that player's library", TargetFilter::ParentTarget),
-            ("cards of that player's library", TargetFilter::ParentTarget),
+            ("card of that player's library", that_player.clone()),
+            ("cards of that player's library", that_player),
         ] {
-            if tag::<_, _, VerboseError<&str>>(pattern)
+            if tag::<_, _, OracleError<'_>>(pattern)
                 .parse(remainder)
                 .is_ok()
             {
@@ -3131,7 +3197,7 @@ pub(super) fn parse_exile_ast(text: &str, lower: &str) -> Option<ZoneCounterImpe
         let rest_lower = &lower[lower.len() - rest.len()..];
         let (parsed_target, _rem) = parse_target(rest);
         #[cfg(debug_assertions)]
-        super::types::assert_no_compound_remainder(_rem, text);
+        assert_no_compound_remainder(_rem, text);
         // CR 701.5a: "exile all spells" must constrain to the stack.
         let target = if nom_primitives::scan_contains(rest_lower, "spell") {
             super::constrain_filter_to_stack(parsed_target)
@@ -3160,7 +3226,7 @@ pub(super) fn parse_exile_ast(text: &str, lower: &str) -> Option<ZoneCounterImpe
     if mass_zone {
         let (target, _rem) = parse_target(rest_text);
         #[cfg(debug_assertions)]
-        super::types::assert_no_compound_remainder(_rem, text);
+        assert_no_compound_remainder(_rem, text);
         let origin = super::infer_origin_zone(rest_lower);
         return Some(ZoneCounterImperativeAst::Exile {
             origin,
@@ -3171,7 +3237,7 @@ pub(super) fn parse_exile_ast(text: &str, lower: &str) -> Option<ZoneCounterImpe
 
     let (parsed_target, _rem) = parse_target(rest_text);
     #[cfg(debug_assertions)]
-    super::types::assert_no_compound_remainder(_rem, text);
+    assert_no_compound_remainder(_rem, text);
     // CR 701.5a: "exile target spell" must constrain targeting to the stack,
     // mirroring parse_counter_ast at line 1218-1219.
     let target = if nom_primitives::scan_contains(rest_lower, "spell") {
@@ -3185,6 +3251,23 @@ pub(super) fn parse_exile_ast(text: &str, lower: &str) -> Option<ZoneCounterImpe
         target,
         all: false,
     })
+}
+
+fn that_player_library_filter(ctx: &ParseContext) -> TargetFilter {
+    if matches!(ctx.relative_player_scope, Some(ControllerRef::ScopedPlayer)) {
+        return TargetFilter::ScopedPlayer;
+    }
+    if matches!(ctx.relative_player_scope, Some(ControllerRef::TargetPlayer)) {
+        return TargetFilter::TriggeringPlayer;
+    }
+
+    match &ctx.subject {
+        Some(TargetFilter::Typed(tf)) if tf.type_filters.is_empty() && tf.controller.is_some() => {
+            TargetFilter::TriggeringPlayer
+        }
+        Some(TargetFilter::Player) => TargetFilter::TriggeringPlayer,
+        _ => TargetFilter::ParentTarget,
+    }
 }
 
 pub(super) fn parse_counter_ast(text: &str, lower: &str) -> Option<ZoneCounterImperativeAst> {
@@ -3214,7 +3297,7 @@ pub(super) fn parse_counter_ast(text: &str, lower: &str) -> Option<ZoneCounterIm
     // on noun-counter phrases like "page counter on this artifact".
     // Bare "abilities" head: tag-match (skipping leading whitespace) so the
     // dispatch is a real nom combinator, not a string starts_with.
-    fn abilities_head(i: &str) -> nom::IResult<&str, &str, VerboseError<&str>> {
+    fn abilities_head(i: &str) -> nom::IResult<&str, &str, OracleError<'_>> {
         preceded(nom::character::complete::multispace0, tag("abilities")).parse(i)
     }
     let abilities_match = nom_primitives::scan_contains(rest, "activated or triggered ability")
@@ -3232,7 +3315,7 @@ pub(super) fn parse_counter_ast(text: &str, lower: &str) -> Option<ZoneCounterIm
 
     let (target, _rem) = parse_target(rest_orig);
     #[cfg(debug_assertions)]
-    super::types::assert_no_compound_remainder(_rem, text);
+    assert_no_compound_remainder(_rem, text);
     let target = if nom_primitives::scan_contains(rest, "spell") {
         super::constrain_filter_to_stack(target)
     } else {
@@ -3275,7 +3358,7 @@ fn parse_pay_life_amount(rest: &str) -> Option<QuantityExpr> {
     // helpers are not nom-based, so content cleanup (trailing period + space)
     // happens on the already-dispatched remainder — nom owns the dispatch,
     // not the content normalization.
-    if let Ok((tail, _)) = tag::<_, _, VerboseError<&str>>("life equal to ").parse(rest) {
+    if let Ok((tail, _)) = tag::<_, _, OracleError<'_>>("life equal to ").parse(rest) {
         let qty_text = tail.trim_end().trim_end_matches('.').trim_end();
         if let Some(expr) = crate::parser::oracle_quantity::parse_event_context_quantity(qty_text) {
             return Some(expr);
@@ -3287,7 +3370,7 @@ fn parse_pay_life_amount(rest: &str) -> Option<QuantityExpr> {
     }
 
     // CR 107.1b: "pay X life" — variable amount resolved from `chosen_x`.
-    if terminated(tag::<_, _, VerboseError<&str>>("x life"), word_boundary)
+    if terminated(tag::<_, _, OracleError<'_>>("x life"), word_boundary)
         .parse(rest)
         .is_ok()
     {
@@ -3303,7 +3386,7 @@ fn parse_pay_life_amount(rest: &str) -> Option<QuantityExpr> {
     // hypothetical phrases like "3 lifelink" cannot false-match.
     if let Ok((_, (n, _))) = (
         nom_primitives::parse_number,
-        terminated(tag::<_, _, VerboseError<&str>>(" life"), word_boundary),
+        terminated(tag::<_, _, OracleError<'_>>(" life"), word_boundary),
     )
         .parse(rest)
     {
@@ -3316,6 +3399,7 @@ fn parse_pay_life_amount(rest: &str) -> Option<QuantityExpr> {
 pub(super) fn parse_cost_resource_ast(
     text: &str,
     lower: &str,
+    ctx: &mut ParseContext,
 ) -> Option<CostResourceImperativeAst> {
     if let Some(Effect::Unimplemented {
         name,
@@ -3343,7 +3427,7 @@ pub(super) fn parse_cost_resource_ast(
             });
         }
         // CR 107.14: "pay any amount of {E}" → variable energy payment
-        if let Ok((_, _)) = tag::<_, _, VerboseError<&str>>("any amount of {e}").parse(rest) {
+        if let Ok((_, _)) = tag::<_, _, OracleError<'_>>("any amount of {e}").parse(rest) {
             return Some(CostResourceImperativeAst::Pay {
                 cost: PaymentCost::Energy {
                     amount: QuantityExpr::Ref {
@@ -3354,9 +3438,22 @@ pub(super) fn parse_cost_resource_ast(
                 },
             });
         }
+        // CR 118.1 + CR 107.3: "pay any amount of mana" → variable generic
+        // mana payment. Join forces uses the total paid this way as X for the
+        // following effect chain.
+        if let Ok((_, _)) = tag::<_, _, OracleError<'_>>("any amount of mana").parse(rest) {
+            return Some(CostResourceImperativeAst::Pay {
+                cost: PaymentCost::Mana {
+                    cost: crate::types::mana::ManaCost::Cost {
+                        shards: vec![crate::types::mana::ManaCostShard::X],
+                        generic: 0,
+                    },
+                },
+            });
+        }
         // "pay an amount of {e} equal to ..." → variable energy payment
         if let Ok((rest_after, _)) =
-            tag::<_, _, VerboseError<&str>>("an amount of {e} equal to ").parse(rest)
+            tag::<_, _, OracleError<'_>>("an amount of {e} equal to ").parse(rest)
         {
             // Parse the quantity reference after "equal to"
             let rest_trimmed = rest_after.trim().trim_end_matches('.');
@@ -3426,7 +3523,7 @@ pub(super) fn parse_cost_resource_ast(
             _ => None,
         };
     }
-    if let Some(effect) = super::try_parse_damage(lower, text) {
+    if let Some(effect) = super::try_parse_damage(lower, text, ctx) {
         return match effect {
             Effect::DealDamage {
                 amount,
@@ -3502,22 +3599,34 @@ pub(super) fn lower_cost_resource_ast(ast: CostResourceImperativeAst) -> Effect 
 pub(super) fn parse_imperative_family_ast(
     text: &str,
     lower: &str,
-    ctx: &ParseContext,
+    ctx: &mut ParseContext,
 ) -> Option<ImperativeFamilyAst> {
     let first_word = lower.split_whitespace().next().unwrap_or("");
 
-    // CR 500.8: "additional combat phase" can appear in various sentence structures
+    // CR 500.8: Additional step/phase effects can appear in various sentence structures
     // ("there is an additional combat phase", "after this phase, there is an additional...").
     // Intercept early regardless of first_word.
     if nom_primitives::scan_contains(lower, "additional combat phase") {
         let with_main =
             nom_primitives::scan_contains(lower, "followed by an additional main phase");
-        return Some(ImperativeFamilyAst::GainKeyword(
-            Effect::AdditionalCombatPhase {
-                target: TargetFilter::Controller,
-                with_main_phase: with_main,
+        return Some(ImperativeFamilyAst::GainKeyword(Effect::AdditionalPhase {
+            target: TargetFilter::Controller,
+            phase: Phase::BeginCombat,
+            after: Phase::EndCombat,
+            followed_by: if with_main {
+                vec![Phase::PostCombatMain]
+            } else {
+                vec![]
             },
-        ));
+        }));
+    }
+    if nom_primitives::scan_contains(lower, "additional upkeep step") {
+        return Some(ImperativeFamilyAst::GainKeyword(Effect::AdditionalPhase {
+            target: TargetFilter::Controller,
+            phase: Phase::Upkeep,
+            after: Phase::Upkeep,
+            followed_by: vec![],
+        }));
     }
 
     // CR 722.1: "You control target player during that player's next turn"
@@ -3525,7 +3634,7 @@ pub(super) fn parse_imperative_family_ast(
     // in a declarative sentence (not an imperative verb), so this bypasses the
     // first_word dispatch below. Delegates to the ControlNextTurn combinator
     // in `parse_targeted_action_ast`.
-    if tag::<_, _, VerboseError<&str>>("you control ")
+    if tag::<_, _, OracleError<'_>>("you control ")
         .parse(lower)
         .is_ok()
     {
@@ -3543,7 +3652,7 @@ pub(super) fn parse_imperative_family_ast(
 
         // Cost/resource verbs (CR 117-118)
         "pay" | "spend" => {
-            parse_cost_resource_ast(text, lower).map(ImperativeFamilyAst::CostResource)
+            parse_cost_resource_ast(text, lower, ctx).map(ImperativeFamilyAst::CostResource)
         }
 
         // CR 701.10: "double the power/toughness" or "double the number of counters"
@@ -3556,12 +3665,21 @@ pub(super) fn parse_imperative_family_ast(
 
         // Numeric verbs (CR 121)
         "draw" if nom_primitives::scan_contains(lower, "that many") => {
-            // "draw that many cards" → EventContextAmount, bypass numeric AST
-            // which can only represent fixed u32 counts.
+            // "draw that many cards" / "draw that many cards minus one" →
+            // EventContextAmount-based quantities, bypassing numeric AST which
+            // can only represent fixed u32 counts.
+            let count = tag::<_, _, OracleError<'_>>("draw ")
+                .parse(lower)
+                .ok()
+                .and_then(|(tail_lower, _)| {
+                    let tail = &text[text.len() - tail_lower.len()..];
+                    super::super::oracle_quantity::parse_event_context_quantity(tail)
+                })
+            .unwrap_or(QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            });
             Some(ImperativeFamilyAst::GainKeyword(Effect::Draw {
-                count: QuantityExpr::Ref {
-                    qty: QuantityRef::EventContextAmount,
-                },
+                count,
                 target: TargetFilter::Controller,
             }))
         }
@@ -3579,9 +3697,9 @@ pub(super) fn parse_imperative_family_ast(
             .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::Targeted(ast))),
 
         // Search/creation verbs (CR 701.18, CR 111.2)
-        "search" | "seek" => parse_search_and_creation_ast(text, lower)
+        "search" | "seek" => parse_search_and_creation_ast(text, lower, ctx)
             .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::SearchCreation(ast))),
-        "create" => parse_search_and_creation_ast(text, lower)
+        "create" => parse_search_and_creation_ast(text, lower, ctx) // allow-noncombinator: pre-existing match dispatch, only threading ctx through
             .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::SearchCreation(ast))),
 
         // Utility verbs (CR 615, CR 701.19, CR 701.6, CR 613.4d)
@@ -3599,15 +3717,15 @@ pub(super) fn parse_imperative_family_ast(
         "shuffle" | "shuffles" => parse_shuffle_ast(text, lower).map(ImperativeFamilyAst::Shuffle),
 
         // Reveal: "reveal the top N" → Dig (via search path), else hand reveal (CR 701.16, CR 701.20)
-        "reveal" | "reveals" => parse_search_and_creation_ast(text, lower)
+        "reveal" | "reveals" => parse_search_and_creation_ast(text, lower, ctx)
             .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::SearchCreation(ast)))
             .or_else(|| {
-                parse_hand_reveal_ast(text, lower)
+                parse_hand_reveal_ast(text, lower, ctx)
                     .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::HandReveal(ast)))
             }),
 
         // Choose (CR 700.2)
-        "choose" | "secretly" => parse_choose_ast(text, lower)
+        "choose" | "secretly" => parse_choose_ast(text, lower, ctx)
             .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::Choose(ast))),
 
         // ── Exact-match keyword actions ──
@@ -3633,24 +3751,62 @@ pub(super) fn parse_imperative_family_ast(
         "learn" => Some(ImperativeFamilyAst::Learn),
         // CR 701.62a: "manifest dread" / CR 701.40a: "manifest the top card of your library"
         "manifest" => {
-            if tag::<_, _, VerboseError<&str>>("manifest dread")
+            if tag::<_, _, OracleError<'_>>("manifest dread")
                 .parse(lower)
                 .is_ok()
             {
                 Some(ImperativeFamilyAst::ManifestDread)
             } else if let Ok((rest, _)) =
-                tag::<_, _, VerboseError<&str>>("manifest the top ").parse(lower)
+                tag::<_, _, OracleError<'_>>("manifest the top ").parse(lower)
             {
                 // CR 701.40a: "manifest the top card of your library"
-                // or "manifest the top N cards of your library"
-                let count = if rest.starts_with("card ") {
-                    QuantityExpr::Fixed { value: 1 }
-                } else if let Ok((_, n)) = nom_primitives::parse_number.parse(rest) {
-                    QuantityExpr::Fixed { value: n as i32 }
+                // or "manifest the top N cards of your/that player's library"
+                let parsed = alt((
+                    value(
+                        QuantityExpr::Fixed { value: 1 },
+                        alt((
+                            tag::<_, _, OracleError<'_>>("card "),
+                            tag("cards "),
+                        )),
+                    ),
+                    map(nom_primitives::parse_number, |n| QuantityExpr::Fixed {
+                        value: n as i32,
+                    }),
+                ))
+                .parse(rest);
+
+                let (count, after_count) = if let Ok((after_count, count)) = parsed {
+                    let after_count = if matches!(&count, QuantityExpr::Fixed { value: 1 }) {
+                        after_count
+                    } else if let Ok((after_cards, _)) = preceded(
+                        tag::<_, _, OracleError<'_>>(" "),
+                        alt((tag("card "), tag("cards "))),
+                    )
+                    .parse(after_count)
+                    {
+                        after_cards
+                    } else {
+                        after_count
+                    };
+                    (count, after_count)
                 } else {
-                    QuantityExpr::Fixed { value: 1 }
+                    (QuantityExpr::Fixed { value: 1 }, rest)
                 };
-                Some(ImperativeFamilyAst::Manifest { count })
+
+                let target = if tag::<_, _, OracleError<'_>>("of your library")
+                    .parse(after_count)
+                    .is_ok()
+                {
+                    TargetFilter::Controller
+                } else if tag::<_, _, OracleError<'_>>("of that player's library")
+                    .parse(after_count)
+                    .is_ok()
+                {
+                    that_player_library_filter(ctx)
+                } else {
+                    TargetFilter::Controller
+                };
+                Some(ImperativeFamilyAst::Manifest { target, count })
             } else {
                 None
             }
@@ -3658,7 +3814,7 @@ pub(super) fn parse_imperative_family_ast(
         "proliferate" => Some(ImperativeFamilyAst::Proliferate),
         // CR 701.56a: "time travel" / "time travel N times"
         "time" => {
-            if tag::<_, _, VerboseError<&str>>("time travel")
+            if tag::<_, _, OracleError<'_>>("time travel")
                 .parse(lower)
                 .is_ok()
             {
@@ -3671,7 +3827,7 @@ pub(super) fn parse_imperative_family_ast(
         "populate" => Some(ImperativeFamilyAst::Populate),
         // CR 701.30: "clash with an opponent"
         "clash" => {
-            if tag::<_, _, VerboseError<&str>>("clash with an opponent")
+            if tag::<_, _, OracleError<'_>>("clash with an opponent")
                 .parse(lower)
                 .is_ok()
             {
@@ -3704,7 +3860,7 @@ pub(super) fn parse_imperative_family_ast(
         }
         // Blight N as an effect (e.g. trigger effect "blight 1")
         "blight" => {
-            let rest = alt((tag::<_, _, VerboseError<&str>>("blight "), tag("blight")))
+            let rest = alt((tag::<_, _, OracleError<'_>>("blight "), tag("blight")))
                 .parse(lower)
                 .map(|(r, _)| r)
                 .unwrap_or("");
@@ -3721,7 +3877,7 @@ pub(super) fn parse_imperative_family_ast(
         "forage" => Some(ImperativeFamilyAst::GainKeyword(Effect::Forage)),
         // Collect evidence N keyword action (CR 702.163a)
         "collect" => {
-            if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("collect evidence ").parse(lower)
+            if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("collect evidence ").parse(lower)
             {
                 let count = nom_primitives::parse_number
                     .parse(rest.trim())
@@ -3736,7 +3892,7 @@ pub(super) fn parse_imperative_family_ast(
         }
         // Endure N keyword action
         "endure" | "endures" => {
-            let rest = alt((tag::<_, _, VerboseError<&str>>("endure "), tag("endures ")))
+            let rest = alt((tag::<_, _, OracleError<'_>>("endure "), tag("endures ")))
                 .parse(lower)
                 .map(|(r, _)| r)
                 .unwrap_or("");
@@ -3760,7 +3916,7 @@ pub(super) fn parse_imperative_family_ast(
         "bolster" => try_parse_bolster(lower).map(ImperativeFamilyAst::GainKeyword),
         // CR 701.41a: "support N"
         "support" => {
-            let (rest, _) = tag::<_, _, VerboseError<&str>>("support ")
+            let (rest, _) = tag::<_, _, OracleError<'_>>("support ")
                 .parse(lower)
                 .ok()?;
             let rest = rest.trim().trim_end_matches('.');
@@ -3786,10 +3942,10 @@ pub(super) fn parse_imperative_family_ast(
             // precede plain "flip a coin". The N-coin form is tried after
             // "until lose" (since "until lose" always has "a coin"), but
             // before the 1-coin fallback.
-            if let Ok((_, ast)) = value::<_, _, VerboseError<&str>, _>(
+            if let Ok((_, ast)) = value::<_, _, OracleError<'_>, _>(
                 ImperativeFamilyAst::FlipCoinUntilLose,
                 alt((
-                    tag::<_, _, VerboseError<&str>>("flip a coin until you lose a flip"),
+                    tag::<_, _, OracleError<'_>>("flip a coin until you lose a flip"),
                     tag("flips a coin until they lose a flip"),
                 )),
             )
@@ -3801,10 +3957,10 @@ pub(super) fn parse_imperative_family_ast(
             if let Some(ast) = try_parse_flip_n_coins(lower) {
                 return Some(ast);
             }
-            value::<_, _, VerboseError<&str>, _>(
+            value::<_, _, OracleError<'_>, _>(
                 ImperativeFamilyAst::FlipCoin,
                 alt((
-                    tag::<_, _, VerboseError<&str>>("flip a coin"),
+                    tag::<_, _, OracleError<'_>>("flip a coin"),
                     tag("flips a coin"),
                 )),
             )
@@ -3828,7 +3984,7 @@ pub(super) fn parse_imperative_family_ast(
         "venture" => alt((
             value(
                 ImperativeFamilyAst::VentureIntoUndercity,
-                tag::<_, _, VerboseError<&str>>("venture into the undercity"),
+                tag::<_, _, OracleError<'_>>("venture into the undercity"),
             ),
             value(
                 ImperativeFamilyAst::VentureIntoDungeon,
@@ -3842,7 +3998,7 @@ pub(super) fn parse_imperative_family_ast(
         // CR 725: "take the initiative"
         "take" | "takes" => {
             if alt((
-                value((), tag::<_, _, VerboseError<&str>>("take the initiative")),
+                value((), tag::<_, _, OracleError<'_>>("take the initiative")),
                 value((), tag("takes the initiative")),
             ))
             .parse(lower)
@@ -3868,7 +4024,7 @@ pub(super) fn parse_imperative_family_ast(
         "phase" | "phases" => {
             // Verb head: "phase out" / "phases out" / "phase in" / "phases in"
             let parsed = alt((
-                value(PhaseDir::Out, tag::<_, _, VerboseError<&str>>("phase out")),
+                value(PhaseDir::Out, tag::<_, _, OracleError<'_>>("phase out")),
                 value(PhaseDir::Out, tag("phases out")),
                 value(PhaseDir::In, tag("phase in")),
                 value(PhaseDir::In, tag("phases in")),
@@ -3916,7 +4072,7 @@ pub(super) fn parse_imperative_family_ast(
         // Both shapes lower to ExchangeControl { target_a, target_b }; in the
         // quantified case both filters are identical.
         "exchange" => {
-            let (rest, _) = tag::<_, _, VerboseError<&str>>("exchange control of ")
+            let (rest, _) = tag::<_, _, OracleError<'_>>("exchange control of ")
                 .parse(lower)
                 .ok()?;
             // Strip trailing terminator from the candidate target span so per-slot
@@ -3944,7 +4100,7 @@ pub(super) fn parse_imperative_family_ast(
         }
         // CR 509.1c: "must be blocked [this turn] [if able]"
         "must" => {
-            if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("must be blocked").parse(lower) {
+            if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("must be blocked").parse(lower) {
                 let rest = rest.trim();
                 if rest.is_empty()
                     || rest == "this turn if able"
@@ -3982,7 +4138,7 @@ pub(super) fn parse_imperative_family_ast(
             .or_else(|| parse_put_ast(text, lower).map(ImperativeFamilyAst::Put)),
 
         // "remove" → "remove from combat" (CR 506.4) → counter removal (step 2)
-        "remove" => parse_remove_from_combat_ast(lower)
+        "remove" => parse_remove_from_combat_ast(lower, ctx) // allow-noncombinator: pre-existing match dispatch, only threading ctx through
             .map(ImperativeFamilyAst::RemoveFromCombat)
             .or_else(|| {
                 parse_zone_counter_ast(text, lower, ctx).map(ImperativeFamilyAst::ZoneCounter)
@@ -3992,7 +4148,8 @@ pub(super) fn parse_imperative_family_ast(
         "move" => parse_zone_counter_ast(text, lower, ctx).map(ImperativeFamilyAst::ZoneCounter),
 
         // "add" → mana/cost-resource (step 1)
-        "add" => parse_cost_resource_ast(text, lower).map(ImperativeFamilyAst::CostResource),
+        // allow-noncombinator: pre-existing match dispatch, only threading ctx through
+        "add" => parse_cost_resource_ast(text, lower, ctx).map(ImperativeFamilyAst::CostResource),
 
         // "gain" → "gain control of" (step 4) → "gain life" (step 3) → keyword (step 8)
         // The current if/else chain checks numeric first (step 3), but numeric guards with
@@ -4049,10 +4206,10 @@ pub(super) fn parse_imperative_family_ast(
         }
 
         // "look" → "look at the top" (step 5) → "look at hand" (step 10)
-        "look" => parse_search_and_creation_ast(text, lower)
+        "look" => parse_search_and_creation_ast(text, lower, ctx) // allow-noncombinator: pre-existing match dispatch, only threading ctx through
             .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::SearchCreation(ast)))
             .or_else(|| {
-                parse_hand_reveal_ast(text, lower)
+                parse_hand_reveal_ast(text, lower, ctx)
                     .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::HandReveal(ast)))
             }),
 
@@ -4064,7 +4221,7 @@ pub(super) fn parse_imperative_family_ast(
 
         // "deals"/"deal" → damage (via cost_resource, which contains try_parse_damage)
         "deals" | "deal" => {
-            parse_cost_resource_ast(text, lower).map(ImperativeFamilyAst::CostResource)
+            parse_cost_resource_ast(text, lower, ctx).map(ImperativeFamilyAst::CostResource)
         }
 
         // "you may" → optional wrapper
@@ -4089,7 +4246,7 @@ pub(super) fn parse_imperative_family_ast(
         // "that player shuffles" where "that" precedes the verb).
         _ => {
             // Damage: try_parse_damage uses lower.find("deals ") — matches anywhere
-            if let Some(ast) = parse_cost_resource_ast(text, lower) {
+            if let Some(ast) = parse_cost_resource_ast(text, lower, ctx) {
                 return Some(ImperativeFamilyAst::CostResource(ast));
             }
             // Numeric: contains("gain")+contains("life"), contains("gets +"), etc.
@@ -4130,7 +4287,7 @@ fn try_parse_exchange_control_targets(span: &str) -> Option<(TargetFilter, Targe
     // full span so its quantifier path runs and returns a single filter that
     // applies to both slots.
     if alt((
-        tag::<_, _, VerboseError<&str>>("two target "),
+        tag::<_, _, OracleError<'_>>("two target "),
         tag("two other target "),
         tag("two another target "),
     ))
@@ -4154,12 +4311,10 @@ fn try_parse_exchange_control_targets(span: &str) -> Option<(TargetFilter, Targe
     // greedy, so a slot with internal " and " would misfire. No current card
     // triggers this; if such text appears, switch to a right-anchored split
     // or recognise per-slot terminators.
-    let (right, (left, _)) = nom::sequence::pair(
-        take_until::<_, _, VerboseError<&str>>(" and "),
-        tag(" and "),
-    )
-    .parse(span)
-    .ok()?;
+    let (right, (left, _)) =
+        nom::sequence::pair(take_until::<_, _, OracleError<'_>>(" and "), tag(" and "))
+            .parse(span)
+            .ok()?;
     let target_a = parse_exchange_slot(left.trim())?;
     let target_b = parse_exchange_slot(right.trim())?;
     Some((target_a, target_b))
@@ -4174,7 +4329,7 @@ fn parse_exchange_slot(phrase: &str) -> Option<TargetFilter> {
     // Self-referential slot dispatch via nom: "this <type>" refers to the
     // source permanent and resolves to SelfRef regardless of the type word
     // (artifact, creature, enchantment …).
-    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("this ").parse(phrase) {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("this ").parse(phrase) {
         if !rest.trim().is_empty() {
             return Some(TargetFilter::SelfRef);
         }
@@ -4207,7 +4362,7 @@ fn try_parse_lose_all_player_counters(text: &str, lower: &str) -> Option<Effect>
     // "loses all counters" (trailing period already stripped by the dispatch).
     let bare = lower.trim().trim_end_matches('.').trim();
     let bare_tail = alt((
-        tag::<_, _, VerboseError<&str>>("loses all counters"),
+        tag::<_, _, OracleError<'_>>("loses all counters"),
         tag("lose all counters"),
     ))
     .parse(bare);
@@ -4246,7 +4401,7 @@ fn try_parse_lose_all_player_counters(text: &str, lower: &str) -> Option<Effect>
 /// - "get ten rad counters"
 fn try_parse_player_counter(lower: &str) -> Option<ImperativeFamilyAst> {
     // Strip "get/gets " prefix
-    let (rest, _) = alt((tag::<_, _, VerboseError<&str>>("gets "), tag("get ")))
+    let (rest, _) = alt((tag::<_, _, OracleError<'_>>("gets "), tag("get ")))
         .parse(lower)
         .ok()?;
 
@@ -4300,7 +4455,7 @@ fn try_parse_player_counter(lower: &str) -> Option<ImperativeFamilyAst> {
 /// word-number, and `X` forms uniformly. Returns None for "flip a coin" / "flip one coin"
 /// so the caller falls back to `FlipCoin` (the existing 1-flip shape).
 fn try_parse_flip_n_coins(lower: &str) -> Option<ImperativeFamilyAst> {
-    let (rest, _) = alt((tag::<_, _, VerboseError<&str>>("flip "), tag("flips ")))
+    let (rest, _) = alt((tag::<_, _, OracleError<'_>>("flip "), tag("flips ")))
         .parse(lower)
         .ok()?;
 
@@ -4311,7 +4466,7 @@ fn try_parse_flip_n_coins(lower: &str) -> Option<ImperativeFamilyAst> {
     // leading space. Word-boundary termination rejects "coinsomething".
     // "flip a coin" is handled by FlipCoin; "flip one coin" would semantically
     // match but is never printed.
-    let (after_noun, _) = alt((tag::<_, _, VerboseError<&str>>("coins"), tag("coin")))
+    let (after_noun, _) = alt((tag::<_, _, OracleError<'_>>("coins"), tag("coin")))
         .parse(after)
         .ok()?;
     // structural: not dispatch — checks that the next char is a non-alphanumeric boundary.
@@ -4329,11 +4484,11 @@ fn try_parse_flip_n_coins(lower: &str) -> Option<ImperativeFamilyAst> {
 
 fn try_parse_roll_die_sides(lower: &str) -> Option<u8> {
     // Strip the "roll a " / "rolls a " prefix.
-    let (rest, _) = alt((tag::<_, _, VerboseError<&str>>("roll a "), tag("rolls a ")))
+    let (rest, _) = alt((tag::<_, _, OracleError<'_>>("roll a "), tag("rolls a ")))
         .parse(lower)
         .ok()?;
     // Numeric form: "d20", "d6", "d4"
-    if let Ok((num_rest, _)) = tag::<_, _, VerboseError<&str>>("d").parse(rest) {
+    if let Ok((num_rest, _)) = tag::<_, _, OracleError<'_>>("d").parse(rest) {
         if let Ok(sides) = num_rest.parse::<u8>() {
             return Some(sides);
         }
@@ -4342,10 +4497,7 @@ fn try_parse_roll_die_sides(lower: &str) -> Option<u8> {
     let (_, sides) = alt((
         value(
             4_u8,
-            alt((
-                tag::<_, _, VerboseError<&str>>("four-sided"),
-                tag("4-sided"),
-            )),
+            alt((tag::<_, _, OracleError<'_>>("four-sided"), tag("4-sided"))),
         ),
         value(6, alt((tag("six-sided"), tag("6-sided")))),
         value(8, alt((tag("eight-sided"), tag("8-sided")))),
@@ -4564,10 +4716,7 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         // lowering for "its controller manifests..." routes through the dedicated
         // subject-predicate arm in `lower_subject_predicate_ast` below, which
         // constructs `Effect::Manifest { target: subject.affected, ... }` directly.
-        ImperativeFamilyAst::Manifest { count } => Effect::Manifest {
-            target: TargetFilter::Controller,
-            count,
-        },
+        ImperativeFamilyAst::Manifest { target, count } => Effect::Manifest { target, count },
         ImperativeFamilyAst::ManifestDread => Effect::ManifestDread,
         ImperativeFamilyAst::BecomeMonarch => Effect::BecomeMonarch,
         ImperativeFamilyAst::VentureIntoDungeon => Effect::VentureIntoDungeon,
@@ -4631,18 +4780,18 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
 pub(super) fn parse_zone_counter_ast(
     text: &str,
     lower: &str,
-    ctx: &ParseContext,
+    ctx: &mut ParseContext,
 ) -> Option<ZoneCounterImperativeAst> {
     if let Some(ast) = parse_destroy_ast(text, lower) {
         return Some(ast);
     }
-    if let Some(ast) = parse_exile_ast(text, lower) {
+    if let Some(ast) = parse_exile_ast(text, lower, ctx) {
         return Some(ast);
     }
     if let Some(ast) = parse_counter_ast(text, lower) {
         return Some(ast);
     }
-    if tag::<_, _, VerboseError<&str>>("put ").parse(lower).is_ok()
+    if tag::<_, _, OracleError<'_>>("put ").parse(lower).is_ok()
         && nom_primitives::scan_contains(lower, "counter")
     {
         // Try move-counters first ("put its counters on ...")
@@ -4650,6 +4799,8 @@ pub(super) fn parse_zone_counter_ast(
             Effect::MoveCounters {
                 source,
                 counter_type,
+                count,
+                mode,
                 target,
             },
             _rem,
@@ -4658,6 +4809,8 @@ pub(super) fn parse_zone_counter_ast(
             return Some(ZoneCounterImperativeAst::MoveCounters {
                 source,
                 counter_type,
+                count,
+                mode,
                 target,
             });
         }
@@ -4716,9 +4869,7 @@ pub(super) fn parse_zone_counter_ast(
             _ => None,
         };
     }
-    if tag::<_, _, VerboseError<&str>>("remove ")
-        .parse(lower)
-        .is_ok()
+    if tag::<_, _, OracleError<'_>>("remove ").parse(lower).is_ok()
         && nom_primitives::scan_contains(lower, "counter")
     {
         return match try_parse_remove_counter(lower, ctx) {
@@ -4735,20 +4886,22 @@ pub(super) fn parse_zone_counter_ast(
         };
     }
     // CR 122.5: "move [N] [type] counter(s) from [source] onto/to [target]"
-    if tag::<_, _, VerboseError<&str>>("move ")
-        .parse(lower)
-        .is_ok()
+    if tag::<_, _, OracleError<'_>>("move ").parse(lower).is_ok()
         && nom_primitives::scan_contains(lower, "counter")
     {
         if let Some(Effect::MoveCounters {
             source,
             counter_type,
+            count,
+            mode,
             target,
         }) = try_parse_move_counters_from(lower, ctx)
         {
             return Some(ZoneCounterImperativeAst::MoveCounters {
                 source,
                 counter_type,
+                count,
+                mode,
                 target,
             });
         }
@@ -4875,10 +5028,14 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
         ZoneCounterImperativeAst::MoveCounters {
             source,
             counter_type,
+            count,
+            mode,
             target,
         } => Effect::MoveCounters {
             source,
             counter_type,
+            count,
+            mode,
             target,
         },
     }
@@ -4888,7 +5045,7 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
 ///
 /// Handles numeric and "X" counts via shared `parse_count_expr`.
 fn try_parse_incubate(lower: &str) -> Option<Effect> {
-    let (rest, _) = tag::<_, _, VerboseError<&str>>("incubate ")
+    let (rest, _) = tag::<_, _, OracleError<'_>>("incubate ")
         .parse(lower)
         .ok()?;
     let rest = rest.trim();
@@ -4909,9 +5066,7 @@ fn try_parse_incubate(lower: &str) -> Option<Effect> {
 /// Handles all subtypes generically. The subtype is canonicalized from plural
 /// to singular form (e.g., "Zombies" -> "Zombie") via `parse_subtype`.
 fn try_parse_amass(text: &str, lower: &str) -> Option<Effect> {
-    let (rest, _) = tag::<_, _, VerboseError<&str>>("amass ")
-        .parse(lower)
-        .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("amass ").parse(lower).ok()?;
     let rest = rest.trim();
     if rest.is_empty() {
         return None;
@@ -4933,7 +5088,7 @@ fn try_parse_amass(text: &str, lower: &str) -> Option<Effect> {
 ///
 /// Used inside activated ability effect text (after the colon).
 fn try_parse_monstrosity(lower: &str) -> Option<Effect> {
-    let (rest, _) = tag::<_, _, VerboseError<&str>>("monstrosity ")
+    let (rest, _) = tag::<_, _, OracleError<'_>>("monstrosity ")
         .parse(lower)
         .ok()?;
     let rest = rest.trim().trim_end_matches('.');
@@ -4947,9 +5102,7 @@ fn try_parse_monstrosity(lower: &str) -> Option<Effect> {
 ///
 /// Used inside activated ability effect text (after the colon).
 fn try_parse_adapt(lower: &str) -> Option<Effect> {
-    let (rest, _) = tag::<_, _, VerboseError<&str>>("adapt ")
-        .parse(lower)
-        .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("adapt ").parse(lower).ok()?;
     let rest = rest.trim().trim_end_matches('.');
 
     let count = parse_count_expr(rest).map(|(q, _)| q)?;
@@ -4972,7 +5125,7 @@ fn try_parse_attack_if_able(lower: &str) -> Option<ImperativeFamilyAst> {
     let trimmed = lower.trim_end_matches('.');
 
     // First try: bare forms without a player reference.
-    let result: Result<(&str, Duration), nom::Err<VerboseError<&str>>> = alt((
+    let result: Result<(&str, Duration), nom::Err<OracleError<'_>>> = alt((
         value(Duration::UntilEndOfTurn, tag("attacks this turn if able")),
         value(Duration::UntilEndOfTurn, tag("attack this turn if able")),
         value(
@@ -5005,7 +5158,7 @@ fn try_parse_attack_if_able(lower: &str) -> Option<ImperativeFamilyAst> {
     // Second try: player-targeted forms — "attacks [player] this turn/combat if able".
     // Strip verb prefix, skip over the player phrase, then match the duration suffix.
     let rest = if let Ok((r, _)) =
-        alt((tag::<_, _, VerboseError<&str>>("attacks "), tag("attack "))).parse(trimmed)
+        alt((tag::<_, _, OracleError<'_>>("attacks "), tag("attack "))).parse(trimmed)
     {
         r
     } else {
@@ -5013,7 +5166,7 @@ fn try_parse_attack_if_able(lower: &str) -> Option<ImperativeFamilyAst> {
     };
 
     // Match duration suffix: "this turn if able" or "this combat if able"
-    let duration_suffix: Result<(&str, Duration), nom::Err<VerboseError<&str>>> = alt((
+    let duration_suffix: Result<(&str, Duration), nom::Err<OracleError<'_>>> = alt((
         value(Duration::UntilEndOfTurn, tag(" this turn if able")),
         value(Duration::UntilEndOfCombat, tag(" this combat if able")),
         value(Duration::UntilEndOfCombat, tag(" each combat if able")),
@@ -5078,9 +5231,7 @@ fn try_parse_subjectless_cant(lower: &str) -> Option<ImperativeFamilyAst> {
 
 /// CR 701.39a: Parse "bolster N" from Oracle text.
 fn try_parse_bolster(lower: &str) -> Option<Effect> {
-    let (rest, _) = tag::<_, _, VerboseError<&str>>("bolster ")
-        .parse(lower)
-        .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("bolster ").parse(lower).ok()?;
     let rest = rest.trim().trim_end_matches('.');
 
     let count = parse_count_expr(rest).map(|(q, _)| q)?;
@@ -5193,7 +5344,7 @@ mod tests {
     fn parse_earthbend_verb() {
         let text = "Earthbend 3 target land";
         let lower = text.to_lowercase();
-        let result = parse_targeted_action_ast(text, &lower, &ParseContext::default());
+        let result = parse_targeted_action_ast(text, &lower, &mut ParseContext::default());
         assert!(result.is_some(), "Should parse 'earthbend' verb");
         let effect = lower_targeted_action_ast(result.unwrap());
         match effect {
@@ -5220,11 +5371,12 @@ mod tests {
     fn parse_sacrifice_defaults_controller_to_you_actor() {
         let text = "sacrifice a non-Demon creature";
         let lower = text.to_lowercase();
-        let ctx = ParseContext {
+        let mut ctx = ParseContext {
             actor: Some(ControllerRef::You),
             ..Default::default()
         };
-        let result = parse_targeted_action_ast(text, &lower, &ctx).expect("sacrifice should parse");
+        let result =
+            parse_targeted_action_ast(text, &lower, &mut ctx).expect("sacrifice should parse");
         match lower_targeted_action_ast(result) {
             Effect::Sacrifice { target, .. } => match target {
                 TargetFilter::Typed(tf) => assert_eq!(
@@ -5244,11 +5396,12 @@ mod tests {
     fn parse_sacrifice_defaults_controller_to_opponent_actor() {
         let text = "sacrifice a creature";
         let lower = text.to_lowercase();
-        let ctx = ParseContext {
+        let mut ctx = ParseContext {
             actor: Some(ControllerRef::Opponent),
             ..Default::default()
         };
-        let result = parse_targeted_action_ast(text, &lower, &ctx).expect("sacrifice should parse");
+        let result =
+            parse_targeted_action_ast(text, &lower, &mut ctx).expect("sacrifice should parse");
         match lower_targeted_action_ast(result) {
             Effect::Sacrifice { target, .. } => match target {
                 TargetFilter::Typed(tf) => assert_eq!(tf.controller, Some(ControllerRef::Opponent)),
@@ -5262,11 +5415,12 @@ mod tests {
     fn parse_sacrifice_preserves_choice_relative_clause() {
         let text = "sacrifice a permanent of their choice that shares a card type with it";
         let lower = text.to_lowercase();
-        let ctx = ParseContext {
+        let mut ctx = ParseContext {
             actor: Some(ControllerRef::Opponent),
             ..Default::default()
         };
-        let result = parse_targeted_action_ast(text, &lower, &ctx).expect("sacrifice should parse");
+        let result =
+            parse_targeted_action_ast(text, &lower, &mut ctx).expect("sacrifice should parse");
         match lower_targeted_action_ast(result) {
             Effect::Sacrifice { target, .. } => match target {
                 TargetFilter::Typed(tf) => {
@@ -5332,11 +5486,12 @@ mod tests {
     fn parse_sacrifice_preserves_explicit_controller() {
         let text = "sacrifice a creature an opponent controls";
         let lower = text.to_lowercase();
-        let ctx = ParseContext {
+        let mut ctx = ParseContext {
             actor: Some(ControllerRef::You),
             ..Default::default()
         };
-        let result = parse_targeted_action_ast(text, &lower, &ctx).expect("sacrifice should parse");
+        let result =
+            parse_targeted_action_ast(text, &lower, &mut ctx).expect("sacrifice should parse");
         match lower_targeted_action_ast(result) {
             Effect::Sacrifice { target, .. } => match target {
                 TargetFilter::Typed(tf) => assert_eq!(
@@ -5358,8 +5513,9 @@ mod tests {
     fn parse_sacrifice_without_actor_leaves_controller_unset() {
         let text = "sacrifice a creature";
         let lower = text.to_lowercase();
-        let ctx = ParseContext::default();
-        let result = parse_targeted_action_ast(text, &lower, &ctx).expect("sacrifice should parse");
+        let mut ctx = ParseContext::default();
+        let result =
+            parse_targeted_action_ast(text, &lower, &mut ctx).expect("sacrifice should parse");
         match lower_targeted_action_ast(result) {
             Effect::Sacrifice { target, .. } => match target {
                 TargetFilter::Typed(tf) => assert!(
@@ -5378,7 +5534,7 @@ mod tests {
     fn parse_mindslaver_control_next_turn() {
         let text = "You control target player during that player's next turn.";
         let lower = text.to_lowercase();
-        let result = parse_targeted_action_ast(text, &lower, &ParseContext::default());
+        let result = parse_targeted_action_ast(text, &lower, &mut ParseContext::default());
         assert!(
             result.is_some(),
             "Should parse Mindslaver's 'you control ...' declarative"
@@ -5402,7 +5558,7 @@ mod tests {
         let text = "You control target player during that player's next turn. \
                     After that turn, that player takes an extra turn.";
         let lower = text.to_lowercase();
-        let result = parse_targeted_action_ast(text, &lower, &ParseContext::default());
+        let result = parse_targeted_action_ast(text, &lower, &mut ParseContext::default());
         assert!(result.is_some());
         let effect = lower_targeted_action_ast(result.unwrap());
         match effect {
@@ -5424,7 +5580,8 @@ mod tests {
         // stripped form "gain control of Mindslaver Toolkit".
         let stripped = "gain control of Mindslaver Toolkit";
         let stripped_lower = stripped.to_lowercase();
-        let result = parse_targeted_action_ast(stripped, &stripped_lower, &ParseContext::default());
+        let result =
+            parse_targeted_action_ast(stripped, &stripped_lower, &mut ParseContext::default());
         assert!(result.is_some());
         let effect = lower_targeted_action_ast(result.unwrap());
         assert!(
@@ -5438,7 +5595,7 @@ mod tests {
     fn parse_airbend_verb() {
         let text = "Airbend target creature {2}";
         let lower = text.to_lowercase();
-        let result = parse_targeted_action_ast(text, &lower, &ParseContext::default());
+        let result = parse_targeted_action_ast(text, &lower, &mut ParseContext::default());
         assert!(result.is_some(), "Should parse 'airbend' verb");
         let effect = lower_targeted_action_ast(result.unwrap());
         match effect {
@@ -5460,7 +5617,7 @@ mod tests {
     fn parse_airbend_up_to_one_other_target_creature_or_spell() {
         let text = "Airbend up to one other target creature or spell {2}";
         let lower = text.to_lowercase();
-        let result = parse_targeted_action_ast(text, &lower, &ParseContext::default())
+        let result = parse_targeted_action_ast(text, &lower, &mut ParseContext::default())
             .expect("Should parse airbend");
         let effect = lower_targeted_action_ast(result);
         match effect {
@@ -5503,7 +5660,7 @@ mod tests {
     fn parse_earthbend_default_pt() {
         let text = "Earthbend target land";
         let lower = text.to_lowercase();
-        let result = parse_targeted_action_ast(text, &lower, &ParseContext::default());
+        let result = parse_targeted_action_ast(text, &lower, &mut ParseContext::default());
         assert!(result.is_some());
         let effect = lower_targeted_action_ast(result.unwrap());
         match effect {
@@ -5523,7 +5680,7 @@ mod tests {
         // Should default to "target land you control" per keyword definition.
         let text = "Earthbend 2.";
         let lower = text.to_lowercase();
-        let result = parse_targeted_action_ast(text, &lower, &ParseContext::default());
+        let result = parse_targeted_action_ast(text, &lower, &mut ParseContext::default());
         assert!(
             result.is_some(),
             "Should parse 'earthbend' without explicit target"
@@ -5591,7 +5748,7 @@ mod tests {
     #[test]
     fn parse_lose_half_their_life_rounded_up_trace() {
         // Class-level trace: make sure "lose half their life, rounded up"
-        // produces a typed HalfRounded amount at the imperative level.
+        // produces a typed DivideRounded amount at the imperative level.
         let text = "lose half their life, rounded up";
         let lower = text.to_lowercase();
         let result = parse_numeric_imperative_ast(text, &lower);
@@ -5601,15 +5758,90 @@ mod tests {
                 assert!(
                     matches!(
                         amount,
-                        QuantityExpr::HalfRounded {
+                        QuantityExpr::DivideRounded {
                             rounding: crate::types::ability::RoundingMode::Up,
                             ..
                         }
                     ),
-                    "Expected HalfRounded(Up), got {amount:?}"
+                    "Expected DivideRounded(Up), got {amount:?}"
                 );
             }
             other => panic!("Expected LoseLife, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_sacrifice_half_non_demon_permanents_lifts_count_filter() {
+        let text = "sacrifice half the non-Demon permanents you control, rounded up";
+        let lower = text.to_lowercase();
+        let result = parse_targeted_action_ast(text, &lower, &mut ParseContext::default());
+        match result {
+            Some(TargetedImperativeAst::Sacrifice { target, count }) => {
+                assert!(matches!(
+                    count,
+                    QuantityExpr::DivideRounded {
+                        rounding: crate::types::ability::RoundingMode::Up,
+                        ..
+                    }
+                ));
+                let TargetFilter::Typed(TypedFilter {
+                    type_filters,
+                    controller: Some(ControllerRef::You),
+                    ..
+                }) = target
+                else {
+                    panic!("expected You-controlled typed target");
+                };
+                assert_eq!(
+                    type_filters,
+                    vec![
+                        crate::types::ability::TypeFilter::Permanent,
+                        crate::types::ability::TypeFilter::Non(Box::new(
+                            crate::types::ability::TypeFilter::Subtype("Demon".to_string())
+                        )),
+                    ]
+                );
+            }
+            other => panic!("Expected Sacrifice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_sacrifice_half_non_god_creatures_ignores_choice_rounding_suffix() {
+        let text =
+            "sacrifice half the non-God creatures they control of their choice, rounded down";
+        let lower = text.to_lowercase();
+        let mut ctx = ParseContext::default();
+        let result = parse_targeted_action_ast(text, &lower, &mut ctx);
+        match result {
+            Some(TargetedImperativeAst::Sacrifice { target, count }) => {
+                assert!(matches!(
+                    count,
+                    QuantityExpr::DivideRounded {
+                        rounding: crate::types::ability::RoundingMode::Down,
+                        ..
+                    }
+                ));
+                assert!(ctx.diagnostics.is_empty(), "{:?}", ctx.diagnostics);
+                let TargetFilter::Typed(TypedFilter {
+                    type_filters,
+                    controller: Some(ControllerRef::ScopedPlayer),
+                    ..
+                }) = target
+                else {
+                    panic!("expected ScopedPlayer-controlled typed target");
+                };
+                assert_eq!(
+                    type_filters,
+                    vec![
+                        crate::types::ability::TypeFilter::Creature,
+                        crate::types::ability::TypeFilter::Non(Box::new(
+                            crate::types::ability::TypeFilter::Subtype("God".to_string())
+                        )),
+                    ]
+                );
+            }
+            other => panic!("Expected Sacrifice, got {other:?}"),
         }
     }
 
@@ -5634,7 +5866,6 @@ mod tests {
             other => panic!("Expected LoseLife, got {other:?}"),
         }
     }
-
     #[test]
     fn parse_gain_life_equal_to_power() {
         let text = "gain life equal to its power";
@@ -5818,48 +6049,93 @@ mod tests {
     }
 
     #[test]
-    fn parse_additional_combat_phase() {
+    fn parse_additional_phase_phase() {
         let text = "there is an additional combat phase after this phase";
         let lower = text.to_lowercase();
-        let result = parse_imperative_family_ast(text, &lower, &ParseContext::default());
+        let result = parse_imperative_family_ast(text, &lower, &mut ParseContext::default());
         assert!(result.is_some(), "Should parse additional combat phase");
         let effect = lower_imperative_family_effect(result.unwrap());
         assert!(
             matches!(
                 effect,
-                Effect::AdditionalCombatPhase {
-                    with_main_phase: false,
+                Effect::AdditionalPhase {
+                    phase: Phase::BeginCombat,
+                    after: Phase::EndCombat,
+                    ref followed_by,
                     ..
-                }
+                } if followed_by.is_empty()
             ),
-            "Expected AdditionalCombatPhase without main phase, got {effect:?}"
+            "Expected AdditionalPhase without main phase, got {effect:?}"
         );
     }
 
     #[test]
-    fn parse_additional_combat_with_main_phase() {
+    fn parse_pay_any_amount_of_mana_as_variable_mana_cost() {
+        let text = "pay any amount of mana";
+        let lower = text.to_lowercase();
+        let Some(CostResourceImperativeAst::Pay {
+            cost: PaymentCost::Mana { cost },
+        }) = parse_cost_resource_ast(text, &lower, &mut ParseContext::default())
+        else {
+            panic!("expected variable mana PayCost");
+        };
+        let crate::types::mana::ManaCost::Cost { shards, generic } = cost else {
+            panic!("expected concrete mana cost");
+        };
+        assert_eq!(generic, 0);
+        assert!(matches!(
+            shards.as_slice(),
+            [crate::types::mana::ManaCostShard::X]
+        ));
+    }
+
+    #[test]
+    fn parse_additional_phase_with_main_phase() {
         let text = "there is an additional combat phase followed by an additional main phase";
         let lower = text.to_lowercase();
-        let result = parse_imperative_family_ast(text, &lower, &ParseContext::default());
+        let result = parse_imperative_family_ast(text, &lower, &mut ParseContext::default());
         assert!(result.is_some(), "Should parse additional combat + main");
         let effect = lower_imperative_family_effect(result.unwrap());
         assert!(
             matches!(
                 effect,
-                Effect::AdditionalCombatPhase {
-                    with_main_phase: true,
+                Effect::AdditionalPhase {
+                    phase: Phase::BeginCombat,
+                    after: Phase::EndCombat,
+                    ref followed_by,
                     ..
-                }
+                } if followed_by == &vec![Phase::PostCombatMain]
             ),
-            "Expected AdditionalCombatPhase with main phase, got {effect:?}"
+            "Expected AdditionalPhase with main phase, got {effect:?}"
         );
     }
 
     #[test]
-    fn parse_after_this_phase_additional_combat() {
+    fn parse_additional_upkeep_step() {
+        let text = "get an additional upkeep step after this step";
+        let lower = text.to_lowercase();
+        let result = parse_imperative_family_ast(text, &lower, &mut ParseContext::default());
+        assert!(result.is_some(), "Should parse additional upkeep step");
+        let effect = lower_imperative_family_effect(result.unwrap());
+        assert!(
+            matches!(
+                effect,
+                Effect::AdditionalPhase {
+                    phase: Phase::Upkeep,
+                    after: Phase::Upkeep,
+                    ref followed_by,
+                    ..
+                } if followed_by.is_empty()
+            ),
+            "Expected AdditionalPhase for upkeep step, got {effect:?}"
+        );
+    }
+
+    #[test]
+    fn parse_after_this_phase_additional_phase() {
         let text = "after this phase, there is an additional combat phase";
         let lower = text.to_lowercase();
-        let result = parse_imperative_family_ast(text, &lower, &ParseContext::default());
+        let result = parse_imperative_family_ast(text, &lower, &mut ParseContext::default());
         assert!(result.is_some(), "Should parse 'after this phase' variant");
     }
 
@@ -5867,7 +6143,7 @@ mod tests {
     fn parse_discard_your_hand() {
         let text = "discard your hand";
         let lower = text.to_lowercase();
-        let result = parse_targeted_action_ast(text, &lower, &ParseContext::default());
+        let result = parse_targeted_action_ast(text, &lower, &mut ParseContext::default());
         match result {
             Some(TargetedImperativeAst::Discard { count, .. }) => {
                 assert!(
@@ -5890,7 +6166,7 @@ mod tests {
     fn parse_discard_their_hand() {
         let text = "discard their hand";
         let lower = text.to_lowercase();
-        let result = parse_targeted_action_ast(text, &lower, &ParseContext::default());
+        let result = parse_targeted_action_ast(text, &lower, &mut ParseContext::default());
         match result {
             Some(TargetedImperativeAst::Discard { count, .. }) => {
                 assert!(
@@ -5913,7 +6189,7 @@ mod tests {
     fn parse_discard_a_card_regression() {
         let text = "discard a card";
         let lower = text.to_lowercase();
-        let result = parse_targeted_action_ast(text, &lower, &ParseContext::default());
+        let result = parse_targeted_action_ast(text, &lower, &mut ParseContext::default());
         match result {
             Some(TargetedImperativeAst::Discard { count, .. }) => {
                 assert!(
@@ -5929,7 +6205,7 @@ mod tests {
     fn parse_discard_two_cards_regression() {
         let text = "discard two cards";
         let lower = text.to_lowercase();
-        let result = parse_targeted_action_ast(text, &lower, &ParseContext::default());
+        let result = parse_targeted_action_ast(text, &lower, &mut ParseContext::default());
         match result {
             Some(TargetedImperativeAst::Discard { count, .. }) => {
                 assert!(
@@ -5945,7 +6221,7 @@ mod tests {
     fn parse_discard_unless_creature() {
         let text = "discard two cards unless you discard a creature card";
         let lower = text.to_lowercase();
-        let result = parse_targeted_action_ast(text, &lower, &ParseContext::default());
+        let result = parse_targeted_action_ast(text, &lower, &mut ParseContext::default());
         match result {
             Some(TargetedImperativeAst::Discard {
                 count,
@@ -5969,7 +6245,7 @@ mod tests {
     fn parse_discard_unless_pirate() {
         let text = "discard two cards unless you discard a Pirate card";
         let lower = text.to_lowercase();
-        let result = parse_targeted_action_ast(text, &lower, &ParseContext::default());
+        let result = parse_targeted_action_ast(text, &lower, &mut ParseContext::default());
         match result {
             Some(TargetedImperativeAst::Discard {
                 count,
@@ -5994,8 +6270,8 @@ mod tests {
         // CR 701.41a: Support N on an instant/sorcery — "up to N target creatures"
         let text = "support 2";
         let lower = text.to_lowercase();
-        let ctx = ParseContext::default(); // No subject = spell context
-        let ast = parse_imperative_family_ast(text, &lower, &ctx);
+        let mut ctx = ParseContext::default(); // No subject = spell context
+        let ast = parse_imperative_family_ast(text, &lower, &mut ctx);
         assert!(
             matches!(
                 &ast,
@@ -6036,11 +6312,11 @@ mod tests {
         // CR 701.41a: Support N on a permanent — "up to N other target creatures"
         let text = "support 3";
         let lower = text.to_lowercase();
-        let ctx = ParseContext {
+        let mut ctx = ParseContext {
             subject: Some(TargetFilter::SelfRef),
             ..Default::default()
         };
-        let ast = parse_imperative_family_ast(text, &lower, &ctx);
+        let ast = parse_imperative_family_ast(text, &lower, &mut ctx);
         assert!(
             matches!(
                 &ast,
@@ -6071,7 +6347,7 @@ mod tests {
     fn parse_choose_one_of_them() {
         let text = "choose one of them";
         let lower = text.to_lowercase();
-        let result = parse_choose_ast(text, &lower);
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
         match result {
             Some(ChooseImperativeAst::FromTrackedSet { count, chooser }) => {
                 assert_eq!(count, 1);
@@ -6085,7 +6361,7 @@ mod tests {
     fn parse_choose_two_of_those_cards() {
         let text = "choose two of those cards";
         let lower = text.to_lowercase();
-        let result = parse_choose_ast(text, &lower);
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
         match result {
             Some(ChooseImperativeAst::FromTrackedSet { count, chooser }) => {
                 assert_eq!(count, 2);
@@ -6099,7 +6375,7 @@ mod tests {
     fn parse_choose_anaphoric_opponent() {
         let text = "an opponent chooses one of them";
         let lower = text.to_lowercase();
-        let result = parse_choose_ast(text, &lower);
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
         match result {
             Some(ChooseImperativeAst::FromTrackedSet { count, chooser }) => {
                 assert_eq!(count, 1);
@@ -6113,7 +6389,7 @@ mod tests {
     fn parse_choose_anaphoric_you_choose() {
         let text = "you choose one of those cards";
         let lower = text.to_lowercase();
-        let result = parse_choose_ast(text, &lower);
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
         match result {
             Some(ChooseImperativeAst::FromTrackedSet { count, chooser }) => {
                 assert_eq!(count, 1);
@@ -6127,7 +6403,7 @@ mod tests {
     fn parse_choose_up_to_two_of_them() {
         let text = "choose up to two of them";
         let lower = text.to_lowercase();
-        let result = parse_choose_ast(text, &lower);
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
         match result {
             Some(ChooseImperativeAst::FromTrackedSet { count, chooser }) => {
                 assert_eq!(count, 2);
@@ -6142,7 +6418,7 @@ mod tests {
         // Imperial Edict pattern: "choose a creature they control"
         let text = "choose a creature they control";
         let lower = text.to_lowercase();
-        let result = parse_choose_ast(text, &lower);
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
         match result {
             Some(ChooseImperativeAst::TargetOnly { target }) => {
                 // Should extract creature filter with controller
@@ -6164,7 +6440,7 @@ mod tests {
         let text =
             "choose from among the permanents they control an artifact, a creature, an enchantment, and a land";
         let lower = text.to_lowercase();
-        let result = parse_choose_ast(text, &lower);
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
         match result {
             Some(ChooseImperativeAst::CategoryAndSacrificeRest {
                 categories,
@@ -6193,7 +6469,7 @@ mod tests {
         // Cataclysmic Gearhulk: "choose an artifact, a creature, ... from among ..."
         let text = "choose an artifact, a creature, an enchantment, and a planeswalker from among the nonland permanents they control";
         let lower = text.to_lowercase();
-        let result = parse_choose_ast(text, &lower);
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
         match result {
             Some(ChooseImperativeAst::CategoryAndSacrificeRest {
                 categories,
@@ -6225,7 +6501,7 @@ mod tests {
         use crate::types::ability::{FilterProp, TypeFilter};
         let text = "choose target artifact a player controls and target artifact card in that player's graveyard";
         let lower = text.to_lowercase();
-        let result = parse_choose_ast(text, &lower);
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
         match result {
             Some(ChooseImperativeAst::TwoTargets { target_a, target_b }) => {
                 let tf_a = match &target_a {
@@ -6320,7 +6596,7 @@ mod tests {
     fn parse_choose_single_target_unchanged() {
         let text = "choose a creature they control";
         let lower = text.to_lowercase();
-        let result = parse_choose_ast(text, &lower);
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
         match result {
             Some(ChooseImperativeAst::TargetOnly { .. })
             | Some(ChooseImperativeAst::Reparse { .. }) => {
@@ -6349,7 +6625,7 @@ mod tests {
         // refuse this and let single-target dispatch claim it.
         let text = "choose target creature and put a +1/+1 counter on it";
         let lower = text.to_lowercase();
-        let result = parse_choose_ast(text, &lower);
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
         // Any non-TwoTargets variant (TargetOnly with the creature filter, or
         // Reparse routing into the compound-action splitter) is fine — the
         // contract is just "no false positive on TwoTargets".
@@ -6589,7 +6865,7 @@ mod tests {
     fn parse_search_creation_lowering_emits_change_zone_all_with_same_name_as_parent_target() {
         use crate::types::ability::FilterProp;
         let text = "search its owner's graveyard, hand, and library for any number of cards with that name and exile them";
-        let ast = parse_search_and_creation_ast(text, text)
+        let ast = parse_search_and_creation_ast(text, text, &mut ParseContext::default())
             .expect("multi-zone same-name exile must parse");
         let effect = lower_search_and_creation_ast(ast);
         match effect {

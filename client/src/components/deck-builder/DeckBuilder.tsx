@@ -1,10 +1,17 @@
 import { useState, useCallback, useEffect, useMemo } from "react";
 import { useNavigate } from "react-router";
 import type { ScryfallCard } from "../../services/scryfall";
+import { hasAlternatePrintingsSync, resolveOracleIdSync } from "../../services/scryfall";
+import { usePreferencesStore } from "../../stores/preferencesStore";
+import { DeckCardContextMenu } from "./DeckCardContextMenu";
+import { PrintingPickerModal } from "./PrintingPickerModal";
 import type { ParsedDeck } from "../../services/deckParser";
 import { deduplicateEntries, resolveCommander } from "../../services/deckParser";
 import { evaluateDeckCompatibility, type DeckCompatibilityResult } from "../../services/deckCompatibility";
 import { STORAGE_KEY_PREFIX, loadSavedDeck, stampDeckMeta } from "../../constants/storage";
+import { BASIC_LAND_NAMES, hasUnlimitedCopies } from "../../constants/game";
+import { loadPreconDeckMap } from "../../hooks/useDecks";
+import { preconDeckEntryToParsedDeck } from "../../services/preconDecks";
 import { useDeckCardData } from "../../hooks/useDeckCardData";
 import { CardSearch } from "./CardSearch";
 import type { CardSearchFilters } from "./CardSearch";
@@ -12,7 +19,9 @@ import { CardGrid } from "./CardGrid";
 import { DeckStack } from "./DeckStack";
 import { DeckList } from "./DeckList";
 import { ManaCurve } from "./ManaCurve";
-import { FormatFilter, type DeckFormat } from "./FormatFilter";
+import type { GameFormat } from "../../adapter/types";
+import { FORMAT_REGISTRY, formatMetadata } from "../../data/formatRegistry";
+import { FormatFilter } from "./FormatFilter";
 import { CommanderPanel } from "./CommanderPanel";
 import {
   getColorIdentityViolations,
@@ -33,9 +42,9 @@ function listSavedDecks(): string[] {
 }
 
 interface DeckBuilderProps {
-  onCardHover?: (cardName: string | null) => void;
-  format: DeckFormat;
-  onFormatChange: (format: DeckFormat) => void;
+  onCardHover?: (cardName: string | null, scryfallId?: string) => void;
+  format: GameFormat;
+  onFormatChange: (format: GameFormat) => void;
   initialDeckName?: string | null;
   backPath?: string;
   searchFilters: CardSearchFilters;
@@ -43,13 +52,17 @@ interface DeckBuilderProps {
   onResetSearch: () => void;
 }
 
-const BASIC_LANDS = new Set([
-  "Plains",
-  "Island",
-  "Swamp",
-  "Mountain",
-  "Forest",
-]);
+const PRECON_PREFIX = "[Pre-built] ";
+
+function hasSearchCriteria(filters: CardSearchFilters): boolean {
+  return Boolean(
+    filters.text
+      || filters.colors.length > 0
+      || filters.type
+      || filters.cmcMax !== undefined
+      || filters.sets.length > 0,
+  );
+}
 
 export function DeckBuilder({
   onCardHover,
@@ -67,7 +80,7 @@ export function DeckBuilder({
   const [deckName, setDeckName] = useState("");
   const [savedDecks, setSavedDecks] = useState(listSavedDecks);
   const [commanders, setCommanders] = useState<string[]>([]);
-  const [isDeckViewExpanded, setIsDeckViewExpanded] = useState(true);
+  const [isDeckViewExpanded, setIsDeckViewExpanded] = useState(initialDeckName !== null);
   const { cardDataCache, cacheCards } = useDeckCardData([
     ...deck.main.map((entry) => entry.name),
     ...deck.sideboard.map((entry) => entry.name),
@@ -75,6 +88,29 @@ export function DeckBuilder({
   ]);
 
   const [compatibility, setCompatibility] = useState<DeckCompatibilityResult | null>(null);
+
+  const artOverrides = usePreferencesStore((s) => s.artOverrides);
+  const clearArtOverride = usePreferencesStore((s) => s.clearArtOverride);
+  const [listContextMenu, setListContextMenu] = useState<{ cardName: string; x: number; y: number } | null>(null);
+  const [listPickerCard, setListPickerCard] = useState<{ cardName: string; oracleId: string } | null>(null);
+
+  const handleListContextMenu = useCallback((cardName: string, x: number, y: number) => {
+    setListContextMenu({ cardName, x, y });
+  }, []);
+
+  const handleListChooseArt = useCallback(() => {
+    if (!listContextMenu) return;
+    const oracleId = resolveOracleIdSync(listContextMenu.cardName);
+    if (oracleId) {
+      setListPickerCard({ cardName: listContextMenu.cardName, oracleId });
+    }
+  }, [listContextMenu]);
+
+  const handleListClearOverride = useCallback(() => {
+    if (!listContextMenu) return;
+    const oracleId = resolveOracleIdSync(listContextMenu.cardName);
+    if (oracleId) clearArtOverride(oracleId);
+  }, [listContextMenu, clearArtOverride]);
   const currentDeck = useMemo<ParsedDeck>(() => ({
     ...deck,
     commander: commanders.length > 0 ? commanders : undefined,
@@ -108,16 +144,19 @@ export function DeckBuilder({
     return () => { cancelled = true; clearTimeout(timer); };
   }, [currentDeck, deckKey]);
 
-  const isCommander = format === "commander";
-  const maxCopies = isCommander ? 1 : 4;
+  const formatConfig = formatMetadata(format)?.default_config;
+  const isCommander = formatConfig?.command_zone ?? false;
+  const maxCopies = formatConfig?.singleton ? 1 : 4;
 
   const handleSearchResults = useCallback(
-    (cards: ScryfallCard[], _total: number) => {
-      setIsDeckViewExpanded(false);
+    (cards: ScryfallCard[], total: number) => {
+      if (!initialDeckName || total > 0 || hasSearchCriteria(searchFilters)) {
+        setIsDeckViewExpanded(false);
+      }
       setSearchResults(cards);
       cacheCards(cards);
     },
-    [cacheCards],
+    [cacheCards, initialDeckName, searchFilters],
   );
 
   const handleSearchTrigger = useCallback(() => {
@@ -129,7 +168,7 @@ export function DeckBuilder({
 
     setDeck((prev) => {
       const existing = prev.main.find((e) => e.name === card.name);
-      if (existing && existing.count >= maxCopies && !BASIC_LANDS.has(card.name)) {
+      if (existing && existing.count >= maxCopies && !BASIC_LAND_NAMES.has(card.name) && !hasUnlimitedCopies(card.oracle_text)) {
         return prev;
       }
 
@@ -192,7 +231,8 @@ export function DeckBuilder({
           to === "main" &&
           targetEntry &&
           targetEntry.count >= maxCopies &&
-          !BASIC_LANDS.has(name)
+          !BASIC_LAND_NAMES.has(name) &&
+          !hasUnlimitedCopies(cardDataCache.get(name)?.oracle_text)
         ) {
           return prev;
         }
@@ -217,7 +257,7 @@ export function DeckBuilder({
         };
       });
     },
-    [maxCopies],
+    [maxCopies, cardDataCache],
   );
 
   const applyDeckToEditor = useCallback((next: ParsedDeck) => {
@@ -227,7 +267,7 @@ export function DeckBuilder({
       companion: next.companion,
     });
     setCommanders(next.commander ?? []);
-    if (next.commander?.length) onFormatChange("commander");
+    if (next.commander?.length) onFormatChange("Commander");
   }, [onFormatChange]);
 
   const handleImport = useCallback((imported: ParsedDeck) => {
@@ -245,14 +285,28 @@ export function DeckBuilder({
   const handleLoad = useCallback(async (name: string) => {
     const parsed = loadSavedDeck(name);
     const data = localStorage.getItem(STORAGE_KEY_PREFIX + name);
-    if (!parsed || !data) return;
-    const persisted = JSON.parse(data) as ParsedDeck & { format?: DeckFormat };
+    if (!parsed || !data) {
+      if (!name.startsWith(PRECON_PREFIX)) return;
+      const decks = await loadPreconDeckMap();
+      const deckEntry = Object.values(decks ?? {}).find((entry) => PRECON_PREFIX + `${entry.name} (${entry.code})` === name);
+      if (!deckEntry) return;
+      const resolved = await resolveCommander(preconDeckEntryToParsedDeck(deckEntry));
+      applyDeckToEditor(resolved);
+      setIsDeckViewExpanded(true);
+      setDeckName(`${deckEntry.name} (${deckEntry.code})`);
+      return;
+    }
+    const persisted = JSON.parse(data) as ParsedDeck & { format?: string };
     const resolved = await resolveCommander(parsed);
     applyDeckToEditor(resolved);
+    setIsDeckViewExpanded(true);
     if (persisted.format) {
-      onFormatChange(persisted.format);
+      const match = FORMAT_REGISTRY.find(
+        (m) => m.format.toLowerCase() === persisted.format!.toLowerCase(),
+      );
+      if (match) onFormatChange(match.format);
     } else if (resolved.commander?.length) {
-      onFormatChange("commander");
+      onFormatChange("Commander");
     }
     setDeckName(name);
   }, [applyDeckToEditor, onFormatChange]);
@@ -330,7 +384,7 @@ export function DeckBuilder({
     if (totalCards > 0 && totalCards !== 100) {
       warnings.push(`Deck has ${totalCards} cards (need exactly 100)`);
     }
-    for (const name of getSingletonViolations(deck.main)) {
+    for (const name of getSingletonViolations(deck.main, cardDataCache)) {
       warnings.push(`${name}: multiple copies (singleton format)`);
     }
     for (const name of getColorIdentityViolations(deck.main, commanders, cardDataCache)) {
@@ -342,7 +396,7 @@ export function DeckBuilder({
       warnings.push(`Deck has ${mainTotal} cards (minimum 60)`);
     }
     for (const entry of deck.main) {
-      if (entry.count > 4 && !BASIC_LANDS.has(entry.name)) {
+      if (entry.count > 4 && !BASIC_LAND_NAMES.has(entry.name) && !hasUnlimitedCopies(cardDataCache.get(entry.name)?.oracle_text)) {
         warnings.push(`${entry.name}: ${entry.count} copies (max 4)`);
       }
     }
@@ -472,6 +526,7 @@ export function DeckBuilder({
               warnings={warnings}
               format={format}
               compatibility={compatibility}
+              onChooseArt={handleListContextMenu}
             />
           </div>
 
@@ -480,6 +535,28 @@ export function DeckBuilder({
           </div>
         </div>
       </div>
+
+      {listContextMenu && (
+        <DeckCardContextMenu
+          x={listContextMenu.x}
+          y={listContextMenu.y}
+          cardName={listContextMenu.cardName}
+          hasOverride={!!artOverrides[resolveOracleIdSync(listContextMenu.cardName) ?? ""]}
+          hasAlternates={hasAlternatePrintingsSync(resolveOracleIdSync(listContextMenu.cardName) ?? "")}
+          onChooseArt={handleListChooseArt}
+          onClearOverride={handleListClearOverride}
+          onClose={() => setListContextMenu(null)}
+        />
+      )}
+
+      {listPickerCard && (
+        <PrintingPickerModal
+          cardName={listPickerCard.cardName}
+          oracleId={listPickerCard.oracleId}
+          onCardHover={onCardHover}
+          onClose={() => setListPickerCard(null)}
+        />
+      )}
     </div>
   );
 }

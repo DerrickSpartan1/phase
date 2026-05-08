@@ -1,6 +1,9 @@
 use std::collections::HashSet;
 
-use crate::types::ability::{AbilityCost, AdditionalCost, KickerVariant, ResolvedAbility};
+use crate::types::ability::{
+    AbilityCost, AdditionalCost, CostPaidObjectSnapshot, Effect, KickerVariant, ResolvedAbility,
+    SpellCastingOptionKind,
+};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     CastingVariant, ConvokeMode, DistributionUnit, GameState, PendingCast, StackEntry,
@@ -22,7 +25,8 @@ use super::stack;
 
 use super::ability_utils::{
     assign_targets_in_chain, auto_select_targets_for_ability, begin_target_selection_for_ability,
-    build_target_slots, flatten_targets_in_chain,
+    build_target_slots, flatten_targets_in_chain, modal_choice_for_player,
+    target_constraints_from_modal,
 };
 use super::life_costs::{pay_life_as_cost, PayLifeCostResult};
 
@@ -57,6 +61,11 @@ pub(crate) fn handle_decide_additional_cost(
         AdditionalCost::Optional(cost) => {
             if pay {
                 ability.context.additional_cost_paid = true;
+                // CR 702.175a: Offspring (and similar optional costs) synthesize
+                // ETB triggers conditioned on TriggerCondition::AdditionalCostPaid,
+                // which evaluates obj.kickers_paid.len(). Push First so the
+                // permanent carries evidence the trigger evaluator can read.
+                ability.context.kickers_paid.push(KickerVariant::First);
                 Some(cost.clone())
             } else {
                 None
@@ -67,7 +76,14 @@ pub(crate) fn handle_decide_additional_cost(
         }
         AdditionalCost::Choice(preferred, fallback) => {
             if pay {
-                ability.context.additional_cost_paid = true;
+                if state
+                    .objects
+                    .get(&pending.object_id)
+                    .and_then(|obj| obj.additional_cost.as_ref())
+                    .is_some_and(|cost| matches!(cost, AdditionalCost::Choice(_, _)))
+                {
+                    ability.context.additional_cost_paid = true;
+                }
                 Some(preferred.clone())
             } else {
                 Some(fallback.clone())
@@ -87,6 +103,57 @@ pub(crate) fn handle_decide_additional_cost(
         pay_additional_cost(state, player, cost, updated_pending, events)
     } else {
         finish_pending_cost_or_cast(state, player, updated_pending, events)
+    }
+}
+
+pub(crate) fn payable_spell_alternative_cost(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> Option<AbilityCost> {
+    let obj = state.objects.get(&object_id)?;
+    if obj.zone != Zone::Hand || obj.controller != player {
+        return None;
+    }
+    // This prompt reuses `AdditionalCost::Choice`, so keep it to pure
+    // alternative-cost cards until the pending-cast flow can compose
+    // alternative and additional costs in one CR 601.2f total-cost pass.
+    if obj.additional_cost.is_some() {
+        return None;
+    }
+
+    obj.casting_options.iter().find_map(|option| {
+        if option.kind != SpellCastingOptionKind::AlternativeCost {
+            return None;
+        }
+        if option.condition.as_ref().is_some_and(|condition| {
+            !restrictions::evaluate_condition(state, player, object_id, condition)
+        }) {
+            return None;
+        }
+        let cost = option.cost.clone()?;
+        if spell_alternative_cost_is_payable(state, player, object_id, &cost) {
+            Some(cost)
+        } else {
+            None
+        }
+    })
+}
+
+fn spell_alternative_cost_is_payable(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    cost: &AbilityCost,
+) -> bool {
+    match cost {
+        AbilityCost::Mana { cost } => {
+            super::casting::can_pay_cost_after_auto_tap(state, player, object_id, cost)
+        }
+        AbilityCost::Composite { costs } => costs
+            .iter()
+            .all(|sub_cost| spell_alternative_cost_is_payable(state, player, object_id, sub_cost)),
+        other => other.is_payable(state, player, object_id),
     }
 }
 
@@ -113,6 +180,10 @@ fn handle_decide_kicker_cost(
 
     pending.ability.context.additional_cost_paid = true;
     pending.ability.context.kickers_paid.push(variant);
+    if pending.deferred_modal_choice.is_some() {
+        pending.declared_kickers_to_pay.push(variant);
+        return finish_pending_cost_or_cast(state, player, pending, events);
+    }
     pay_additional_cost(state, player, cost, pending, events)
 }
 
@@ -173,6 +244,11 @@ fn finish_pending_cost_or_cast(
         pending.additional_cost_flow,
         Some(AdditionalCost::Kicker { .. })
     ) {
+        if pending.deferred_modal_choice.is_none() {
+            if let Some(cost) = next_declared_kicker_cost(&mut pending) {
+                return pay_additional_cost(state, player, cost, pending, events);
+            }
+        }
         if let Some((_, current_cost, _)) = next_kicker_option(state, player, &pending) {
             return Ok(WaitingFor::OptionalCostChoice {
                 player,
@@ -180,7 +256,26 @@ fn finish_pending_cost_or_cast(
                 pending_cast: Box::new(pending),
             });
         }
-        pending.additional_cost_flow = None;
+        if pending.deferred_modal_choice.is_none() {
+            pending.additional_cost_flow = None;
+        }
+    }
+
+    if let Some(modal) = pending.deferred_modal_choice.take() {
+        let mut capped = modal_choice_for_player(
+            state,
+            player,
+            pending.object_id,
+            &modal,
+            &pending.ability.context,
+        );
+        capped.max_choices = capped.max_choices.min(capped.mode_count);
+        pending.target_constraints = target_constraints_from_modal(&capped);
+        return Ok(WaitingFor::ModeChoice {
+            player,
+            modal: capped,
+            pending_cast: Box::new(pending),
+        });
     }
 
     pay_and_push(
@@ -195,6 +290,22 @@ fn finish_pending_cost_or_cast(
         pending.origin_zone,
         events,
     )
+}
+
+fn next_declared_kicker_cost(pending: &mut PendingCast) -> Option<AbilityCost> {
+    let additional = pending.additional_cost_flow.as_ref()?;
+    let AdditionalCost::Kicker { costs, repeatable } = additional else {
+        return None;
+    };
+    let variant = pending.declared_kickers_to_pay.pop()?;
+    if *repeatable {
+        return costs.first().cloned();
+    }
+    let index = match variant {
+        KickerVariant::First => 0,
+        KickerVariant::Second => 1,
+    };
+    costs.get(index).cloned()
 }
 
 /// Complete the discard-for-cost flow: discard selected cards, then continue casting.
@@ -222,19 +333,17 @@ pub(crate) fn handle_discard_for_cost(
         }
     }
 
-    // CR 117.1 + CR 202.3: Capture the discarded card's mana value BEFORE
-    // it leaves the hand, so `QuantityRef::CostPaidObjectManaValue` can
-    // resolve at ability resolution. Volrath the Fallen ("Volrath gets
-    // +X/+X until end of turn, where X is the discarded card's mana value").
+    // CR 117.1 + CR 400.7j + CR 608.2k: Capture the discarded card's public
+    // characteristics BEFORE it leaves the hand, so cost-paid-object property
+    // references can resolve at ability resolution.
     if let Some(&first) = chosen.first() {
-        if let Some(mv) = state
-            .objects
-            .get(&first)
-            .map(|obj| obj.mana_cost.mana_value())
-        {
+        if let Some(obj) = state.objects.get(&first) {
             pending
                 .ability
-                .set_cost_paid_object_mana_value_recursive(mv);
+                .set_cost_paid_object_recursive(CostPaidObjectSnapshot {
+                    object_id: first,
+                    lki: obj.snapshot_for_mana_spent(),
+                });
         }
     }
 
@@ -280,20 +389,17 @@ pub(crate) fn handle_sacrifice_for_cost(
         }
     }
 
-    // CR 117.1 + CR 202.3: Capture the sacrificed object's mana value BEFORE
-    // it leaves the battlefield, stamping it onto the resolving ability for
-    // later read by `QuantityRef::CostPaidObjectManaValue` (Food Chain,
-    // Burnt Offering, Metamorphosis). Uses the first chosen permanent — the
-    // class only ever sacrifices one cost-tracked object.
+    // CR 117.1 + CR 400.7j + CR 608.2k: Capture the sacrificed object's public
+    // characteristics BEFORE it leaves the battlefield, stamping it onto the
+    // resolving ability for later cost-paid-object references.
     if let Some(&first) = chosen.first() {
-        if let Some(mv) = state
-            .objects
-            .get(&first)
-            .map(|obj| obj.mana_cost.mana_value())
-        {
+        if let Some(obj) = state.objects.get(&first) {
             pending
                 .ability
-                .set_cost_paid_object_mana_value_recursive(mv);
+                .set_cost_paid_object_recursive(CostPaidObjectSnapshot {
+                    object_id: first,
+                    lki: obj.snapshot_for_mana_spent(),
+                });
         }
     }
 
@@ -615,6 +721,83 @@ pub(super) fn check_additional_cost_or_pay(
     )
 }
 
+pub(super) fn finish_pending_cast_cost_or_pay(
+    state: &mut GameState,
+    player: PlayerId,
+    mut pending: PendingCast,
+    ability: ResolvedAbility,
+    cost: ManaCost,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    pending.ability = ability;
+    pending.cost = cost;
+    if pending.additional_cost_flow.is_some() {
+        return finish_pending_cost_or_cast(state, player, pending, events);
+    }
+    let object_id = pending.object_id;
+    let card_id = pending.card_id;
+    let casting_variant = pending.casting_variant;
+    let distribute = pending.distribute;
+    let origin_zone = pending.origin_zone;
+    let cost = pending.cost;
+    let ability = pending.ability;
+    check_additional_cost_or_pay_with_distribute(
+        state,
+        player,
+        object_id,
+        card_id,
+        ability,
+        &cost,
+        casting_variant,
+        distribute,
+        origin_zone,
+        events,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn begin_modal_additional_cost_declaration(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    card_id: CardId,
+    ability: ResolvedAbility,
+    cost: ManaCost,
+    casting_variant: CastingVariant,
+    modal: crate::types::ability::ModalChoice,
+    distribute: Option<DistributionUnit>,
+    origin_zone: Zone,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let additional = state
+        .objects
+        .get(&object_id)
+        .and_then(|obj| obj.additional_cost.clone());
+    let Some(AdditionalCost::Kicker { costs, repeatable }) = additional else {
+        let mut capped =
+            modal_choice_for_player(state, player, object_id, &modal, &ability.context);
+        capped.max_choices = capped.max_choices.min(capped.mode_count);
+        let mut pending = PendingCast::new(object_id, card_id, ability, cost);
+        pending.casting_variant = casting_variant;
+        pending.distribute = distribute;
+        pending.origin_zone = origin_zone;
+        pending.target_constraints = target_constraints_from_modal(&capped);
+        return Ok(WaitingFor::ModeChoice {
+            player,
+            modal: capped,
+            pending_cast: Box::new(pending),
+        });
+    };
+
+    let mut pending = PendingCast::new(object_id, card_id, ability, cost);
+    pending.casting_variant = casting_variant;
+    pending.distribute = distribute;
+    pending.origin_zone = origin_zone;
+    pending.deferred_modal_choice = Some(modal);
+    pending.additional_cost_flow = Some(AdditionalCost::Kicker { costs, repeatable });
+    finish_pending_cost_or_cast(state, player, pending, events)
+}
+
 /// CR 601.2d: Extended version of `check_additional_cost_or_pay` that threads the
 /// `distribute` flag through PendingCast creation so X-spell distribution
 /// survives to the `(ManaPayment, PassPriority)` handler.
@@ -661,12 +844,38 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         &ability,
         &mut target_adjusted_cost,
     );
+    super::casting::apply_battlefield_cost_modifiers_with_selected_targets(
+        state,
+        player,
+        object_id,
+        &ability,
+        &mut target_adjusted_cost,
+    );
     let cost = &target_adjusted_cost;
 
     let additional = state
         .objects
         .get(&object_id)
         .and_then(|obj| obj.additional_cost.clone());
+
+    // CR 118.9 + CR 601.2b/f/h: Oracle text alternative costs are announced
+    // before total cost determination and paid rather than the spell's mana
+    // cost. Reuse the existing `AdditionalCost::Choice` prompt shape by making
+    // the pending spell mana cost `NoCost`: accepting pays the alternative cost,
+    // declining pays the printed mana cost as the fallback branch.
+    if casting_variant == CastingVariant::Normal {
+        if let Some(alt_cost) = payable_spell_alternative_cost(state, player, object_id) {
+            let mut pending = PendingCast::new(object_id, card_id, ability, ManaCost::NoCost);
+            pending.casting_variant = casting_variant;
+            pending.distribute = distribute.clone();
+            pending.origin_zone = origin_zone;
+            return Ok(WaitingFor::OptionalCostChoice {
+                player,
+                cost: AdditionalCost::Choice(alt_cost, AbilityCost::Mana { cost: cost.clone() }),
+                pending_cast: Box::new(pending),
+            });
+        }
+    }
 
     if let Some(additional_cost) = additional {
         match &additional_cost {
@@ -696,6 +905,16 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
                     costs: costs.clone(),
                     repeatable: *repeatable,
                 });
+                if !pending.ability.context.kickers_paid.is_empty() {
+                    pending.declared_kickers_to_pay = pending
+                        .ability
+                        .context
+                        .kickers_paid
+                        .iter()
+                        .rev()
+                        .copied()
+                        .collect();
+                }
                 return finish_pending_cost_or_cast(state, player, pending, events);
             }
             AdditionalCost::Optional(opt_cost) => {
@@ -1518,15 +1737,17 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
         events,
     )?;
 
-    // CR 702.190a: Sneak alt-cost additionally requires returning an unblocked
-    // attacker to its owner's hand. The spell was announced to the stack above;
-    // the returned creature is paid here as part of cost payment, after mana
-    // but before the stack entry is finalized with its ResolvedAbility. Also
-    // scrub the returned creature from combat so it is no longer an attacker.
-    if let CastingVariant::Sneak {
-        returned_creature, ..
-    } = casting_variant
-    {
+    // CR 702.190a / CR 702.188a: Sneak and Web-slinging additionally require
+    // returning a creature to its owner's hand as part of paying the casting
+    // cost. Sneak's returned creature was an attacker, so remove it from combat.
+    let returned_creature = match casting_variant {
+        CastingVariant::Sneak {
+            returned_creature, ..
+        }
+        | CastingVariant::WebSlinging { returned_creature } => Some(returned_creature),
+        _ => None,
+    };
+    if let Some(returned_creature) = returned_creature {
         super::zones::move_to_zone(state, returned_creature, Zone::Hand, events);
         if let Some(combat) = state.combat.as_mut() {
             combat
@@ -1906,6 +2127,24 @@ pub(super) fn auto_tap_mana_sources(
     events: &mut Vec<GameEvent>,
     deprioritize_source: Option<ObjectId>,
 ) {
+    auto_tap_mana_sources_inner(
+        state,
+        player,
+        cost,
+        events,
+        deprioritize_source,
+        &HashSet::new(),
+    );
+}
+
+fn auto_tap_mana_sources_inner(
+    state: &mut GameState,
+    player: PlayerId,
+    cost: &crate::types::mana::ManaCost,
+    events: &mut Vec<GameEvent>,
+    deprioritize_source: Option<ObjectId>,
+    excluded_sources: &HashSet<ObjectId>,
+) {
     use crate::types::card_type::CoreType;
     use crate::types::mana::ManaCost;
 
@@ -1939,19 +2178,22 @@ pub(super) fn auto_tap_mana_sources(
     let mut available: Vec<ManaSourceOption> = state
         .battlefield
         .iter()
+        .filter(|oid| !excluded_sources.contains(oid))
         .filter_map(|&oid| {
             let obj = state.objects.get(&oid)?;
             if obj.controller != player || obj.tapped {
                 return None;
             }
-            // Use land-specific function for lands (includes basic-subtype fallback),
-            // general function for everything else (includes summoning sickness check).
+            // Use land-specific function for lands (includes basic-subtype
+            // fallback), general function for everything else (includes
+            // summoning sickness check). Auto-tap plans with potential mana
+            // sources, not only sources whose own mana sub-cost is already
+            // payable from the current pool; Phase 3 pays those sub-costs from
+            // other selected sources before resolving the paid mana ability.
             if obj.card_types.core_types.contains(&CoreType::Land) {
-                Some(mana_sources::activatable_land_mana_options(
-                    state, oid, player,
-                ))
+                Some(mana_sources::auto_tap_land_mana_options(state, oid, player))
             } else {
-                Some(mana_sources::activatable_mana_options(state, oid, player))
+                Some(mana_sources::auto_tap_mana_options(state, oid, player))
             }
         })
         .flatten()
@@ -2095,6 +2337,18 @@ pub(super) fn auto_tap_mana_sources(
                 .and_then(|obj| obj.abilities.get(idx))
                 .cloned();
             if let Some(ability_def) = ability_def {
+                if let Some(sub_cost) = mana_sub_cost_of(&ability_def.cost) {
+                    let mut excluded = excluded_sources.clone();
+                    excluded.insert(option.object_id);
+                    auto_tap_mana_sources_inner(
+                        state,
+                        player,
+                        sub_cost,
+                        events,
+                        Some(option.object_id),
+                        &excluded,
+                    );
+                }
                 // color_override tells resolve_mana_ability how to resolve the
                 // ability's choice dimension. `SingleColor` replays a per-color
                 // pick (AnyOneColor/ChoiceAmongExiledColors); `Combination`
@@ -2103,19 +2357,14 @@ pub(super) fn auto_tap_mana_sources(
                 // so sources can't change state between collection and resolution. If a
                 // source is somehow invalid (e.g., removed by a replacement effect), we
                 // skip it silently — the player can still manually tap other sources.
-                let override_value = match option.atomic_combination {
-                    Some(combo) => crate::types::game_state::ProductionOverride::Combination(combo),
-                    None => {
-                        crate::types::game_state::ProductionOverride::SingleColor(option.mana_type)
-                    }
-                };
+                let override_value = production_override_for_option(&ability_def, &option);
                 let _ = mana_abilities::resolve_mana_ability(
                     state,
                     option.object_id,
                     player,
                     &ability_def,
                     events,
-                    Some(override_value),
+                    override_value,
                 );
             }
         } else {
@@ -2138,6 +2387,49 @@ pub(super) fn auto_tap_mana_sources(
                 events,
             );
         }
+    }
+}
+
+fn production_override_for_option(
+    ability_def: &crate::types::ability::AbilityDefinition,
+    option: &ManaSourceOption,
+) -> Option<crate::types::game_state::ProductionOverride> {
+    if let Some(combo) = option.atomic_combination.clone() {
+        return Some(crate::types::game_state::ProductionOverride::Combination(
+            combo,
+        ));
+    }
+
+    let Effect::Mana { produced, .. } = &*ability_def.effect else {
+        return None;
+    };
+    match produced {
+        crate::types::ability::ManaProduction::AnyOneColor { .. }
+        | crate::types::ability::ManaProduction::AnyCombination { .. }
+        | crate::types::ability::ManaProduction::ChoiceAmongExiledColors { .. }
+        | crate::types::ability::ManaProduction::OpponentLandColors { .. }
+        | crate::types::ability::ManaProduction::AnyTypeProduceableBy { .. }
+        | crate::types::ability::ManaProduction::AnyInCommandersColorIdentity { .. } => Some(
+            crate::types::game_state::ProductionOverride::SingleColor(option.mana_type),
+        ),
+        crate::types::ability::ManaProduction::Fixed { .. }
+        | crate::types::ability::ManaProduction::Colorless { .. }
+        | crate::types::ability::ManaProduction::Mixed { .. }
+        | crate::types::ability::ManaProduction::ChosenColor { .. }
+        | crate::types::ability::ManaProduction::ChoiceAmongCombinations { .. }
+        | crate::types::ability::ManaProduction::DistinctColorsAmongPermanents { .. }
+        | crate::types::ability::ManaProduction::TriggerEventManaType => None,
+    }
+}
+
+fn mana_sub_cost_of(cost: &Option<AbilityCost>) -> Option<&ManaCost> {
+    match cost {
+        Some(AbilityCost::Mana { cost }) => Some(cost),
+        Some(AbilityCost::Composite { costs }) => costs.iter().find_map(|sub| match sub {
+            AbilityCost::Mana { cost } => Some(cost),
+            _ => None,
+        }),
+        _ => None,
     }
 }
 
@@ -2245,17 +2537,13 @@ fn score_combination(
 
 /// Compute the maximum legal value of X the caster can choose for a pending cast.
 ///
-/// Upper bound = (mana currently in pool) + (mana producible from untapped,
-/// free-to-tap sources under the caster's control) − (fixed portion of cost).
+/// Upper bound = (mana currently in pool) + (all activatable mana sources
+/// under the caster's control) − (fixed portion of cost).
 ///
-/// Free-to-tap = mana abilities whose activation imposes no irreversible cost
-/// on the player: i.e., `ManaSourceOption` entries classified as
-/// `ManaSourcePenalty::None` (`penalty.is_free()`). Costed mana abilities
-/// (e.g. "1, T: Add {C}") are excluded for v1 — they cascade and would
-/// require a search to bound precisely. Treasure tokens are likewise
-/// excluded because they sacrifice the source; pain lands and pay-life
-/// sources are excluded because activating them for extra X damages or
-/// drains the caster.
+/// All activatable mana sources are counted regardless of penalty — Treasure
+/// tokens (sacrifice), pain lands (life payment), and ordinary tap sources
+/// all contribute. Since this is only an upper bound for UI/AI enumeration,
+/// overcounting is safe; `ManaPayment` validates actual affordability later.
 ///
 /// Each untapped producer counts once, regardless of how many color options it
 /// offers (a shock land is still one tap → one mana).
@@ -2291,20 +2579,16 @@ pub fn max_x_value(state: &GameState, player: PlayerId, cost: &ManaCost) -> u32 
         .find(|p| p.id == player)
         .map_or(0, |p| p.mana_pool.total() as u32);
 
-    let free_producers: u32 = state
+    let all_producers: u32 = state
         .battlefield
         .iter()
-        .filter(|&&id| {
-            mana_sources::activatable_mana_options(state, id, player)
-                .iter()
-                .any(|opt| opt.penalty.is_free())
-        })
+        .filter(|&&id| !mana_sources::activatable_mana_options(state, id, player).is_empty())
         .count() as u32;
 
     // CR 107.1b: Each `ManaCostShard::X` in the cost contributes `value` generic,
     // so for `{X}{X}` each point of X costs 2 mana. Dividing by `x_count` yields
     // the largest X the caster can actually afford.
-    let remaining = (pool + free_producers).saturating_sub(fixed_portion);
+    let remaining = (pool + all_producers).saturating_sub(fixed_portion);
     remaining / x_count
 }
 
@@ -2791,6 +3075,8 @@ mod tests {
             distribute: None,
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
+            deferred_modal_choice: None,
+            declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
         }
@@ -3136,6 +3422,97 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| matches!(e, GameEvent::PermanentTapped { .. })));
+    }
+
+    #[test]
+    fn auto_tap_pays_mana_source_sub_cost_from_other_source() {
+        // Nykthos `{T}: Add {C}` can pay Sunscorched Divide's `{1}, {T}`
+        // activation, which then produces `{R}{W}` for a spell cost. The
+        // planner must not discard Sunscorched just because its mana sub-cost
+        // is not payable from the initial empty pool.
+        let mut state = GameState::new_two_player(42);
+        let nykthos = create_object(
+            &mut state,
+            CardId(901),
+            PlayerId(0),
+            "Nykthos, Shrine to Nyx".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&nykthos).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: crate::types::ability::ManaProduction::Colorless {
+                            count: QuantityExpr::Fixed { value: 1 },
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Tap),
+            );
+        }
+
+        let divide = create_object(
+            &mut state,
+            CardId(902),
+            PlayerId(0),
+            "Sunscorched Divide".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&divide).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: crate::types::ability::ManaProduction::Fixed {
+                            colors: vec![ManaColor::Red, ManaColor::White],
+                            contribution: crate::types::ability::ManaContribution::Base,
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::Mana {
+                            cost: ManaCost::generic(1),
+                        },
+                        AbilityCost::Tap,
+                    ],
+                }),
+            );
+        }
+
+        let mut events = Vec::new();
+        auto_tap_mana_sources(
+            &mut state,
+            PlayerId(0),
+            &ManaCost::Cost {
+                shards: vec![ManaCostShard::Red, ManaCostShard::White],
+                generic: 0,
+            },
+            &mut events,
+            None,
+        );
+
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 1);
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::White), 1);
+        assert_eq!(
+            state.players[0].mana_pool.count_color(ManaType::Colorless),
+            0
+        );
+        assert!(state.objects.get(&nykthos).unwrap().tapped);
+        assert!(state.objects.get(&divide).unwrap().tapped);
     }
 
     #[test]
@@ -4714,6 +5091,8 @@ mod tests {
             distribute: None,
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
+            deferred_modal_choice: None,
+            declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
         };
@@ -4826,6 +5205,8 @@ mod tests {
             distribute: None,
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
+            deferred_modal_choice: None,
+            declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
         };
@@ -4907,6 +5288,8 @@ mod tests {
             distribute: None,
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
+            deferred_modal_choice: None,
+            declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
         };
@@ -4977,6 +5360,8 @@ mod tests {
             distribute: None,
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
+            deferred_modal_choice: None,
+            declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
         };
@@ -5080,6 +5465,8 @@ mod tests {
             distribute: None,
             origin_zone: Zone::Graveyard,
             additional_cost_flow: None,
+            deferred_modal_choice: None,
+            declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
         };
@@ -5129,5 +5516,104 @@ mod tests {
             }
             other => panic!("expected ExileForCost, got {other:?}"),
         }
+    }
+
+    // ── max_x_value tests ──────────────────────────────────────────────
+
+    #[test]
+    fn max_x_value_counts_treasure_tokens() {
+        // CR 107.1b + CR 601.2f: X is chosen before mana payment.
+        // Treasure tokens (sacrifice-for-mana) must be counted so the player
+        // can choose an X that includes them as potential mana sources.
+        use crate::types::ability::{ManaContribution, ManaProduction, TargetFilter};
+
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+
+        // Create 3 basic lands (free mana sources) with tap-for-green abilities.
+        for i in 0..3 {
+            let land = create_object(
+                &mut state,
+                CardId(100 + i),
+                player,
+                "Forest".to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&land).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Forest".to_string());
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Fixed {
+                            colors: vec![ManaColor::Green],
+                            contribution: ManaContribution::Base,
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Tap),
+            );
+        }
+
+        // Create 2 Treasure tokens (sacrifice-for-mana sources).
+        for i in 0..2 {
+            let treasure = create_object(
+                &mut state,
+                CardId(200 + i),
+                player,
+                "Treasure".to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&treasure).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.subtypes.push("Treasure".to_string());
+
+            let ability = AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::AnyOneColor {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        color_options: vec![
+                            ManaColor::White,
+                            ManaColor::Blue,
+                            ManaColor::Black,
+                            ManaColor::Red,
+                            ManaColor::Green,
+                        ],
+                        contribution: ManaContribution::Base,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .cost(AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Tap,
+                    AbilityCost::Sacrifice {
+                        target: TargetFilter::SelfRef,
+                        count: 1,
+                    },
+                ],
+            });
+            let obj = state.objects.get_mut(&treasure).unwrap();
+            Arc::make_mut(&mut obj.abilities).push(ability);
+        }
+
+        // Cost: {X}{R} — 1 fixed colored shard, rest is X.
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::Red],
+            generic: 0,
+        };
+
+        // 3 lands + 2 Treasures = 5 sources, minus 1 for the {R} = max X of 4.
+        let max = max_x_value(&state, player, &cost);
+        assert_eq!(max, 4, "max X should count Treasure tokens as mana sources");
     }
 }

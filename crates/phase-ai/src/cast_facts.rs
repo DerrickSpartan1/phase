@@ -330,6 +330,7 @@ fn effect_requires_targets(effect: &Effect) -> bool {
         | Effect::GivePlayerCounter { target, .. }
         | Effect::BecomeCopy { target, .. }
         | Effect::ExtraTurn { target, .. }
+        | Effect::SkipNextStep { target, .. }
         | Effect::Regenerate { target, .. }
         | Effect::DoublePT { target, .. }
         | Effect::PreventDamage { target, .. }
@@ -378,7 +379,9 @@ mod tests {
 
     use super::*;
     use engine::game::game_object::GameObject;
-    use engine::types::ability::{AbilityDefinition, AbilityKind, QuantityExpr, TargetFilter};
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, ManaReplacementScope, QuantityExpr, TargetFilter,
+    };
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::mana::ManaCost;
 
@@ -459,6 +462,7 @@ mod tests {
             expiry: None,
             redirect_target: None,
             mana_modification: None,
+            mana_replacement_scope: ManaReplacementScope::Any,
             additional_token_spec: None,
             ensure_token_specs: None,
         });

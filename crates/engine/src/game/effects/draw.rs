@@ -182,6 +182,7 @@ pub fn apply_draw_after_replacement(
             object_id: obj_id,
             nth_in_step,
         });
+        super::drawn_this_turn_choice::record_drawn_card(state, player_id, obj_id);
         record_first_draw_and_enqueue_miracle(state, player_id, obj_id);
     }
 }

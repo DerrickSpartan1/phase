@@ -1,8 +1,8 @@
+use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till1, take_until};
 use nom::combinator::value;
 use nom::Parser;
-use nom_language::error::VerboseError;
 
 use super::super::oracle_nom::bridge::nom_on_lower;
 use super::super::oracle_nom::primitives as nom_primitives;
@@ -13,14 +13,16 @@ use super::super::oracle_target::{
 use super::super::oracle_util::{
     contains_possessive, infer_core_type_for_subtype, split_around, strip_after,
 };
-use super::types::{SearchLibraryDetails, SeekDetails};
-use super::{capitalize, scan_contains_phrase};
-use crate::parser::oracle_warnings::push_warning;
+use super::{capitalize, scan_contains_phrase, ParseContext};
+use crate::parser::oracle_ir::ast::{SearchLibraryDetails, SeekDetails};
+use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
-    ControllerRef, FilterProp, QuantityExpr, SearchSelectionConstraint, SharedQuality,
-    SharedQualityRelation, TargetFilter, TypeFilter, TypedFilter,
+    Comparator, ControllerRef, FilterProp, ObjectScope, QuantityExpr, QuantityRef,
+    SearchSelectionConstraint, SharedQuality, SharedQualityRelation, TargetFilter, TypeFilter,
+    TypedFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
+use crate::types::keywords::Keyword;
 use crate::types::zones::Zone;
 
 /// Scan `lower` at word boundaries for `tag_prefix`, then apply `combinator` to the
@@ -31,7 +33,7 @@ use crate::types::zones::Zone;
 fn scan_preceded<'a, T>(
     lower: &'a str,
     tag_prefix: &'static str,
-    mut combinator: impl FnMut(&'a str) -> Result<(&'a str, T), nom::Err<VerboseError<&'a str>>>,
+    mut combinator: impl FnMut(&'a str) -> Result<(&'a str, T), nom::Err<OracleError<'a>>>,
 ) -> Option<(T, usize)> {
     let mut search_from = 0;
     while search_from <= lower.len() {
@@ -56,7 +58,10 @@ fn scan_preceded<'a, T>(
     None
 }
 
-pub(super) fn parse_search_library_details(lower: &str) -> SearchLibraryDetails {
+pub(super) fn parse_search_library_details(
+    lower: &str,
+    ctx: &mut ParseContext,
+) -> SearchLibraryDetails {
     let reveal = scan_contains_phrase(lower, "reveal");
 
     // CR 701.23a: Detect "search target opponent's/player's library" patterns.
@@ -105,11 +110,11 @@ pub(super) fn parse_search_library_details(lower: &str) -> SearchLibraryDetails 
         // "for up to five creature cards" or "for any number of dragon creature cards"
         // — type text starts after the number / quantity phrase. Multi-filter is
         // not supported for explicit-count searches (grammar always uses "a X and a Y").
-        (parse_search_filter(&lower[type_start..]), Vec::new())
+        (parse_search_filter(&lower[type_start..], ctx), Vec::new())
     } else if let Some(after_for) = strip_after(lower, "for a ") {
-        parse_search_filter_with_extras(after_for)
+        parse_search_filter_with_extras(after_for, ctx)
     } else if let Some(after_for) = strip_after(lower, "for an ") {
-        parse_search_filter_with_extras(after_for)
+        parse_search_filter_with_extras(after_for, ctx)
     } else {
         (TargetFilter::Any, Vec::new())
     };
@@ -133,7 +138,9 @@ pub(super) fn parse_search_library_details(lower: &str) -> SearchLibraryDetails 
     // word-boundary nom scan so it composes with arbitrary preceding filter text
     // ("for four cards with different names", "for any number of cards with
     // different names", etc.) without enumerating per-prefix permutations.
-    let selection_constraint = if scan_distinct_names_clause(lower) {
+    let selection_constraint = if let Some(constraint) = scan_total_mana_value_constraint(lower) {
+        constraint
+    } else if scan_distinct_names_clause(lower) {
         SearchSelectionConstraint::DistinctNames
     } else {
         SearchSelectionConstraint::None
@@ -153,15 +160,42 @@ pub(super) fn parse_search_library_details(lower: &str) -> SearchLibraryDetails 
     }
 }
 
-fn parse_distinct_names_marker(input: &str) -> Result<(&str, ()), nom::Err<VerboseError<&str>>> {
+fn parse_distinct_names_marker(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
     value(
         (),
         nom::sequence::pair(
-            tag::<_, _, VerboseError<&str>>("different name"),
-            nom::combinator::opt(tag::<_, _, VerboseError<&str>>("s")),
+            tag::<_, _, OracleError<'_>>("different name"),
+            nom::combinator::opt(tag::<_, _, OracleError<'_>>("s")),
         ),
     )
     .parse(input)
+}
+
+fn scan_total_mana_value_constraint(lower: &str) -> Option<SearchSelectionConstraint> {
+    scan_preceded(
+        lower,
+        "with total mana value ",
+        parse_total_mana_value_constraint,
+    )
+    .map(|(constraint, _)| constraint)
+}
+
+fn parse_total_mana_value_constraint(
+    input: &str,
+) -> Result<(&str, SearchSelectionConstraint), nom::Err<OracleError<'_>>> {
+    let (rest, amount) = nom_primitives::parse_number.parse(input)?;
+    let (rest, comparator) = alt((
+        value(Comparator::LE, tag::<_, _, OracleError<'_>>(" or less")),
+        value(Comparator::GE, tag(" or greater")),
+    ))
+    .parse(rest)?;
+    Ok((
+        rest,
+        SearchSelectionConstraint::TotalManaValue {
+            comparator,
+            value: amount as i32,
+        },
+    ))
 }
 
 /// CR 608.2c + CR 701.23: Detect the distinct-names printed-text restriction
@@ -182,7 +216,10 @@ fn scan_distinct_names_clause(lower: &str) -> bool {
 /// (e.g., `"..., put them onto the battlefield tapped, then shuffle"`) because
 /// anything after that belongs to the destination / action chain — not to the
 /// filter expression.
-fn parse_search_filter_with_extras(tail: &str) -> (TargetFilter, Vec<TargetFilter>) {
+fn parse_search_filter_with_extras(
+    tail: &str,
+    ctx: &mut ParseContext,
+) -> (TargetFilter, Vec<TargetFilter>) {
     // structural: not dispatch — bound the filter region at the first clause
     // terminator (comma / period) before running the conjunction combinator,
     // so `" and "` inside e.g. `"put it onto the battlefield, then ..."` can't
@@ -194,13 +231,13 @@ fn parse_search_filter_with_extras(tail: &str) -> (TargetFilter, Vec<TargetFilte
     // the downstream filter parser sees e.g. `"basic plains card"` intact.
     let segments = split_filter_conjunctions(filter_region);
     if segments.len() < 2 {
-        return (parse_search_filter(tail), Vec::new());
+        return (parse_search_filter(tail, ctx), Vec::new());
     }
 
-    let primary = parse_search_filter(segments[0]);
+    let primary = parse_search_filter(segments[0], ctx);
     let extras: Vec<TargetFilter> = segments[1..]
         .iter()
-        .map(|segment| parse_search_filter(segment))
+        .map(|segment| parse_search_filter(segment, ctx))
         .collect();
     (primary, extras)
 }
@@ -241,7 +278,7 @@ fn split_filter_conjunctions(filter_region: &str) -> Vec<&str> {
         // the nom idiom for "find the first occurrence of any of these tags";
         // the error branch falls through to a single-segment result.
         let mut scan = (
-            take_until::<_, _, VerboseError<&str>>(" and "),
+            take_until::<_, _, OracleError<'_>>(" and "),
             alt((
                 value(Conjunction::AndA, tag(" and a ")),
                 value(Conjunction::AndAn, tag(" and an ")),
@@ -320,8 +357,8 @@ fn parse_search_target_player(lower: &str) -> Option<TargetFilter> {
 
 /// Parse "seek [count] [filter] card(s) [and put onto battlefield [tapped]]".
 /// Seek grammar is simpler than search: no "your library", no "for", no shuffle.
-pub(super) fn parse_seek_details(lower: &str) -> SeekDetails {
-    let after_seek = tag::<_, _, VerboseError<&str>>("seek ")
+pub(super) fn parse_seek_details(lower: &str, ctx: &mut ParseContext) -> SeekDetails {
+    let after_seek = tag::<_, _, OracleError<'_>>("seek ")
         .parse(lower)
         .map(|(rest, _)| rest)
         .unwrap_or(lower);
@@ -341,6 +378,8 @@ pub(super) fn parse_seek_details(lower: &str) -> SeekDetails {
         }
     };
 
+    let (filter_text, from_top) = parse_seek_from_top_limit(filter_text);
+
     // Extract count: "two nonland cards" → (2, "nonland cards"); "x cards" → (X, "cards").
     // CR 107.3a + CR 601.2b: X resolves to the caster's announced value at cast time.
     let (count, remaining) =
@@ -356,33 +395,61 @@ pub(super) fn parse_seek_details(lower: &str) -> SeekDetails {
         .map(|(rest, _)| rest)
         .unwrap_or(remaining);
 
-    let filter = parse_search_filter(remaining);
+    let filter = parse_search_filter(remaining, ctx);
 
     SeekDetails {
         filter,
         count,
+        from_top,
         destination,
         enter_tapped,
     }
 }
 
+fn parse_seek_from_top_limit(filter_text: &str) -> (&str, Option<usize>) {
+    fn parse_limit(input: &str) -> Result<(&str, (&str, usize)), nom::Err<OracleError<'_>>> {
+        let (rest, before) =
+            take_until::<_, _, OracleError<'_>>(" from among the top ").parse(input)?;
+        let (rest, _) = tag(" from among the top ").parse(rest)?;
+        let (rest, qty) = nom_quantity::parse_quantity_expr_number(rest)?;
+        let (rest, _) = alt((
+            tag::<_, _, OracleError<'_>>(" cards of your library"),
+            tag(" card of your library"),
+        ))
+        .parse(rest)?;
+        let QuantityExpr::Fixed { value } = qty else {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                rest,
+                nom::error::ErrorKind::Fail,
+            )));
+        };
+        Ok((rest, (before, value.max(0) as usize)))
+    }
+
+    parse_limit(filter_text)
+        .ok()
+        .and_then(|(_, (before, count))| (count > 0).then_some((before, Some(count))))
+        .unwrap_or((filter_text, None))
+}
+
 /// Parse the card type filter from search text like "basic land card, ..."
 /// or "creature card with ..." into a TargetFilter.
-pub(super) fn parse_search_filter(text: &str) -> TargetFilter {
+pub(super) fn parse_search_filter(text: &str, ctx: &mut ParseContext) -> TargetFilter {
     let type_text = text.trim();
 
-    if let Some(filter) = parse_search_filter_disjunction(type_text) {
+    if let Some(filter) = parse_search_filter_disjunction(type_text, ctx) {
         return filter;
     }
 
-    if let Some(filter) = parse_search_filter_leading_property_stack(type_text) {
+    if let Some(filter) = parse_search_filter_leading_property_stack(type_text, ctx) {
         return filter;
     }
 
     let (parsed_filter, remainder) = parse_type_phrase(type_text);
     if search_filter_has_meaningful_content(&parsed_filter) {
         let mut suffix = SearchSuffixConstraints::default();
-        parse_search_filter_suffixes(remainder, &mut suffix);
+        let linked_reference = last_shared_quality_reference_in_filter(&parsed_filter);
+        parse_search_filter_suffixes(remainder, &mut suffix, ctx, linked_reference);
         return apply_search_suffix_constraints(normalize_search_filter(parsed_filter), &suffix);
     }
 
@@ -400,10 +467,13 @@ pub(super) fn parse_search_filter(text: &str) -> TargetFilter {
     };
     let (type_word, suffix_text) = split_search_type_word_and_suffix(clean);
 
-    parse_search_filter_fallback(type_word, suffix_text, is_basic)
+    parse_search_filter_fallback(type_word, suffix_text, is_basic, ctx)
 }
 
-fn parse_search_filter_leading_property_stack(text: &str) -> Option<TargetFilter> {
+fn parse_search_filter_leading_property_stack(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<TargetFilter> {
     let mut properties = Vec::new();
     let mut remaining = text;
     while let Ok((rest, property)) = parse_search_leading_filter_property(remaining) {
@@ -414,7 +484,7 @@ fn parse_search_filter_leading_property_stack(text: &str) -> Option<TargetFilter
         return None;
     }
 
-    let filter = parse_search_filter(remaining);
+    let filter = parse_search_filter(remaining, ctx);
     search_filter_has_meaningful_content(&filter).then(|| {
         apply_search_suffix_constraints(
             filter,
@@ -428,7 +498,7 @@ fn parse_search_filter_leading_property_stack(text: &str) -> Option<TargetFilter
 
 fn parse_search_leading_filter_property(
     input: &str,
-) -> Result<(&str, FilterProp), nom::Err<VerboseError<&str>>> {
+) -> Result<(&str, FilterProp), nom::Err<OracleError<'_>>> {
     alt((
         value(
             FilterProp::NotSupertype {
@@ -456,14 +526,14 @@ fn parse_search_leading_filter_property(
         ),
         |i| {
             let (rest, color) = nom_primitives::parse_color(i)?;
-            let (rest, _) = tag::<_, _, VerboseError<&str>>(" ").parse(rest)?;
+            let (rest, _) = tag::<_, _, OracleError<'_>>(" ").parse(rest)?;
             Ok((rest, FilterProp::HasColor { color }))
         },
     ))
     .parse(input)
 }
 
-fn parse_search_filter_disjunction(text: &str) -> Option<TargetFilter> {
+fn parse_search_filter_disjunction(text: &str, ctx: &mut ParseContext) -> Option<TargetFilter> {
     let filter_region = search_filter_region(text);
     let segments = split_filter_disjunctions(filter_region);
     if segments.len() < 2 {
@@ -472,7 +542,7 @@ fn parse_search_filter_disjunction(text: &str) -> Option<TargetFilter> {
 
     let filters: Vec<TargetFilter> = segments
         .into_iter()
-        .map(parse_search_filter)
+        .map(|s| parse_search_filter(s, ctx))
         .filter(search_filter_has_meaningful_content)
         .collect();
     (filters.len() >= 2).then(|| normalize_search_filter(TargetFilter::Or { filters }))
@@ -502,7 +572,7 @@ fn split_filter_disjunctions(filter_region: &str) -> Vec<&str> {
     let mut remaining = filter_region;
     loop {
         let mut and_or_scan = (
-            take_until::<_, _, VerboseError<&str>>(" and/or "),
+            take_until::<_, _, OracleError<'_>>(" and/or "),
             alt((
                 value(Disjunction::AndOrA, tag(" and/or a ")),
                 value(Disjunction::AndOrAn, tag(" and/or an ")),
@@ -512,7 +582,7 @@ fn split_filter_disjunctions(filter_region: &str) -> Vec<&str> {
             Some(found)
         } else {
             let mut or_scan = (
-                take_until::<_, _, VerboseError<&str>>(" or "),
+                take_until::<_, _, OracleError<'_>>(" or "),
                 alt((
                     value(Disjunction::OrA, tag(" or a ")),
                     value(Disjunction::OrAn, tag(" or an ")),
@@ -563,10 +633,9 @@ fn bare_search_disjunction_allowed(left: &str, right: &str) -> bool {
 
 fn parse_bare_search_disjunction_right(
     input: &str,
-) -> Result<(&str, ()), nom::Err<VerboseError<&str>>> {
+) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
     let (rest, _) = nom::combinator::opt(tag("basic ")).parse(input)?;
-    let (rest, _) =
-        take_till1::<_, _, VerboseError<&str>>(|c: char| c.is_whitespace()).parse(rest)?;
+    let (rest, _) = take_till1::<_, _, OracleError<'_>>(|c: char| c.is_whitespace()).parse(rest)?;
     alt((value((), tag(" cards")), value((), tag(" card")))).parse(rest)
 }
 
@@ -587,10 +656,11 @@ fn parse_search_filter_fallback(
     type_word: &str,
     suffix_text: &str,
     is_basic: bool,
+    ctx: &mut ParseContext,
 ) -> TargetFilter {
-    let suffix = build_search_suffix_constraints(suffix_text, is_basic);
+    let suffix = build_search_suffix_constraints(suffix_text, is_basic, ctx);
     let filter = parse_search_builtin_type_word(type_word)
-        .unwrap_or_else(|| parse_search_specialized_type_word(type_word));
+        .unwrap_or_else(|| parse_search_specialized_type_word(type_word, ctx));
     apply_search_suffix_constraints(filter, &suffix)
 }
 
@@ -603,7 +673,7 @@ fn parse_search_builtin_type_word(type_word: &str) -> Option<TargetFilter> {
                     TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)),
                 ],
             },
-            tag::<_, _, VerboseError<&str>>("instant or sorcery"),
+            tag::<_, _, OracleError<'_>>("instant or sorcery"),
         ),
         value(
             TargetFilter::Typed(TypedFilter::new(TypeFilter::Planeswalker)),
@@ -639,7 +709,7 @@ fn parse_search_builtin_type_word(type_word: &str) -> Option<TargetFilter> {
     rest.is_empty().then_some(filter)
 }
 
-fn parse_search_specialized_type_word(type_word: &str) -> TargetFilter {
+fn parse_search_specialized_type_word(type_word: &str, ctx: &mut ParseContext) -> TargetFilter {
     let negated_types: &[(&str, TypeFilter)] = &[
         ("noncreature", TypeFilter::Creature),
         ("nonland", TypeFilter::Land),
@@ -682,10 +752,11 @@ fn parse_search_specialized_type_word(type_word: &str) -> TargetFilter {
         return filter;
     }
 
-    push_warning(format!(
-        "target-fallback: unrecognized search filter '{}'",
-        type_word
-    ));
+    ctx.push_diagnostic(OracleDiagnostic::TargetFallback {
+        context: "unrecognized search filter".into(),
+        text: type_word.into(),
+        line_index: 0,
+    });
     TargetFilter::Any
 }
 
@@ -713,14 +784,18 @@ fn split_search_type_word_and_suffix(clean: &str) -> (&str, &str) {
     }
 }
 
-fn build_search_suffix_constraints(suffix_text: &str, is_basic: bool) -> SearchSuffixConstraints {
+fn build_search_suffix_constraints(
+    suffix_text: &str,
+    is_basic: bool,
+    ctx: &mut ParseContext,
+) -> SearchSuffixConstraints {
     let mut suffix = SearchSuffixConstraints::default();
     if is_basic {
         suffix.properties.push(FilterProp::HasSupertype {
             value: crate::types::card_type::Supertype::Basic,
         });
     }
-    parse_search_filter_suffixes(suffix_text, &mut suffix);
+    parse_search_filter_suffixes(suffix_text, &mut suffix, ctx, None);
     suffix
 }
 
@@ -831,40 +906,37 @@ fn capitalize_subtype_word(word: &str) -> String {
 }
 
 fn parse_search_suffix_subtype_redeclaration(text: &str) -> Option<(&str, Vec<TypeFilter>)> {
-    let (rest, subtype) = take_till1::<_, _, VerboseError<&str>>(|c: char| c.is_whitespace())
+    let (rest, subtype) = take_till1::<_, _, OracleError<'_>>(|c: char| c.is_whitespace())
         .parse(text)
         .ok()?;
     if !subtype.chars().all(|c| c.is_ascii_alphabetic() || c == '-') {
         return None;
     }
-    let (rest, _) = tag::<_, _, VerboseError<&str>>(" ").parse(rest).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" ").parse(rest).ok()?;
     let (rest, core_type) = alt((
         value(
             Some(TypeFilter::Creature),
-            tag::<_, _, VerboseError<&str>>("creature"),
+            tag::<_, _, OracleError<'_>>("creature"),
         ),
         value(
             Some(TypeFilter::Artifact),
-            tag::<_, _, VerboseError<&str>>("artifact"),
+            tag::<_, _, OracleError<'_>>("artifact"),
         ),
         value(
             Some(TypeFilter::Enchantment),
-            tag::<_, _, VerboseError<&str>>("enchantment"),
+            tag::<_, _, OracleError<'_>>("enchantment"),
         ),
         value(
             Some(TypeFilter::Instant),
-            tag::<_, _, VerboseError<&str>>("instant"),
+            tag::<_, _, OracleError<'_>>("instant"),
         ),
         value(
             Some(TypeFilter::Sorcery),
-            tag::<_, _, VerboseError<&str>>("sorcery"),
+            tag::<_, _, OracleError<'_>>("sorcery"),
         ),
-        value(
-            Some(TypeFilter::Land),
-            tag::<_, _, VerboseError<&str>>("land"),
-        ),
-        value(None, tag::<_, _, VerboseError<&str>>("cards")),
-        value(None, tag::<_, _, VerboseError<&str>>("card")),
+        value(Some(TypeFilter::Land), tag::<_, _, OracleError<'_>>("land")),
+        value(None, tag::<_, _, OracleError<'_>>("cards")),
+        value(None, tag::<_, _, OracleError<'_>>("card")),
     ))
     .parse(rest)
     .ok()?;
@@ -877,9 +949,47 @@ fn parse_search_suffix_subtype_redeclaration(text: &str) -> Option<(&str, Vec<Ty
     Some((rest, filters))
 }
 
+fn parse_search_type_negation_suffix(
+    input: &str,
+) -> Result<(&str, TypeFilter), nom::Err<OracleError<'_>>> {
+    let (rest, _) = alt((
+        tag("that isn't a "),
+        tag("that isn't an "),
+        tag("that is not a "),
+        tag("that is not an "),
+        tag("that aren't "),
+        tag("that are not "),
+    ))
+    .parse(input)?;
+    let (filter, rest) = parse_type_phrase(rest);
+    let Some(negated_type) = single_search_type_filter(filter) else {
+        return Err(nom::Err::Error(OracleError::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    };
+    Ok((rest, TypeFilter::Non(Box::new(negated_type))))
+}
+
+fn single_search_type_filter(filter: TargetFilter) -> Option<TypeFilter> {
+    let TargetFilter::Typed(TypedFilter {
+        mut type_filters,
+        controller: None,
+        properties,
+    }) = filter
+    else {
+        return None;
+    };
+    if properties.is_empty() && type_filters.len() == 1 {
+        type_filters.pop()
+    } else {
+        None
+    }
+}
+
 fn parse_search_name_reference_suffix(
     input: &str,
-) -> Result<(&str, FilterProp), nom::Err<VerboseError<&str>>> {
+) -> Result<(&str, FilterProp), nom::Err<OracleError<'_>>> {
     let (rest, relation) = alt((
         value(
             SharedQualityRelation::DoesNotShare,
@@ -909,26 +1019,31 @@ fn parse_search_name_reference_suffix(
     ))
     .parse(input)?;
 
-    if tag::<_, _, VerboseError<&str>>("target ")
-        .parse(rest)
-        .is_ok()
-    {
-        return Err(nom::Err::Error(VerboseError {
-            errors: vec![(
-                input,
-                nom_language::error::VerboseErrorKind::Context("target name reference"),
-            )],
-        }));
+    if tag::<_, _, OracleError<'_>>("target ").parse(rest).is_ok() {
+        return Err(nom::Err::Error(OracleError::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+
+    let (reference, after_reference) = parse_target(rest);
+    if !matches!(reference, TargetFilter::Any) {
+        return Ok((
+            after_reference,
+            FilterProp::SharesQuality {
+                quality: SharedQuality::Name,
+                reference: Some(Box::new(name_reference_filter(reference))),
+                relation,
+            },
+        ));
     }
 
     let (reference, rest) = parse_type_phrase(rest);
     if !search_filter_has_meaningful_content(&reference) {
-        return Err(nom::Err::Error(VerboseError {
-            errors: vec![(
-                input,
-                nom_language::error::VerboseErrorKind::Context("name reference"),
-            )],
-        }));
+        return Err(nom::Err::Error(OracleError::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
     }
 
     Ok((
@@ -937,6 +1052,113 @@ fn parse_search_name_reference_suffix(
             quality: SharedQuality::Name,
             reference: Some(Box::new(name_reference_filter(reference))),
             relation,
+        },
+    ))
+}
+
+fn parse_linked_reference_mana_value_suffix<'a>(
+    input: &'a str,
+    reference: &TargetFilter,
+) -> Result<(&'a str, FilterProp), nom::Err<OracleError<'a>>> {
+    let Some(scope) = object_scope_for_linked_reference(reference) else {
+        return Err(nom::Err::Error(OracleError::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    };
+
+    let (rest, _) = tag("has mana value equal to ").parse(input)?;
+    let (rest, offset) = alt((
+        value(
+            1,
+            nom::sequence::pair(tag("1 plus "), parse_that_object_mana_value),
+        ),
+        value(
+            1,
+            nom::sequence::pair(tag("one plus "), parse_that_object_mana_value),
+        ),
+        value(0, parse_that_object_mana_value),
+    ))
+    .parse(rest)?;
+    let value = if offset == 0 {
+        QuantityExpr::Ref {
+            qty: QuantityRef::ObjectManaValue { scope },
+        }
+    } else {
+        QuantityExpr::Offset {
+            inner: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue { scope },
+            }),
+            offset,
+        }
+    };
+
+    Ok((
+        rest,
+        FilterProp::Cmc {
+            comparator: Comparator::EQ,
+            value,
+        },
+    ))
+}
+
+fn parse_that_object_mana_value(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+    let (rest, _) = tag("that ").parse(input)?;
+    let (rest, _) = alt((
+        tag("creature"),
+        tag("card"),
+        tag("permanent"),
+        tag("artifact"),
+        tag("enchantment"),
+        tag("planeswalker"),
+        tag("land"),
+    ))
+    .parse(rest)?;
+    let (rest, _) = tag("'s mana value").parse(rest)?;
+    Ok((rest, ()))
+}
+
+fn object_scope_for_linked_reference(reference: &TargetFilter) -> Option<ObjectScope> {
+    match reference {
+        TargetFilter::CostPaidObject => Some(ObjectScope::CostPaidObject),
+        TargetFilter::ParentTarget => Some(ObjectScope::Target),
+        TargetFilter::TriggeringSource => Some(ObjectScope::EventSource),
+        _ => None,
+    }
+}
+
+fn last_shared_quality_reference_in_filter(filter: &TargetFilter) -> Option<TargetFilter> {
+    match filter {
+        TargetFilter::Typed(typed) => typed.properties.iter().rev().find_map(|property| {
+            if let FilterProp::SharesQuality {
+                reference: Some(reference),
+                ..
+            } = property
+            {
+                Some(reference.as_ref().clone())
+            } else {
+                None
+            }
+        }),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => filters
+            .iter()
+            .rev()
+            .find_map(last_shared_quality_reference_in_filter),
+        _ => None,
+    }
+}
+
+fn parse_zero_or_one_mana_cost_suffix(
+    input: &str,
+) -> Result<(&str, FilterProp), nom::Err<OracleError<'_>>> {
+    let (rest, _) = tag("with mana cost ").parse(input)?;
+    let (rest, first) = nom_primitives::parse_mana_cost(rest)?;
+    let (rest, _) = tag(" or ").parse(rest)?;
+    let (rest, second) = nom_primitives::parse_mana_cost(rest)?;
+    Ok((
+        rest,
+        FilterProp::ManaCostIn {
+            costs: vec![first, second],
         },
     ))
 }
@@ -1021,9 +1243,15 @@ fn add_default_battlefield_zone(filter: TargetFilter) -> TargetFilter {
 
 /// Parse property suffixes from search filter text ("with mana value ...", "with a different name ...").
 /// Reuses the existing suffix parsers from oracle_target.
-fn parse_search_filter_suffixes(text: &str, suffix: &mut SearchSuffixConstraints) {
+fn parse_search_filter_suffixes(
+    text: &str,
+    suffix: &mut SearchSuffixConstraints,
+    ctx: &mut ParseContext,
+    initial_shared_quality_reference: Option<TargetFilter>,
+) {
     let lower = text.to_lowercase();
     let mut remaining = lower.as_str();
+    let mut last_shared_quality_reference = initial_shared_quality_reference;
 
     while !remaining.is_empty() {
         remaining = remaining.trim_start();
@@ -1031,9 +1259,9 @@ fn parse_search_filter_suffixes(text: &str, suffix: &mut SearchSuffixConstraints
         // Consume redundant "card(s)" re-declaration left by parse_type_phrase.
         // parse_type_phrase extracts only the type word (e.g. "creature"), so the
         // literal " card" / " cards" token remains and carries no filter meaning.
-        if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("cards").parse(remaining) {
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("cards").parse(remaining) {
             remaining = rest.trim_start();
-        } else if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("card").parse(remaining) {
+        } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("card").parse(remaining) {
             remaining = rest.trim_start();
         }
 
@@ -1042,25 +1270,21 @@ fn parse_search_filter_suffixes(text: &str, suffix: &mut SearchSuffixConstraints
         // handled by the downstream sequence parser. Not a filter-suffix gap — break
         // without warning.
         if remaining.is_empty()
-            || tag::<_, _, VerboseError<&str>>(",")
+            || tag::<_, _, OracleError<'_>>(",").parse(remaining).is_ok()
+            || tag::<_, _, OracleError<'_>>(".").parse(remaining).is_ok()
+            || tag::<_, _, OracleError<'_>>("then ")
                 .parse(remaining)
                 .is_ok()
-            || tag::<_, _, VerboseError<&str>>(".")
+            || tag::<_, _, OracleError<'_>>("reveal ")
                 .parse(remaining)
                 .is_ok()
-            || tag::<_, _, VerboseError<&str>>("then ")
+            || tag::<_, _, OracleError<'_>>("put ")
                 .parse(remaining)
                 .is_ok()
-            || tag::<_, _, VerboseError<&str>>("reveal ")
+            || tag::<_, _, OracleError<'_>>("puts ")
                 .parse(remaining)
                 .is_ok()
-            || tag::<_, _, VerboseError<&str>>("put ")
-                .parse(remaining)
-                .is_ok()
-            || tag::<_, _, VerboseError<&str>>("puts ")
-                .parse(remaining)
-                .is_ok()
-            || tag::<_, _, VerboseError<&str>>("instead")
+            || tag::<_, _, OracleError<'_>>("instead")
                 .parse(remaining)
                 .is_ok()
         {
@@ -1072,12 +1296,12 @@ fn parse_search_filter_suffixes(text: &str, suffix: &mut SearchSuffixConstraints
         // "... and reveal them" (Flourishing Bloom-Kin) or "... and reveal it"
         // (Archdruid's Charm) would fall through to the specific-suffix handlers,
         // miss every arm, and emit a spurious `reveal it` / `reveal them` warning.
-        if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("and ").parse(remaining) {
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("and ").parse(remaining) {
             remaining = rest.trim_start();
             continue;
         }
 
-        if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("with that name").parse(remaining) {
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("with that name").parse(remaining) {
             suffix.properties.push(FilterProp::SameName);
             remaining = rest.trim_start();
             continue;
@@ -1089,14 +1313,14 @@ fn parse_search_filter_suffixes(text: &str, suffix: &mut SearchSuffixConstraints
         // card carried via `TargetFilter::ParentTarget`. Chomp the noun so the
         // dispatch loop continues at any trailing action chain ("…, reveal it, …").
         if let Ok((rest, _)) =
-            tag::<_, _, VerboseError<&str>>("with the same name as that ").parse(remaining)
+            tag::<_, _, OracleError<'_>>("with the same name as that ").parse(remaining)
         {
             // Consume the demonstrative subject noun and any trailing modifier
             // ("nontoken creature", "creature", "card") up to the next sentinel
             // (',', '.') via `take_till` — drop the consumed noun and continue
             // the dispatch loop at the sentinel position.
             let (after_noun, _consumed_noun) =
-                nom::bytes::complete::take_till::<_, _, VerboseError<&str>>(|c: char| {
+                nom::bytes::complete::take_till::<_, _, OracleError<'_>>(|c: char| {
                     c == ',' || c == '.'
                 })
                 .parse(rest)
@@ -1111,12 +1335,9 @@ fn parse_search_filter_suffixes(text: &str, suffix: &mut SearchSuffixConstraints
         // a structural `TargetOnly` wrapper, and the library filter reads it via
         // `SameNameAsParentTarget`.
         if let Ok((rest, _)) =
-            tag::<_, _, VerboseError<&str>>("with the same name as ").parse(remaining)
+            tag::<_, _, OracleError<'_>>("with the same name as ").parse(remaining)
         {
-            if tag::<_, _, VerboseError<&str>>("target ")
-                .parse(rest)
-                .is_ok()
-            {
+            if tag::<_, _, OracleError<'_>>("target ").parse(rest).is_ok() {
                 let (target, after_target) = parse_target(rest);
                 if !matches!(target, TargetFilter::Any) {
                     suffix.properties.push(FilterProp::SameNameAsParentTarget);
@@ -1132,17 +1353,13 @@ fn parse_search_filter_suffixes(text: &str, suffix: &mut SearchSuffixConstraints
             continue;
         }
 
-        if let Ok((rest, _)) =
-            tag::<_, _, VerboseError<&str>>("with the same name").parse(remaining)
-        {
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("with the same name").parse(remaining) {
             suffix.properties.push(FilterProp::SameNameAsParentTarget);
             remaining = rest.trim_start();
             continue;
         }
 
-        if let Ok((rest, _)) =
-            tag::<_, _, VerboseError<&str>>("of the chosen kind").parse(remaining)
-        {
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("of the chosen kind").parse(remaining) {
             suffix
                 .properties
                 .push(FilterProp::IsChosenLandOrNonlandKind);
@@ -1151,6 +1368,13 @@ fn parse_search_filter_suffixes(text: &str, suffix: &mut SearchSuffixConstraints
         }
 
         if let Ok((rest, prop)) = parse_shared_quality_clause(remaining) {
+            last_shared_quality_reference = match &prop {
+                FilterProp::SharesQuality {
+                    reference: Some(reference),
+                    ..
+                } => Some(reference.as_ref().clone()),
+                _ => None,
+            };
             suffix.properties.push(prop);
             remaining = rest.trim_start();
             continue;
@@ -1161,11 +1385,11 @@ fn parse_search_filter_suffixes(text: &str, suffix: &mut SearchSuffixConstraints
         // `scan_distinct_names_clause`; this arm only consumes the marker.
         if let Ok((rest, _)) = alt((
             nom::sequence::preceded(
-                tag::<_, _, VerboseError<&str>>("with "),
+                tag::<_, _, OracleError<'_>>("with "),
                 parse_distinct_names_marker,
             ),
             nom::sequence::preceded(
-                tag::<_, _, VerboseError<&str>>("that have "),
+                tag::<_, _, OracleError<'_>>("that have "),
                 parse_distinct_names_marker,
             ),
         ))
@@ -1175,10 +1399,27 @@ fn parse_search_filter_suffixes(text: &str, suffix: &mut SearchSuffixConstraints
             continue;
         }
 
-        if let Ok((rest, _)) =
-            tag::<_, _, VerboseError<&str>>("with a basic land type").parse(remaining)
+        if let Ok((rest, _)) = alt((
+            tag::<_, _, OracleError<'_>>("with a basic land type"),
+            tag::<_, _, OracleError<'_>>("that have a basic land type"),
+            tag::<_, _, OracleError<'_>>("that each have a basic land type"),
+        ))
+        .parse(remaining)
         {
             suffix.type_filters.push(basic_land_type_any_of());
+            remaining = rest.trim_start();
+            continue;
+        }
+
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("with a mana ability").parse(remaining)
+        {
+            suffix.properties.push(FilterProp::HasManaAbility);
+            remaining = rest.trim_start();
+            continue;
+        }
+
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("with no abilities").parse(remaining) {
+            suffix.properties.push(FilterProp::HasNoAbilities);
             remaining = rest.trim_start();
             continue;
         }
@@ -1191,14 +1432,54 @@ fn parse_search_filter_suffixes(text: &str, suffix: &mut SearchSuffixConstraints
             continue;
         }
 
+        if let Ok((rest, type_filter)) = parse_search_type_negation_suffix(remaining) {
+            suffix.type_filters.push(type_filter);
+            remaining = rest.trim_start();
+            continue;
+        }
+
+        if let Ok((rest, prop)) = parse_search_enchant_keyword_suffix(remaining) {
+            suffix.properties.push(prop);
+            remaining = rest.trim_start();
+            continue;
+        }
+
+        // CR 608.2c + CR 202.3: "with total mana value N or less" constrains
+        // the selected set, not each individual card. `parse_search_library_details`
+        // stores it in `SearchSelectionConstraint`; consume the suffix here so it
+        // does not surface as a per-card filter gap.
+        if let Ok((rest, _)) =
+            tag::<_, _, OracleError<'_>>("with total mana value ").parse(remaining)
+        {
+            if let Ok((rest, _)) = parse_total_mana_value_constraint(rest) {
+                remaining = rest.trim_start();
+                continue;
+            }
+        }
+
         if let Some((prop, consumed)) = parse_mana_value_suffix(remaining) {
             suffix.properties.push(prop);
             remaining = remaining[consumed..].trim_start();
             continue;
         }
 
+        if let Some(reference) = &last_shared_quality_reference {
+            if let Ok((rest, prop)) = parse_linked_reference_mana_value_suffix(remaining, reference)
+            {
+                suffix.properties.push(prop);
+                remaining = rest.trim_start();
+                continue;
+            }
+        }
+
+        if let Ok((rest, prop)) = parse_zero_or_one_mana_cost_suffix(remaining) {
+            suffix.properties.push(prop);
+            remaining = rest.trim_start();
+            continue;
+        }
+
         if let Ok((rest, _)) =
-            tag::<_, _, VerboseError<&str>>("with a different name than each ").parse(remaining)
+            tag::<_, _, OracleError<'_>>("with a different name than each ").parse(remaining)
         {
             let end = rest
                 .find(" you control")
@@ -1212,10 +1493,11 @@ fn parse_search_filter_suffixes(text: &str, suffix: &mut SearchSuffixConstraints
                 "enchantment" => TargetFilter::Typed(TypedFilter::new(TypeFilter::Enchantment)),
                 "artifact" => TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
                 _ => {
-                    push_warning(format!(
-                        "target-fallback: unrecognized inner type '{}' in different-name filter",
-                        inner_type
-                    ));
+                    ctx.push_diagnostic(OracleDiagnostic::TargetFallback {
+                        context: "unrecognized inner type in different-name filter".into(),
+                        text: inner_type.into(),
+                        line_index: 0,
+                    });
                     TargetFilter::Any
                 }
             };
@@ -1232,22 +1514,63 @@ fn parse_search_filter_suffixes(text: &str, suffix: &mut SearchSuffixConstraints
         // Dispatch-loop diagnostic: unmatched trailing text indicates a parser gap
         // (e.g., novel "with …" suffix phrasing). Emit a warning so gaps surface
         // in coverage output instead of silently dropping filter constraints.
-        push_warning(format!(
-            "target-fallback: search-filter-suffix unmatched: '{}'",
-            remaining
-        ));
+        ctx.push_diagnostic(OracleDiagnostic::TargetFallback {
+            context: "search-filter-suffix unmatched".into(),
+            text: remaining.into(),
+            line_index: 0,
+        });
         break;
     }
 }
 
 fn scan_same_name_reference_target(lower: &str) -> Option<TargetFilter> {
     scan_preceded(lower, "with the same name as ", |input| {
-        let _ = tag::<_, _, VerboseError<&str>>("target ").parse(input)?;
+        let _ = tag::<_, _, OracleError<'_>>("target ").parse(input)?;
         let (target, rest) = parse_target(input);
         Ok((rest, target))
     })
     .map(|(target, _)| target)
     .filter(|target| !matches!(target, TargetFilter::Any))
+}
+
+fn parse_search_enchant_keyword_suffix(
+    input: &str,
+) -> Result<(&str, FilterProp), nom::Err<OracleError<'_>>> {
+    let (rest, semantic_can_enchant) = alt((
+        value(false, tag("with enchant ")),
+        value(true, tag("that could enchant ")),
+    ))
+    .parse(input)?;
+    let (after_target, target_text) =
+        take_till1::<_, _, OracleError<'_>>(|c: char| c == ',' || c == '.').parse(rest)?;
+    let (target, remainder) = {
+        let (target, remainder) = parse_target(target_text.trim());
+        if matches!(target, TargetFilter::Any) {
+            parse_type_phrase(target_text.trim())
+        } else {
+            (target, remainder)
+        }
+    };
+    if !remainder.trim().is_empty() || !search_filter_has_meaningful_content(&target) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    let prop = if semantic_can_enchant
+        && matches!(
+            target,
+            TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. }
+        ) {
+        FilterProp::CanEnchant {
+            target: Box::new(target),
+        }
+    } else {
+        FilterProp::WithKeyword {
+            value: Keyword::Enchant(target),
+        }
+    };
+    Ok((after_target, prop))
 }
 
 /// Parse the destination zone from search Oracle text.
@@ -1271,11 +1594,13 @@ mod tests {
     use super::*;
     use crate::types::ability::{Comparator, QuantityRef, SharedQuality, SharedQualityRelation};
     use crate::types::keywords::Keyword;
+    use crate::types::mana::ManaCost;
 
     #[test]
     fn search_target_opponent_library() {
         let details = parse_search_library_details(
             "search target opponent's library for a creature card and put that card onto the battlefield under your control",
+            &mut ParseContext::default(),
         );
         assert!(details.target_player.is_some());
         let tp = details.target_player.unwrap();
@@ -1296,8 +1621,10 @@ mod tests {
 
     #[test]
     fn search_target_player_library() {
-        let details =
-            parse_search_library_details("search target player's library for a card and exile it");
+        let details = parse_search_library_details(
+            "search target player's library for a card and exile it",
+            &mut ParseContext::default(),
+        );
         assert!(details.target_player.is_some());
         assert_eq!(details.target_player.unwrap(), TargetFilter::Player);
     }
@@ -1307,6 +1634,7 @@ mod tests {
         // Jester's Cap: "search target player's library for three cards and exile them"
         let details = parse_search_library_details(
             "search target player's library for three cards and exile them",
+            &mut ParseContext::default(),
         );
         assert!(details.target_player.is_some());
         assert_eq!(details.count, QuantityExpr::Fixed { value: 3 });
@@ -1316,6 +1644,7 @@ mod tests {
     fn search_your_library_no_target_player() {
         let details = parse_search_library_details(
             "search your library for a basic land card, reveal it, put it into your hand",
+            &mut ParseContext::default(),
         );
         assert!(details.target_player.is_none());
         assert!(details.reveal);
@@ -1325,8 +1654,10 @@ mod tests {
     fn search_up_to_x_cards_emits_variable_count() {
         // CR 107.3a + CR 601.2b: `up to X` emits `QuantityRef::Variable` so the
         // resolver can pick up the caster's announced X at effect time.
-        let details =
-            parse_search_library_details("search your library for up to x creature cards");
+        let details = parse_search_library_details(
+            "search your library for up to x creature cards",
+            &mut ParseContext::default(),
+        );
         assert_eq!(
             details.count,
             QuantityExpr::Ref {
@@ -1342,8 +1673,10 @@ mod tests {
         // Regression: numeric word counts still parse as `Fixed` — this is the
         // pre-widening behavior the switch to nom + `parse_quantity_expr_number`
         // must preserve.
-        let details =
-            parse_search_library_details("search your library for three cards and exile them");
+        let details = parse_search_library_details(
+            "search your library for three cards and exile them",
+            &mut ParseContext::default(),
+        );
         assert_eq!(details.count, QuantityExpr::Fixed { value: 3 });
     }
 
@@ -1354,7 +1687,6 @@ mod tests {
         // extracted by parse_type_phrase; what follows the filter clause
         // (", put it onto the battlefield, then shuffle") is handled by the
         // downstream sequence parser — not a filter-suffix gap.
-        use crate::parser::oracle_warnings::{clear_warnings, take_warnings};
         for text in [
             "creature card, put it onto the battlefield, then shuffle",
             "land card, reveal it, put it into your hand, then shuffle",
@@ -1363,14 +1695,14 @@ mod tests {
             "creature card. exile it",
             "Vampire cards instead",
         ] {
-            clear_warnings();
-            let _ = parse_search_filter(text);
-            let warnings = take_warnings();
+            let mut ctx = ParseContext::default();
+            let _ = parse_search_filter(text, &mut ctx);
             assert!(
-                !warnings
+                !ctx.diagnostics
                     .iter()
-                    .any(|w| w.contains("search-filter-suffix unmatched")),
-                "unexpected filter-suffix warning for {text:?}: {warnings:?}"
+                    .any(|d| d.to_string().contains("search-filter-suffix unmatched")), // allow-noncombinator: test assertion matching diagnostic content
+                "unexpected filter-suffix warning for {text:?}: {:?}",
+                ctx.diagnostics
             );
         }
     }
@@ -1381,17 +1713,21 @@ mod tests {
         // doesn't match any known filter-suffix pattern AND doesn't look like an
         // action-chain continuation (no leading comma / period / "then"), a
         // warning must still fire so coverage reports surface parser gaps.
-        use crate::parser::oracle_warnings::{clear_warnings, take_warnings};
-        clear_warnings();
+        use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
+        let mut ctx = ParseContext::default();
         let mut suffix = SearchSuffixConstraints::default();
         // Invented suffix that won't hit any existing filter-suffix pattern.
-        parse_search_filter_suffixes(" with unrecognized flibbertigibbet suffix", &mut suffix);
-        let warnings = take_warnings();
+        parse_search_filter_suffixes(
+            " with unrecognized flibbertigibbet suffix",
+            &mut suffix,
+            &mut ctx,
+            None,
+        );
         assert!(
-            warnings
+            ctx.diagnostics
                 .iter()
-                .any(|w| w.contains("search-filter-suffix unmatched")),
-            "expected filter-suffix warning for novel grammar, got {warnings:?}"
+                .any(|d| matches!(d, OracleDiagnostic::TargetFallback { context, .. } if context.contains("search-filter-suffix"))), // allow-noncombinator: test assertion matching diagnostic context field
+            "expected filter-suffix diagnostic for novel grammar, got {:?}", ctx.diagnostics
         );
     }
 
@@ -1412,7 +1748,8 @@ mod tests {
 
     #[test]
     fn build_search_suffix_constraints_includes_basic_and_same_name() {
-        let suffix = build_search_suffix_constraints(" with that name", true);
+        let suffix =
+            build_search_suffix_constraints(" with that name", true, &mut ParseContext::default());
         assert!(suffix.properties.iter().any(|property| matches!(
             property,
             FilterProp::HasSupertype {
@@ -1427,7 +1764,11 @@ mod tests {
 
     #[test]
     fn build_search_suffix_constraints_same_name_uses_parent_target() {
-        let suffix = build_search_suffix_constraints(" with the same name", false);
+        let suffix = build_search_suffix_constraints(
+            " with the same name",
+            false,
+            &mut ParseContext::default(),
+        );
         assert!(suffix
             .properties
             .iter()
@@ -1435,8 +1776,29 @@ mod tests {
     }
 
     #[test]
+    fn build_search_suffix_constraints_handles_basic_land_type_variants() {
+        for suffix_text in [
+            " with a basic land type",
+            " that have a basic land type",
+            " that each have a basic land type",
+        ] {
+            let suffix =
+                build_search_suffix_constraints(suffix_text, false, &mut ParseContext::default());
+            assert!(suffix
+                .type_filters
+                .iter()
+                .any(|filter| matches!(filter, TypeFilter::AnyOf(_))));
+        }
+    }
+
+    #[test]
     fn parse_search_filter_fallback_handles_basic_card_same_name() {
-        let filter = parse_search_filter_fallback("card", " with that name", true);
+        let filter = parse_search_filter_fallback(
+            "card",
+            " with that name",
+            true,
+            &mut ParseContext::default(),
+        );
         let TargetFilter::Typed(typed) = filter else {
             panic!("expected Typed filter, got {filter:?}");
         };
@@ -1454,7 +1816,10 @@ mod tests {
 
     #[test]
     fn parse_search_filter_handles_land_card_with_basic_land_type() {
-        let filter = parse_search_filter("land card with a basic land type");
+        let filter = parse_search_filter(
+            "land card with a basic land type",
+            &mut ParseContext::default(),
+        );
         let TargetFilter::Typed(typed) = filter else {
             panic!("expected Typed filter, got {filter:?}");
         };
@@ -1472,8 +1837,73 @@ mod tests {
     }
 
     #[test]
+    fn parse_search_filter_handles_card_with_mana_ability() {
+        let filter = parse_search_filter(
+            "artifact card with a mana ability",
+            &mut ParseContext::default(),
+        );
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Artifact));
+        assert!(typed
+            .properties
+            .iter()
+            .any(|property| matches!(property, FilterProp::HasManaAbility)));
+    }
+
+    #[test]
+    fn parse_search_filter_handles_card_with_no_abilities() {
+        let filter = parse_search_filter(
+            "creature card with no abilities",
+            &mut ParseContext::default(),
+        );
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Creature));
+        assert!(typed
+            .properties
+            .iter()
+            .any(|property| matches!(property, FilterProp::HasNoAbilities)));
+    }
+
+    #[test]
+    fn parse_search_filter_handles_negated_type_suffix() {
+        let filter = parse_search_filter(
+            "legendary artifact card that isn't a creature, reveal it",
+            &mut ParseContext::default(),
+        );
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Artifact));
+        assert!(typed.type_filters.iter().any(
+            |type_filter| matches!(type_filter, TypeFilter::Non(inner) if **inner == TypeFilter::Creature)
+        ));
+    }
+
+    #[test]
+    fn parse_search_filter_handles_plural_negated_type_suffix() {
+        let filter = parse_search_filter(
+            "artifact cards that are not lands",
+            &mut ParseContext::default(),
+        );
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Artifact));
+        assert!(typed.type_filters.iter().any(
+            |type_filter| matches!(type_filter, TypeFilter::Non(inner) if **inner == TypeFilter::Land)
+        ));
+    }
+
+    #[test]
     fn parse_search_filter_handles_shared_color_with_source() {
-        let filter = parse_search_filter("instant or sorcery card that shares a color with ~");
+        let filter = parse_search_filter(
+            "instant or sorcery card that shares a color with ~",
+            &mut ParseContext::default(),
+        );
         let TargetFilter::Or { filters } = filter else {
             panic!("expected Or filter, got {filter:?}");
         };
@@ -1495,7 +1925,10 @@ mod tests {
 
     #[test]
     fn parse_search_filter_handles_colorless_creature_card() {
-        let filter = parse_search_filter("colorless creature card with mana value 7 or greater");
+        let filter = parse_search_filter(
+            "colorless creature card with mana value 7 or greater",
+            &mut ParseContext::default(),
+        );
         let TargetFilter::Typed(typed) = filter else {
             panic!("expected Typed filter, got {filter:?}");
         };
@@ -1515,7 +1948,10 @@ mod tests {
 
     #[test]
     fn parse_search_filter_handles_that_have_mana_value() {
-        let filter = parse_search_filter("cards that have mana value 9, reveal them");
+        let filter = parse_search_filter(
+            "cards that have mana value 9, reveal them",
+            &mut ParseContext::default(),
+        );
         let TargetFilter::Typed(typed) = filter else {
             panic!("expected Typed filter, got {filter:?}");
         };
@@ -1529,9 +1965,88 @@ mod tests {
     }
 
     #[test]
+    fn parse_search_filter_handles_enchant_keyword_suffix() {
+        let filter = parse_search_filter(
+            "aura card with enchant creature, reveal it",
+            &mut ParseContext::default(),
+        );
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Enchantment));
+        assert!(typed
+            .type_filters
+            .contains(&TypeFilter::Subtype("Aura".to_string())));
+        assert!(typed.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::WithKeyword {
+                value: Keyword::Enchant(TargetFilter::Typed(target))
+            } if target.type_filters.contains(&TypeFilter::Creature)
+        )));
+    }
+
+    #[test]
+    fn parse_search_filter_handles_could_enchant_parent_reference_suffix() {
+        let filter = parse_search_filter(
+            "aura card that could enchant that creature, put it onto the battlefield attached to that creature",
+            &mut ParseContext::default(),
+        );
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Enchantment));
+        assert!(typed
+            .type_filters
+            .contains(&TypeFilter::Subtype("Aura".to_string())));
+        assert!(typed.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::CanEnchant {
+                target
+            } if matches!(target.as_ref(), TargetFilter::ParentTarget)
+        )));
+    }
+
+    #[test]
+    fn parse_search_filter_keeps_plain_could_enchant_type_as_keyword_filter() {
+        let filter = parse_search_filter(
+            "aura card that could enchant creature, reveal it",
+            &mut ParseContext::default(),
+        );
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(typed.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::WithKeyword {
+                value: Keyword::Enchant(TargetFilter::Typed(target))
+            } if target.type_filters.contains(&TypeFilter::Creature)
+        )));
+    }
+
+    #[test]
+    fn parse_search_filter_handles_zero_or_one_mana_cost() {
+        let filter = parse_search_filter(
+            "artifact card with mana cost {0} or {1}, put it onto the battlefield",
+            &mut ParseContext::default(),
+        );
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Artifact));
+        assert!(typed.properties.iter().any(|property| {
+            matches!(
+                property,
+                FilterProp::ManaCostIn { costs }
+                    if costs == &vec![ManaCost::zero(), ManaCost::generic(1)]
+            )
+        }));
+    }
+
+    #[test]
     fn parse_search_filter_handles_that_each_have_mana_value_x_or_less() {
         let filter = parse_search_filter(
             "creature cards that each have mana value x or less and reveal them",
+            &mut ParseContext::default(),
         );
         let TargetFilter::Typed(typed) = filter else {
             panic!("expected Typed filter, got {filter:?}");
@@ -1550,7 +2065,7 @@ mod tests {
 
     #[test]
     fn parse_search_filter_handles_multicolored_card() {
-        let filter = parse_search_filter("multicolored card");
+        let filter = parse_search_filter("multicolored card", &mut ParseContext::default());
         let TargetFilter::Typed(typed) = filter else {
             panic!("expected Typed filter, got {filter:?}");
         };
@@ -1565,6 +2080,7 @@ mod tests {
     fn parse_search_filter_handles_nonlegendary_green_creature_card() {
         let filter = parse_search_filter(
             "nonlegendary green creature card with mana value 3 or less, put it onto the battlefield",
+            &mut ParseContext::default(),
         );
         let TargetFilter::Typed(typed) = filter else {
             panic!("expected Typed filter, got {filter:?}");
@@ -1590,7 +2106,10 @@ mod tests {
 
     #[test]
     fn search_filter_leading_properties_do_not_distribute_across_or() {
-        let filter = parse_search_filter("green creature card or an artifact card, reveal it");
+        let filter = parse_search_filter(
+            "green creature card or an artifact card, reveal it",
+            &mut ParseContext::default(),
+        );
         let TargetFilter::Or { filters } = filter else {
             panic!("expected Or filter, got {filter:?}");
         };
@@ -1616,7 +2135,10 @@ mod tests {
 
     #[test]
     fn parse_search_filter_handles_basic_land_or_gate_card() {
-        let filter = parse_search_filter("basic land card or a gate card, reveal it");
+        let filter = parse_search_filter(
+            "basic land card or a gate card, reveal it",
+            &mut ParseContext::default(),
+        );
         let TargetFilter::Or { filters } = filter else {
             panic!("expected Or filter, got {filter:?}");
         };
@@ -1642,7 +2164,10 @@ mod tests {
 
     #[test]
     fn parse_search_filter_handles_mountain_or_cave_card() {
-        let filter = parse_search_filter("mountain or cave card, reveal it");
+        let filter = parse_search_filter(
+            "mountain or cave card, reveal it",
+            &mut ParseContext::default(),
+        );
         let TargetFilter::Or { filters } = filter else {
             panic!("expected Or filter, got {filter:?}");
         };
@@ -1663,7 +2188,10 @@ mod tests {
 
     #[test]
     fn parse_search_filter_handles_or_an_article_variant() {
-        let filter = parse_search_filter("creature card or an artifact card, reveal it");
+        let filter = parse_search_filter(
+            "creature card or an artifact card, reveal it",
+            &mut ParseContext::default(),
+        );
         let TargetFilter::Or { filters } = filter else {
             panic!("expected Or filter, got {filter:?}");
         };
@@ -1682,7 +2210,10 @@ mod tests {
 
     #[test]
     fn parse_search_filter_handles_and_or_article_variant() {
-        let filter = parse_search_filter("aura card and/or an equipment card, reveal them");
+        let filter = parse_search_filter(
+            "aura card and/or an equipment card, reveal them",
+            &mut ParseContext::default(),
+        );
         let TargetFilter::Or { filters } = filter else {
             panic!("expected Or filter, got {filter:?}");
         };
@@ -1703,7 +2234,8 @@ mod tests {
 
     #[test]
     fn parse_search_filter_handles_trailing_subtype_card() {
-        let filter = parse_search_filter("spider hero card, reveal it");
+        let filter =
+            parse_search_filter("spider hero card, reveal it", &mut ParseContext::default());
         let TargetFilter::Typed(typed) = filter else {
             panic!("expected Typed filter, got {filter:?}");
         };
@@ -1719,7 +2251,10 @@ mod tests {
 
     #[test]
     fn parse_search_filter_handles_hyphenated_subtype_creature() {
-        let filter = parse_search_filter("legendary team-up creature, reveal it");
+        let filter = parse_search_filter(
+            "legendary team-up creature, reveal it",
+            &mut ParseContext::default(),
+        );
         let TargetFilter::Typed(typed) = filter else {
             panic!("expected Typed filter, got {filter:?}");
         };
@@ -1738,7 +2273,10 @@ mod tests {
 
     #[test]
     fn parse_search_filter_handles_or_basic_variant() {
-        let filter = parse_search_filter("bird or basic land card, reveal it");
+        let filter = parse_search_filter(
+            "bird or basic land card, reveal it",
+            &mut ParseContext::default(),
+        );
         let TargetFilter::Or { filters } = filter else {
             panic!("expected Or filter, got {filter:?}");
         };
@@ -1763,8 +2301,10 @@ mod tests {
 
     #[test]
     fn parse_search_filter_keeps_comparator_or_inside_disjunction_branch() {
-        let filter =
-            parse_search_filter("basic plains card or a creature card with mana value 1 or less");
+        let filter = parse_search_filter(
+            "basic plains card or a creature card with mana value 1 or less",
+            &mut ParseContext::default(),
+        );
         let TargetFilter::Or { filters } = filter else {
             panic!("expected Or filter, got {filter:?}");
         };
@@ -1797,7 +2337,10 @@ mod tests {
 
     #[test]
     fn parse_search_filter_handles_instant_or_card_with_flash() {
-        let filter = parse_search_filter("instant card or a card with flash, reveal it");
+        let filter = parse_search_filter(
+            "instant card or a card with flash, reveal it",
+            &mut ParseContext::default(),
+        );
         let TargetFilter::Or { filters } = filter else {
             panic!("expected Or filter, got {filter:?}");
         };
@@ -1820,7 +2363,10 @@ mod tests {
 
     #[test]
     fn search_or_filter_does_not_split_mana_value_comparator_suffix() {
-        let filter = parse_search_filter("creature card with mana value 3 or less");
+        let filter = parse_search_filter(
+            "creature card with mana value 3 or less",
+            &mut ParseContext::default(),
+        );
         let TargetFilter::Typed(typed) = filter else {
             panic!("expected typed creature filter, got {filter:?}");
         };
@@ -1838,6 +2384,7 @@ mod tests {
     fn search_same_name_as_target_creature_captures_reference_target() {
         let details = parse_search_library_details(
             "search your library for up to three cards with the same name as target creature, reveal them, put them into your hand",
+            &mut ParseContext::default(),
         );
         assert_eq!(details.count, QuantityExpr::Fixed { value: 3 });
         let TargetFilter::Typed(filter) = details.filter else {
@@ -1859,7 +2406,10 @@ mod tests {
 
     #[test]
     fn parse_search_filter_same_name_as_another_creature_you_control() {
-        let filter = parse_search_filter("card with the same name as another creature you control");
+        let filter = parse_search_filter(
+            "card with the same name as another creature you control",
+            &mut ParseContext::default(),
+        );
         let TargetFilter::Typed(filter) = filter else {
             panic!("expected Typed filter, got {filter:?}");
         };
@@ -1886,6 +2436,7 @@ mod tests {
     fn parse_search_filter_same_name_as_card_in_your_graveyard() {
         let filter = parse_search_filter(
             "instant or sorcery card with the same name as a card in your graveyard",
+            &mut ParseContext::default(),
         );
         let TargetFilter::Or { filters } = filter else {
             panic!("expected Or filter, got {filter:?}");
@@ -1915,9 +2466,64 @@ mod tests {
     }
 
     #[test]
+    fn parse_search_filter_same_name_as_cost_paid_object() {
+        let filter = parse_search_filter(
+            "card with the same name as the sacrificed creature, reveal it",
+            &mut ParseContext::default(),
+        );
+        let TargetFilter::Typed(filter) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(filter.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::SharesQuality {
+                quality: SharedQuality::Name,
+                reference: Some(reference),
+                relation: SharedQualityRelation::Shares,
+            } if matches!(reference.as_ref(), TargetFilter::CostPaidObject)
+        )));
+    }
+
+    #[test]
+    fn parse_search_filter_cost_paid_shared_type_and_mana_value() {
+        let filter = parse_search_filter(
+            "creature card that shares a creature type with the sacrificed creature and has mana value equal to 1 plus that creature's mana value",
+            &mut ParseContext::default(),
+        );
+        let TargetFilter::Typed(filter) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(filter.type_filters.contains(&TypeFilter::Creature));
+        assert!(filter.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::SharesQuality {
+                quality: SharedQuality::CreatureType,
+                reference: Some(reference),
+                relation: SharedQualityRelation::Shares,
+            } if matches!(reference.as_ref(), TargetFilter::CostPaidObject)
+        )));
+        assert!(filter.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::Cmc {
+                comparator: Comparator::EQ,
+                value: QuantityExpr::Offset { inner, offset: 1 },
+            } if matches!(
+                inner.as_ref(),
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::CostPaidObject
+                    }
+                }
+            )
+        )));
+    }
+
+    #[test]
     fn parse_search_filter_different_name_from_room_you_control() {
-        let filter =
-            parse_search_filter("room card that doesn't have the same name as a room you control");
+        let filter = parse_search_filter(
+            "room card that doesn't have the same name as a room you control",
+            &mut ParseContext::default(),
+        );
         let TargetFilter::Typed(filter) = filter else {
             panic!("expected Typed filter, got {filter:?}");
         };
@@ -1945,6 +2551,7 @@ mod tests {
         // of Dragon creature cards, put them onto the battlefield, then shuffle."
         let details = parse_search_library_details(
             "search your library for any number of dragon creature cards, put them onto the battlefield, then shuffle",
+            &mut ParseContext::default(),
         );
         assert!(details.up_to, "any number of should set up_to=true");
         assert_eq!(details.count, QuantityExpr::Fixed { value: i32::MAX });
@@ -1962,6 +2569,7 @@ mod tests {
         // "Search your library for up to three cards" — player may pick 0..=3.
         let details = parse_search_library_details(
             "search your library for up to three creature cards, reveal them",
+            &mut ParseContext::default(),
         );
         assert!(details.up_to, "up to N should set up_to=true");
         assert_eq!(details.count, QuantityExpr::Fixed { value: 3 });
@@ -1973,6 +2581,7 @@ mod tests {
         // (CR 701.23d: must find if present).
         let details = parse_search_library_details(
             "search your library for a creature card, put it onto the battlefield",
+            &mut ParseContext::default(),
         );
         assert!(!details.up_to, "exact-count search should not set up_to");
         assert_eq!(details.count, QuantityExpr::Fixed { value: 1 });
@@ -1980,7 +2589,7 @@ mod tests {
 
     #[test]
     fn parse_search_specialized_type_word_handles_unknown_alphabetic_subtype() {
-        let filter = parse_search_specialized_type_word("elf");
+        let filter = parse_search_specialized_type_word("elf", &mut ParseContext::default());
         let TargetFilter::Typed(typed) = filter else {
             panic!("expected Typed filter, got {filter:?}");
         };
@@ -1993,6 +2602,7 @@ mod tests {
     fn search_dual_filter_forest_and_plains_extracts_both() {
         let details = parse_search_library_details(
             "search your library for a forest card and a plains card, put them onto the battlefield tapped, then shuffle",
+            &mut ParseContext::default(),
         );
         assert_eq!(details.extra_filters.len(), 1, "expected one extra filter");
         match &details.filter {
@@ -2013,6 +2623,7 @@ mod tests {
     fn search_dual_filter_corpse_harvester_variant() {
         let details = parse_search_library_details(
             "search your library for a zombie card and a swamp card, reveal them, put them into your hand, then shuffle",
+            &mut ParseContext::default(),
         );
         assert_eq!(details.extra_filters.len(), 1);
         assert_eq!(details.multi_destination, Zone::Hand);
@@ -2026,6 +2637,7 @@ mod tests {
     fn search_dual_filter_basic_supertype_preserved() {
         let details = parse_search_library_details(
             "search your library for a basic forest card and a basic plains card, reveal those cards, put them into your hand, then shuffle",
+            &mut ParseContext::default(),
         );
         assert_eq!(details.extra_filters.len(), 1);
         match &details.filter {
@@ -2066,6 +2678,7 @@ mod tests {
     fn search_single_filter_has_no_extras() {
         let details = parse_search_library_details(
             "search your library for a creature card, put it onto the battlefield",
+            &mut ParseContext::default(),
         );
         assert!(details.extra_filters.is_empty());
     }
@@ -2078,6 +2691,7 @@ mod tests {
     fn search_with_different_names_emits_distinct_names_constraint() {
         let details = parse_search_library_details(
             "search your library for up to four cards with different names, reveal those cards, and put them into your graveyard",
+            &mut ParseContext::default(),
         );
         assert_eq!(
             details.selection_constraint,
@@ -2091,6 +2705,7 @@ mod tests {
     fn search_that_have_different_names_emits_distinct_names_constraint() {
         let details = parse_search_library_details(
             "search your library for up to five land cards that have different names, exile them, then shuffle",
+            &mut ParseContext::default(),
         );
         assert_eq!(
             details.selection_constraint,
@@ -2100,12 +2715,40 @@ mod tests {
         assert_eq!(details.count, QuantityExpr::Fixed { value: 5 });
     }
 
+    #[test]
+    fn search_total_mana_value_emits_selection_constraint_without_suffix_warning() {
+        let mut ctx = ParseContext::default();
+        let details = parse_search_library_details(
+            "search your library for any number of creature cards with total mana value 6 or less, put them onto the battlefield, then shuffle",
+            &mut ctx,
+        );
+        assert_eq!(
+            details.selection_constraint,
+            SearchSelectionConstraint::TotalManaValue {
+                comparator: Comparator::LE,
+                value: 6,
+            }
+        );
+        assert!(details.up_to);
+        assert!(
+            ctx.diagnostics.iter().all(|diagnostic| !matches!(
+                diagnostic,
+                OracleDiagnostic::TargetFallback { context, text, .. }
+                    if context == "search-filter-suffix unmatched"
+                        && text == "with total mana value 6 or less, put them onto the battlefield"
+            )),
+            "total mana value is a set-level search constraint, got {:?}",
+            ctx.diagnostics
+        );
+    }
+
     /// Regression: searches without the "different names" clause stay on the
     /// `None` constraint and don't pick up a spurious restriction.
     #[test]
     fn search_without_different_names_keeps_none_constraint() {
         let details = parse_search_library_details(
             "search your library for a creature card, put it onto the battlefield",
+            &mut ParseContext::default(),
         );
         assert_eq!(
             details.selection_constraint,

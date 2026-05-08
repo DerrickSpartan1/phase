@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 
 import type { WaitingFor } from "../../adapter/types.ts";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
@@ -17,6 +17,8 @@ export function DamageAssignmentModal({ data }: { data: AssignCombatDamage["data
   );
   const [trampleDamage, setTrampleDamage] = useState(0);
   const [controllerDamage, setControllerDamage] = useState(0);
+  const [submitted, setSubmitted] = useState(false);
+  const submittedRef = useRef(false);
 
   const isOverPw = data.trample === "OverPlaneswalkers" && data.pw_controller != null;
   const blockerTotal = amounts.reduce((acc, n) => acc + n, 0);
@@ -30,8 +32,14 @@ export function DamageAssignmentModal({ data }: { data: AssignCombatDamage["data
     trampleDamage >= (data.pw_loyalty ?? 0);
   const isValid = total === data.total_damage && trampleLethalMet && loyaltyMet;
 
+  const getObject = (id: number) => objects?.[String(id)];
   const getName = (id: number): string =>
-    objects?.[String(id)]?.name ?? `Object ${id}`;
+    getObject(id)?.name ?? `Object ${id}`;
+  const getStats = (id: number): string => {
+    const obj = getObject(id);
+    if (obj?.power == null || obj?.toughness == null) return "";
+    return `${obj.power}/${obj.toughness}`;
+  };
 
   const setAmount = useCallback((index: number, value: number) => {
     setAmounts((prev) => {
@@ -42,7 +50,9 @@ export function DamageAssignmentModal({ data }: { data: AssignCombatDamage["data
   }, []);
 
   const handleConfirm = useCallback(() => {
-    if (!isValid) return;
+    if (!isValid || submittedRef.current) return;
+    submittedRef.current = true;
+    setSubmitted(true);
     const assignments: [number, number][] = data.blockers.map((b, i) => [
       b.blocker_id,
       amounts[i],
@@ -53,6 +63,8 @@ export function DamageAssignmentModal({ data }: { data: AssignCombatDamage["data
     });
   }, [dispatch, data.blockers, amounts, trampleDamage, controllerDamage, isValid]);
 
+  if (submitted) return null;
+
   return (
     <ChoiceOverlay
       title={`Assign ${data.total_damage} Combat Damage`}
@@ -62,6 +74,7 @@ export function DamageAssignmentModal({ data }: { data: AssignCombatDamage["data
       <div className="mb-4 space-y-3">
         {data.blockers.map((blocker, i) => {
           const isLethal = amounts[i] >= blocker.lethal_minimum;
+          const stats = getStats(blocker.blocker_id);
           return (
             <div
               key={blocker.blocker_id}
@@ -70,6 +83,14 @@ export function DamageAssignmentModal({ data }: { data: AssignCombatDamage["data
               <div className="flex items-center gap-2">
                 <span className="text-sm font-medium text-gray-200">
                   {getName(blocker.blocker_id)}
+                </span>
+                {stats && (
+                  <span className="rounded bg-gray-700/80 px-1.5 py-0.5 text-xs font-medium text-gray-400">
+                    {stats}
+                  </span>
+                )}
+                <span className="text-xs text-gray-500">
+                  lethal: {blocker.lethal_minimum}
                 </span>
                 {isLethal && (
                   <span className="rounded bg-red-700/80 px-1.5 py-0.5 text-xs font-bold text-red-100">

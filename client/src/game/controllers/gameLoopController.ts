@@ -1,8 +1,10 @@
 import { getPlayerId } from "../../hooks/usePlayerId";
 import { useGameStore } from "../../stores/gameStore";
+import { usePreferencesStore } from "../../stores/preferencesStore";
 import { useUiStore } from "../../stores/uiStore";
+import { STACK_PRESSURE_ELEVATED } from "../../utils/stackPressure";
 import { shouldAutoPass } from "../autoPass";
-import { dispatchAction } from "../dispatch";
+import { dispatchAction, dispatchResolveAll } from "../dispatch";
 import { createAIController, type AISeatBinding } from "./aiController";
 import type { OpponentController } from "./types";
 
@@ -37,27 +39,48 @@ export function createGameLoopController(config: GameLoopConfig): GameLoopContro
 
     const { waitingFor, gameState } = useGameStore.getState();
     if (!waitingFor || waitingFor.type === "GameOver") return;
-
-    // Only auto-pass Priority prompts for the human player
     if (waitingFor.type !== "Priority") return;
-    if (!("data" in waitingFor) || waitingFor.data.player !== getPlayerId()) return;
-
-    const { fullControl } = useUiStore.getState();
-
+    if (!("data" in waitingFor)) return;
     if (!gameState) return;
 
+    const stackLen = gameState.stack?.length ?? 0;
+
+    if (config.mode === "ai" && stackLen >= STACK_PRESSURE_ELEVATED) {
+      scheduleBatchResolve();
+      return;
+    }
+
+    if (waitingFor.data.player !== getPlayerId()) return;
+
+    const { fullControl } = useUiStore.getState();
     const { autoPassRecommended } = useGameStore.getState();
     if (shouldAutoPass(gameState, waitingFor, fullControl, autoPassRecommended)) {
       scheduleAutoPass();
     }
   }
 
-  function scheduleAutoPass(): void {
-    // Clear any existing pending auto-pass
+  function scheduleBatchResolve(): void {
     if (autoPassTimeout != null) {
       clearTimeout(autoPassTimeout);
     }
+    autoPassTimeout = setTimeout(() => {
+      autoPassTimeout = null;
+      if (!active) return;
+      const playerId = getPlayerId();
+      const playerCount = useGameStore.getState().gameState?.players?.length ?? 2;
+      const aiSeats = usePreferencesStore.getState().aiSeats;
+      const seats = Array.from({ length: playerCount - 1 }, (_, i) => ({
+        playerId: i + 1,
+        difficulty: aiSeats[i]?.difficulty ?? config.difficulty ?? "Medium",
+      }));
+      dispatchResolveAll(playerId, seats);
+    }, 0);
+  }
 
+  function scheduleAutoPass(): void {
+    if (autoPassTimeout != null) {
+      clearTimeout(autoPassTimeout);
+    }
     autoPassTimeout = setTimeout(() => {
       autoPassTimeout = null;
       if (!active) return;

@@ -1,3 +1,4 @@
+use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::char;
@@ -5,7 +6,6 @@ use nom::combinator::{opt, value};
 use nom::multi::many1;
 use nom::sequence::{delimited, preceded, terminated};
 use nom::Parser;
-use nom_language::error::VerboseError;
 
 use crate::parser::oracle_nom::error::OracleResult;
 use crate::parser::oracle_nom::primitives as nom_primitives;
@@ -49,14 +49,13 @@ fn try_parse_for_each_color_mana(text: &str, lower: &str) -> Option<Effect> {
     use nom::bytes::complete::take_until;
     let lower_trimmed = lower.trim_end_matches('.').trim();
     // Prefix: "for each color among "
-    let (rest, _) = tag::<_, _, VerboseError<&str>>("for each color among ")
+    let (rest, _) = tag::<_, _, OracleError<'_>>("for each color among ")
         .parse(lower_trimmed)
         .ok()?;
     // Boundary: the type phrase runs until ", add one mana of that color".
-    let (_, type_text_lower) =
-        take_until::<_, _, VerboseError<&str>>(", add one mana of that color")
-            .parse(rest)
-            .ok()?;
+    let (_, type_text_lower) = take_until::<_, _, OracleError<'_>>(", add one mana of that color")
+        .parse(rest)
+        .ok()?;
     // Recover original-cased slice for parse_type_phrase.
     let offset = lower_trimmed.len() - rest.len();
     let original_trimmed = text.trim_end_matches('.').trim();
@@ -461,7 +460,7 @@ fn for_each_clause_target_filter(for_each_rest: &str) -> Option<TargetFilter> {
 /// not parse as a known quantity.
 fn try_parse_any_color_for_each_suffix(lower: &str) -> Option<(QuantityRef, Option<TargetFilter>)> {
     let (rest, _) = preceded(
-        nom::character::complete::multispace0::<_, VerboseError<&str>>,
+        nom::character::complete::multispace0::<_, OracleError<'_>>,
         tag("for each "),
     )
     .parse(lower.trim_start())
@@ -575,7 +574,7 @@ pub(super) fn parse_colorless_mana_production(text: &str) -> Option<(QuantityExp
     let rest = text.trim_start();
     // Nom combinator: count consecutive {C} symbols.
     let result: Result<(&str, Vec<()>), _> = many1(delimited(
-        tag::<_, _, VerboseError<&str>>("{"),
+        tag::<_, _, OracleError<'_>>("{"),
         value((), alt((tag("C"), tag("c")))),
         terminated(
             tag("}"),
@@ -777,7 +776,7 @@ fn scan_mana_production_type(
     count: QuantityExpr,
     contribution: ManaContribution,
 ) -> Option<ManaProduction> {
-    use nom_language::error::VerboseError;
+    use crate::parser::oracle_nom::error::OracleError;
     crate::parser::oracle_nom::primitives::scan_at_word_boundaries(text, |input| {
         alt((
             // CR 106.7: "mana of any color that a land an opponent controls could produce"
@@ -787,7 +786,7 @@ fn scan_mana_production_type(
                     count: count.clone(),
                 },
                 alt((
-                    tag::<_, _, VerboseError<&str>>(
+                    tag::<_, _, OracleError<'_>>(
                         "mana of any one color that a land an opponent controls could produce",
                     ),
                     tag("mana of any color that a land an opponent controls could produce"),
@@ -804,7 +803,7 @@ fn scan_mana_production_type(
                     source: LinkedExileScope::ThisObject,
                 },
                 alt((
-                    tag::<_, _, VerboseError<&str>>("mana of any of the exiled cards' colors"),
+                    tag::<_, _, OracleError<'_>>("mana of any of the exiled cards' colors"),
                     tag("mana of any of the exiled cards’ colors"),
                     tag("mana of any of the exiled card's colors"),
                     tag("mana of any of the exiled card’s colors"),
@@ -846,6 +845,40 @@ pub(super) fn all_mana_colors() -> Vec<ManaColor> {
         ManaColor::Red,
         ManaColor::Green,
     ]
+}
+
+fn parse_restricted_spell_type_phrase(spell_part: &str) -> Option<String> {
+    let (rest, phrase) = terminated(
+        take_until::<_, _, OracleError<'_>>(" spell"),
+        alt((tag(" spells"), tag(" spell"))),
+    )
+    .parse(spell_part)
+    .ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    Some(
+        phrase
+            .split_whitespace()
+            .map(|word| match word {
+                "and" | "or" => word.to_string(),
+                _ => super::capitalize(word),
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
+
+fn split_restricted_spell_and_activation(rest: &str) -> (&str, bool) {
+    match terminated(
+        take_until::<_, _, OracleError<'_>>(" or activate abilities"),
+        tag(" or activate abilities"),
+    )
+    .parse(rest)
+    {
+        Ok((_, spell_part)) => (spell_part.trim(), true),
+        Err(_) => (rest.trim(), false),
+    }
 }
 
 /// Parse a "Spend this mana only to cast..." clause into a `ManaSpendRestriction`.
@@ -929,14 +962,9 @@ pub(crate) fn parse_mana_spend_restriction(
         ));
     }
 
-    // CR 106.12: Check for "or activate abilities of [type]" suffix.
+    // CR 106.6: Check for "or activate abilities of [type]" suffix.
     // If present, emit a combined SpellTypeOrAbilityActivation restriction.
-    let has_ability_activation = rest.contains(" or activate abilities");
-    let spell_part = rest
-        .split(" or activate abilities")
-        .next()
-        .unwrap_or(rest)
-        .trim();
+    let (spell_part, has_ability_activation) = split_restricted_spell_and_activation(rest);
 
     if spell_part.contains("of the chosen type") {
         return Some((ManaSpendRestriction::ChosenCreatureType, grants));
@@ -948,40 +976,15 @@ pub(crate) fn parse_mana_spend_restriction(
         .map(|(_, rest)| rest)
         .unwrap_or(spell_part);
 
-    // Handle compound type: "instant or sorcery spells" -> "Instant or Sorcery"
-    // Check for "[type] or [type] spell(s)" pattern
-    if let Some((first, second_with_spells)) = spell_part.split_once(" or ") {
-        let second = second_with_spells
-            .strip_suffix(" spells")
-            .or_else(|| second_with_spells.strip_suffix(" spell"))
-            .unwrap_or(second_with_spells);
-        // Only treat as compound if second part is a single type word
-        if !second.contains(' ') || second.ends_with("creature") {
-            let compound = format!(
-                "{} or {}",
-                super::capitalize(first),
-                super::capitalize(second)
-            );
-            if has_ability_activation {
-                return Some((
-                    ManaSpendRestriction::SpellTypeOrAbilityActivation(compound),
-                    grants,
-                ));
-            }
-            return Some((ManaSpendRestriction::SpellType(compound), grants));
-        }
-    }
-
-    let type_word = spell_part.split_whitespace().next()?;
-    let type_name = super::capitalize(type_word);
+    let type_phrase = parse_restricted_spell_type_phrase(spell_part)?;
 
     if has_ability_activation {
         Some((
-            ManaSpendRestriction::SpellTypeOrAbilityActivation(type_name),
+            ManaSpendRestriction::SpellTypeOrAbilityActivation(type_phrase),
             grants,
         ))
     } else {
-        Some((ManaSpendRestriction::SpellType(type_name), grants))
+        Some((ManaSpendRestriction::SpellType(type_phrase), grants))
     }
 }
 
@@ -995,12 +998,9 @@ pub(super) fn parse_mana_spell_grant(lower: &str) -> Option<Vec<ManaSpellGrant>>
         return Some(vec![grant]);
     }
     // Use nom tag for matching
-    if value::<_, _, nom_language::error::VerboseError<&str>, _>(
-        (),
-        tag("that spell can't be countered"),
-    )
-    .parse(trimmed)
-    .is_ok()
+    if value::<_, _, OracleError<'_>, _>((), tag("that spell can't be countered"))
+        .parse(trimmed)
+        .is_ok()
     {
         return Some(vec![ManaSpellGrant::CantBeCountered]);
     }
@@ -1010,20 +1010,20 @@ pub(super) fn parse_mana_spell_grant(lower: &str) -> Option<Vec<ManaSpellGrant>>
 /// CR 106.6 + CR 702: Parse mana-rider keyword grants:
 /// "If that mana is spent on a Dragon creature spell, it gains haste until end of turn."
 fn parse_conditional_keyword_grant(lower: &str) -> Option<ManaSpellGrant> {
-    let (rest, _) = tag::<_, _, VerboseError<&str>>("if that mana is spent on ")
+    let (rest, _) = tag::<_, _, OracleError<'_>>("if that mana is spent on ")
         .parse(lower)
         .ok()?;
-    let (rest, _) = opt(alt((tag::<_, _, VerboseError<&str>>("a "), tag("an "))))
+    let (rest, _) = opt(alt((tag::<_, _, OracleError<'_>>("a "), tag("an "))))
         .parse(rest)
         .ok()?;
     let (rest, subtype) = terminated(
-        take_until::<_, _, VerboseError<&str>>(" creature spell, it gains "),
+        take_until::<_, _, OracleError<'_>>(" creature spell, it gains "),
         tag(" creature spell, it gains "),
     )
     .parse(rest)
     .ok()?;
     let (rest, keyword_text) = terminated(
-        take_until::<_, _, VerboseError<&str>>(" until end of turn"),
+        take_until::<_, _, OracleError<'_>>(" until end of turn"),
         tag(" until end of turn"),
     )
     .parse(rest)

@@ -1,0 +1,78 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&lowered"
+---
+{
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "ChangesZone",
+      "execute": {
+        "kind": "Spell",
+        "effect": {
+          "type": "GainLife",
+          "amount": {
+            "type": "Ref",
+            "qty": {
+              "type": "EventContextSourcePower"
+            }
+          },
+          "player": "controller"
+        },
+        "cost": null,
+        "sub_ability": null,
+        "duration": null,
+        "description": null,
+        "target_prompt": null,
+        "sorcery_speed": false,
+        "condition": null,
+        "optional_targeting": false,
+        "optional": false,
+        "forward_result": false
+      },
+      "valid_card": {
+        "type": "SelfRef"
+      },
+      "origin": "Battlefield",
+      "destination": "Graveyard",
+      "trigger_zones": [
+        "Graveyard"
+      ],
+      "phase": null,
+      "optional": false,
+      "damage_kind": "Any",
+      "secondary": false,
+      "valid_target": null,
+      "valid_source": null,
+      "description": "When ~ dies, you gain life equal to its power.",
+      "constraint": null,
+      "condition": null,
+      "batched": false
+    }
+  ],
+  "statics": [],
+  "replacements": [
+    {
+      "event": "AddCounter",
+      "execute": null,
+      "mode": {
+        "type": "Mandatory"
+      },
+      "valid_card": {
+        "type": "Typed",
+        "type_filters": [
+          "Creature"
+        ],
+        "controller": "You",
+        "properties": []
+      },
+      "description": "If one or more +1/+1 counters would be put on a creature you control, that many plus one +1/+1 counters are put on that creature instead.",
+      "condition": null,
+      "quantity_modification": {
+        "type": "Plus",
+        "value": 1
+      }
+    }
+  ],
+  "extractedKeywords": []
+}

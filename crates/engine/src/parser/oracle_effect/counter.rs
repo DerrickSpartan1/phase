@@ -1,12 +1,13 @@
+use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::multispace0;
 use nom::combinator::value;
 use nom::Parser;
-use nom_language::error::VerboseError;
 
 use crate::types::ability::{
-    DoublePTMode, DoubleTarget, Effect, MultiTargetSpec, QuantityExpr, TargetFilter,
+    CounterTransferMode, DoublePTMode, DoubleTarget, Effect, MultiTargetSpec, QuantityExpr,
+    TargetFilter,
 };
 use crate::types::mana::ManaColor;
 
@@ -16,8 +17,10 @@ use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_quantity::parse_for_each_clause_expr;
 use super::super::oracle_target::{parse_target, parse_type_phrase};
 use super::super::oracle_util::{parse_count_expr, parse_number};
-use super::types::replace_fixed_quantity;
 use super::{resolve_it_pronoun, ParseContext};
+#[cfg(debug_assertions)]
+use crate::parser::oracle_ir::ast::assert_no_compound_remainder;
+use crate::parser::oracle_ir::ast::replace_fixed_quantity;
 
 /// Check if text starts with a self-reference: "this ", "~"
 fn is_self_ref(text: &str) -> bool {
@@ -76,7 +79,7 @@ pub(super) type PutCounterChain<'a> = (
 pub(super) fn try_parse_put_counter_chain<'a>(
     lower: &str,
     text: &'a str,
-    ctx: &ParseContext,
+    ctx: &mut ParseContext,
 ) -> Option<PutCounterChain<'a>> {
     let ((), after_put) = nom_on_lower(lower, lower, |i| value((), tag("put ")).parse(i))?;
     let mut remaining = after_put.trim_start();
@@ -87,7 +90,7 @@ pub(super) fn try_parse_put_counter_chain<'a>(
         // Counter types can be multi-word (e.g., "first strike", "double strike"),
         // so use `take_until(" counter")` to consume the full type phrase rather
         // than splitting on the first whitespace.
-        let (at_counter, raw_type) = take_until::<_, _, VerboseError<&str>>(" counter")
+        let (at_counter, raw_type) = take_until::<_, _, OracleError<'_>>(" counter")
             .parse(rest)
             .ok()?;
         if raw_type.is_empty() {
@@ -136,7 +139,7 @@ fn resolve_counter_placement_target<'a>(
     on_rest: &str,
     lower: &str,
     text: &'a str,
-    ctx: &ParseContext,
+    ctx: &mut ParseContext,
 ) -> (TargetFilter, &'a str, Option<MultiTargetSpec>) {
     // The byte-offset math below (`lower.len() - on_rest.len()` → `&text[offset..]`)
     // requires that `text` and `lower` are byte-for-byte length-equal. That holds
@@ -207,7 +210,7 @@ fn try_consume_counter_list_separator(input: &str) -> Option<&str> {
     // Peek ahead: after the article there must be "<type> counter(s)". The
     // counter-type phrase may be multi-word ("first strike"), so delimit it
     // with `take_until(" counter")` instead of splitting on whitespace.
-    let (at_counter, raw_type) = take_until::<_, _, VerboseError<&str>>(" counter")
+    let (at_counter, raw_type) = take_until::<_, _, OracleError<'_>>(" counter")
         .parse(after_article)
         .ok()?;
     if raw_type.is_empty() {
@@ -223,7 +226,7 @@ fn try_consume_counter_list_separator(input: &str) -> Option<&str> {
 pub(super) fn try_parse_put_counter<'a>(
     lower: &str,
     text: &'a str,
-    ctx: &ParseContext,
+    ctx: &mut ParseContext,
 ) -> Option<(Effect, &'a str, Option<MultiTargetSpec>)> {
     // "put N {type} counter(s) on {target}"
     // Use parse_count_expr to handle Variable("X") for kicker-X patterns.
@@ -269,15 +272,22 @@ pub(super) fn try_parse_put_counter<'a>(
     .unwrap_or(after_type);
 
     // If we entered via "a number of ..." without finding the "equal to" clause
-    // eagerly, it MUST appear here after the counter noun. Consume it and
-    // overwrite the placeholder count. Abort the dynamic path if the clause
-    // is missing — the phrase is malformed as a dynamic-count.
-    let (mut count_expr, after_counter_word) = if dynamic_pending {
-        let (after_clause, qty) = nom_quantity::parse_equal_to(after_counter_word).ok()?;
-        let after_clause = after_clause.strip_prefix(' ').unwrap_or(after_clause);
-        (qty, after_clause)
+    // eagerly, it may appear here after the counter noun OR after the target.
+    // Two Oracle orderings exist:
+    //   pre-target:  "a number of +1/+1 counters equal to its power on ..." (Gruff Triplets)
+    //   post-target: "a number of +1/+1 counters on ~ equal to that creature's power" (Vincent Valentine)
+    // Try consuming "equal to" here; if absent, defer to post-target resolution.
+    let (mut count_expr, after_counter_word, dynamic_deferred) = if dynamic_pending {
+        match nom_quantity::parse_equal_to(after_counter_word) {
+            Ok((after_clause, qty)) => {
+                // allow-noncombinator: whitespace trim after nom combinator result, not dispatch
+                let after_clause = after_clause.strip_prefix(' ').unwrap_or(after_clause);
+                (qty, after_clause, false)
+            }
+            Err(_) => (QuantityExpr::Fixed { value: 0 }, after_counter_word, true),
+        }
     } else {
-        (count_expr, after_counter_word)
+        (count_expr, after_counter_word, false)
     };
 
     // CR 122.1: The placement clause MUST begin with "on <target>" — MTG never
@@ -291,6 +301,15 @@ pub(super) fn try_parse_put_counter<'a>(
     })?;
     let (target, mut remainder, multi_target) =
         resolve_counter_placement_target(on_rest, lower, text, ctx);
+    // CR 122.1: Post-target "equal to" clause — when dynamic_deferred is set,
+    // the clause wasn't found before "on {target}" and must appear here.
+    if dynamic_deferred {
+        let trimmed = remainder.trim_start();
+        let (after_clause, qty) = nom_quantity::parse_equal_to(trimmed).ok()?;
+        count_expr = qty;
+        remainder = after_clause.trim_start();
+    }
+
     if let Some((for_each_count, after_suffix)) = parse_counter_for_each_suffix(remainder) {
         count_expr = replace_fixed_quantity(count_expr, for_each_count);
         remainder = after_suffix;
@@ -311,7 +330,7 @@ fn parse_counter_for_each_suffix(remainder: &str) -> Option<(QuantityExpr, &str)
     let remainder_lower = remainder.to_lowercase();
     let ((), for_each_clause) = nom_on_lower(remainder, &remainder_lower, |input| {
         let (rest, _) = multispace0.parse(input)?;
-        let (rest, _) = tag::<_, _, VerboseError<&str>>("for each ").parse(rest)?;
+        let (rest, _) = tag::<_, _, OracleError<'_>>("for each ").parse(rest)?;
         Ok((rest, ()))
     })?;
     let clause_lower = for_each_clause.to_lowercase();
@@ -322,13 +341,13 @@ fn parse_counter_for_each_suffix(remainder: &str) -> Option<(QuantityExpr, &str)
 /// CR 122.1: Consume the "a number of " prefix used in dynamic counter-count
 /// phrases, returning the remainder. Returns None when the prefix is absent.
 fn try_strip_a_number_of(input: &str) -> Option<&str> {
-    tag::<_, _, nom_language::error::VerboseError<&str>>("a number of ")
+    tag::<_, _, OracleError<'_>>("a number of ")
         .parse(input)
         .map(|(rest, _)| rest)
         .ok()
 }
 
-pub(super) fn try_parse_remove_counter(lower: &str, ctx: &ParseContext) -> Option<Effect> {
+pub(super) fn try_parse_remove_counter(lower: &str, ctx: &mut ParseContext) -> Option<Effect> {
     // "remove N {type} counter(s) from {target}" or "remove all counters from {target}"
     // CR 122.1: Counter type is optional — "remove all counters" removes every type.
     let ((), after_remove) = nom_on_lower(lower, lower, |i| value((), tag("remove ")).parse(i))?;
@@ -415,7 +434,7 @@ pub(super) fn try_parse_remove_counter(lower: &str, ctx: &ParseContext) -> Optio
     } else {
         let (t, _rem) = parse_target(target_text);
         #[cfg(debug_assertions)]
-        super::types::assert_no_compound_remainder(_rem, target_text);
+        assert_no_compound_remainder(_rem, target_text);
         t
     };
 
@@ -444,7 +463,7 @@ pub(crate) fn normalize_counter_type(raw: &str) -> String {
 
 /// Resolve a counter target from text: self-ref, pronoun, or parse_target.
 /// Shared by put/remove/multiply counter parsers.
-fn resolve_counter_target(text: &str, ctx: &ParseContext) -> TargetFilter {
+fn resolve_counter_target(text: &str, ctx: &mut ParseContext) -> TargetFilter {
     if is_self_ref(text) {
         TargetFilter::SelfRef
     } else if is_it_pronoun(text) {
@@ -456,7 +475,7 @@ fn resolve_counter_target(text: &str, ctx: &ParseContext) -> TargetFilter {
     } else {
         let (t, _rem) = parse_target(text);
         #[cfg(debug_assertions)]
-        super::types::assert_no_compound_remainder(_rem, text);
+        assert_no_compound_remainder(_rem, text);
         t
     }
 }
@@ -469,8 +488,8 @@ fn resolve_counter_target(text: &str, ctx: &ParseContext) -> TargetFilter {
 /// gating: a trigger whose subject is `SelfRef`/`Any` (or no subject) keeps
 /// the legacy `ParentTarget` semantics — used for spells/abilities like
 /// Twinflame Strive where "that creature" refers back to the parent target.
-fn resolve_that_creature_in_trigger<'a>(text: &'a str, ctx: &ParseContext) -> Option<&'a str> {
-    let (rest, _): (&'a str, &'a str) = tag::<_, _, VerboseError<&'a str>>("that creature")
+fn resolve_that_creature_in_trigger<'a>(text: &'a str, ctx: &mut ParseContext) -> Option<&'a str> {
+    let (rest, _): (&'a str, &'a str) = tag::<_, _, OracleError<'a>>("that creature")
         .parse(text)
         .ok()?;
     match &ctx.subject {
@@ -527,6 +546,8 @@ pub(super) fn try_parse_move_counters<'a>(lower: &str, text: &'a str) -> Option<
         Effect::MoveCounters {
             source: TargetFilter::SelfRef,
             counter_type: None,
+            count: None,
+            mode: CounterTransferMode::Put,
             target,
         },
         remainder,
@@ -535,24 +556,23 @@ pub(super) fn try_parse_move_counters<'a>(lower: &str, text: &'a str) -> Option<
 
 /// CR 122.5: Parse "move [all/N] [type] counter(s) from [source] onto/to [target]".
 /// Handles Bioshift, Fate Transfer, Nesting Grounds, Simic Fluxmage, etc.
-pub(super) fn try_parse_move_counters_from(lower: &str, ctx: &ParseContext) -> Option<Effect> {
+pub(super) fn try_parse_move_counters_from(lower: &str, ctx: &mut ParseContext) -> Option<Effect> {
     let ((), after_move) = nom_on_lower(lower, lower, |i| value((), tag("move ")).parse(i))?;
     let after_move = after_move.trim();
 
-    // Parse quantity: "all", "any number of", or a number.
-    // count is informational (None = all, Some(n) = at most n).
-    let rest = if let Some(((), rest)) =
+    // Parse quantity: "all", "any number of", or a count expression.
+    let (count, rest) = if let Some(((), rest)) =
         nom_on_lower(after_move, after_move, |i| value((), tag("all ")).parse(i))
     {
-        rest.trim_start()
+        (None, rest.trim_start())
     } else if let Some(((), rest)) = nom_on_lower(after_move, after_move, |i| {
         value((), tag("any number of ")).parse(i)
     }) {
-        rest.trim_start()
-    } else if let Some((_, rest)) = parse_number(after_move) {
-        rest.trim_start()
+        (None, rest.trim_start())
+    } else if let Some((qty, rest)) = parse_count_expr(after_move) {
+        (Some(qty), rest.trim_start())
     } else {
-        // "move a +1/+1 counter" — article consumed by parse_number("a" → 1)
+        // "move a +1/+1 counter" — article consumed by parse_count_expr("a" → 1)
         return None;
     };
 
@@ -599,12 +619,14 @@ pub(super) fn try_parse_move_counters_from(lower: &str, ctx: &ParseContext) -> O
     Some(Effect::MoveCounters {
         source,
         counter_type,
+        count,
+        mode: CounterTransferMode::Move,
         target,
     })
 }
 
 /// CR 701.10e: Parse "double the number of {type} counters on {target}".
-pub(super) fn try_parse_multiply_counter(lower: &str, ctx: &ParseContext) -> Option<Effect> {
+pub(super) fn try_parse_multiply_counter(lower: &str, ctx: &mut ParseContext) -> Option<Effect> {
     let ((), rest) = nom_on_lower(lower, lower, |i| {
         value((), tag("double the number of ")).parse(i)
     })?;
@@ -634,7 +656,7 @@ pub(super) fn try_parse_multiply_counter(lower: &str, ctx: &ParseContext) -> Opt
 
 /// CR 701.10: Dispatch "double the ..." to counter-doubling, life-doubling,
 /// mana-doubling, or P/T-doubling.
-pub(super) fn try_parse_double_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
+pub(super) fn try_parse_double_effect(lower: &str, ctx: &mut ParseContext) -> Option<Effect> {
     // CR 701.10e: "double the number of each kind of counter on ..." → all counter types
     if let Some(((), rest)) = nom_on_lower(lower, lower, |i| {
         value((), tag("double the number of each kind of counter on ")).parse(i)
@@ -810,8 +832,10 @@ mod tests {
     #[test]
     fn remove_counter_untyped_all() {
         // Vampire Hexmage: "remove all counters from target permanent"
-        let result =
-            try_parse_remove_counter("remove all counters from target permanent", &default_ctx());
+        let result = try_parse_remove_counter(
+            "remove all counters from target permanent",
+            &mut default_ctx(),
+        );
         let Some(Effect::RemoveCounter {
             counter_type,
             count,
@@ -830,7 +854,7 @@ mod tests {
         // Thrull Parasite: "remove a counter from target nonland permanent"
         let result = try_parse_remove_counter(
             "remove a counter from target nonland permanent",
-            &default_ctx(),
+            &mut default_ctx(),
         );
         let Some(Effect::RemoveCounter {
             counter_type,
@@ -849,7 +873,7 @@ mod tests {
         // Heartless Act mode 2: "remove up to three counters from target creature"
         let result = try_parse_remove_counter(
             "remove up to three counters from target creature",
-            &default_ctx(),
+            &mut default_ctx(),
         );
         let Some(Effect::RemoveCounter {
             counter_type,
@@ -881,7 +905,7 @@ mod tests {
             "remove all of them",
         ];
         for input in cases {
-            let result = try_parse_remove_counter(input, &default_ctx());
+            let result = try_parse_remove_counter(input, &mut default_ctx());
             let Some(Effect::RemoveCounter {
                 counter_type,
                 count,
@@ -902,7 +926,7 @@ mod tests {
     #[test]
     fn remove_counter_typed_still_works() {
         // Existing pattern: "remove a +1/+1 counter from ~"
-        let result = try_parse_remove_counter("remove a +1/+1 counter from ~", &default_ctx());
+        let result = try_parse_remove_counter("remove a +1/+1 counter from ~", &mut default_ctx());
         let Some(Effect::RemoveCounter {
             counter_type,
             count,
@@ -920,11 +944,13 @@ mod tests {
         // Simic Fluxmage: "move a +1/+1 counter from this creature onto target creature"
         let result = try_parse_move_counters_from(
             "move a +1/+1 counter from this creature onto target creature",
-            &default_ctx(),
+            &mut default_ctx(),
         );
         let Some(Effect::MoveCounters {
             source,
             counter_type,
+            count,
+            mode,
             target,
         }) = result
         else {
@@ -932,6 +958,8 @@ mod tests {
         };
         assert!(matches!(source, TargetFilter::SelfRef));
         assert_eq!(counter_type, Some("P1P1".to_string()));
+        assert_eq!(count, Some(QuantityExpr::Fixed { value: 1 }));
+        assert_eq!(mode, CounterTransferMode::Move);
         assert!(matches!(target, TargetFilter::Typed { .. }));
     }
 
@@ -940,12 +968,20 @@ mod tests {
         // Fate Transfer: "move all counters from target creature onto another target creature"
         let result = try_parse_move_counters_from(
             "move all counters from target creature onto another target creature",
-            &default_ctx(),
+            &mut default_ctx(),
         );
-        let Some(Effect::MoveCounters { counter_type, .. }) = result else {
+        let Some(Effect::MoveCounters {
+            counter_type,
+            count,
+            mode,
+            ..
+        }) = result
+        else {
             panic!("expected MoveCounters, got {result:?}");
         };
         assert_eq!(counter_type, None, "untyped = None");
+        assert_eq!(count, None, "all counters = None");
+        assert_eq!(mode, CounterTransferMode::Move);
     }
 
     #[test]
@@ -953,11 +989,13 @@ mod tests {
         // Cytoplast Root-Kin: "move a +1/+1 counter from target creature you control onto this creature"
         let result = try_parse_move_counters_from(
             "move a +1/+1 counter from target creature you control onto this creature",
-            &default_ctx(),
+            &mut default_ctx(),
         );
         let Some(Effect::MoveCounters {
             source,
             counter_type,
+            count,
+            mode,
             target,
         }) = result
         else {
@@ -965,6 +1003,8 @@ mod tests {
         };
         assert!(matches!(source, TargetFilter::Typed { .. }));
         assert_eq!(counter_type, Some("P1P1".to_string()));
+        assert_eq!(count, Some(QuantityExpr::Fixed { value: 1 }));
+        assert_eq!(mode, CounterTransferMode::Move);
         assert!(matches!(target, TargetFilter::SelfRef));
     }
 
@@ -980,7 +1020,7 @@ mod tests {
         let (effect, _, _) = try_parse_put_counter(
             "put a number of +1/+1 counters equal to its power on each creature you control named Gruff Triplets",
             "put a number of +1/+1 counters equal to its power on each creature you control named Gruff Triplets",
-            &default_ctx(),
+            &mut default_ctx(),
         )
         .expect("parse");
         let Effect::PutCounter {
@@ -1025,7 +1065,7 @@ mod tests {
         let (effect, _, multi) = try_parse_put_counter(
             "put a number of +1/+1 counters equal to that spell's mana value on up to one target creature",
             "put a number of +1/+1 counters equal to that spell's mana value on up to one target creature",
-            &default_ctx(),
+            &mut default_ctx(),
         )
         .expect("parse");
         let Effect::PutCounter {
@@ -1061,7 +1101,7 @@ mod tests {
         let (_effect, _, multi) = try_parse_put_counter(
             "put a +1/+1 counter on each of up to x target creatures",
             "put a +1/+1 counter on each of up to x target creatures",
-            &default_ctx(),
+            &mut default_ctx(),
         )
         .expect("parse");
 
@@ -1103,7 +1143,7 @@ mod tests {
         let (effect, _, _) = try_parse_put_counter(
             "put a number of +1/+1 counters equal to the number of cards in your hand on ~",
             "put a number of +1/+1 counters equal to the number of cards in your hand on ~",
-            &default_ctx(),
+            &mut default_ctx(),
         )
         .expect("parse");
         let Effect::PutCounter {
@@ -1142,7 +1182,7 @@ mod tests {
         let (effect, rem, _) = try_parse_put_counter(
             "put a corpse counter on this creature for each creature that died this turn",
             "put a corpse counter on this creature for each creature that died this turn",
-            &default_ctx(),
+            &mut default_ctx(),
         )
         .expect("parse");
         let Effect::PutCounter {
@@ -1182,7 +1222,7 @@ mod tests {
         let (effect, rem, _) = try_parse_put_counter(
             "put two charge counters on target artifact for each card in your hand",
             "put two charge counters on target artifact for each card in your hand",
-            &default_ctx(),
+            &mut default_ctx(),
         )
         .expect("parse");
         let Effect::PutCounter {
@@ -1236,6 +1276,8 @@ mod tests {
             Effect::MoveCounters {
                 source,
                 counter_type,
+                count,
+                mode,
                 target,
             },
             _,
@@ -1245,6 +1287,8 @@ mod tests {
         };
         assert!(matches!(source, TargetFilter::SelfRef));
         assert_eq!(counter_type, None, "all counters move (no type filter)");
+        assert_eq!(count, None, "CR 122.8 copies every matching counter");
+        assert_eq!(mode, CounterTransferMode::Put);
         match target {
             TargetFilter::Typed(tf) => {
                 assert!(tf

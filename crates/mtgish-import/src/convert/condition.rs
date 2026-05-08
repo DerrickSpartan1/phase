@@ -994,6 +994,7 @@ fn target_filter_variant_name(f: &TargetFilter) -> &'static str {
         TargetFilter::Any => "Any",
         TargetFilter::Player => "Player",
         TargetFilter::Controller => "Controller",
+        TargetFilter::ScopedPlayer => "ScopedPlayer",
         TargetFilter::SelfRef => "SelfRef",
         TargetFilter::Typed(_) => "Typed",
         TargetFilter::Not { .. } => "Not",
@@ -1005,6 +1006,7 @@ fn target_filter_variant_name(f: &TargetFilter) -> &'static str {
         TargetFilter::SpecificPlayer { .. } => "SpecificPlayer",
         TargetFilter::AttachedTo => "AttachedTo",
         TargetFilter::LastCreated => "LastCreated",
+        TargetFilter::CostPaidObject => "CostPaidObject",
         TargetFilter::TrackedSet { .. } => "TrackedSet",
         TargetFilter::TrackedSetFiltered { .. } => "TrackedSetFiltered",
         TargetFilter::ExiledBySource => "ExiledBySource",
@@ -1013,8 +1015,10 @@ fn target_filter_variant_name(f: &TargetFilter) -> &'static str {
         TargetFilter::TriggeringPlayer => "TriggeringPlayer",
         TargetFilter::TriggeringSource => "TriggeringSource",
         TargetFilter::ParentTarget => "ParentTarget",
+        TargetFilter::ParentTargetSlot { .. } => "ParentTargetSlot",
         TargetFilter::ParentTargetController => "ParentTargetController",
         TargetFilter::PostReplacementSourceController => "PostReplacementSourceController",
+        TargetFilter::PostReplacementDamageTarget => "PostReplacementDamageTarget",
         TargetFilter::DefendingPlayer => "DefendingPlayer",
         TargetFilter::HasChosenName => "HasChosenName",
         TargetFilter::ChosenDamageSource => "ChosenDamageSource",
@@ -1678,7 +1682,10 @@ pub fn convert_player_predicate_trigger(
             };
             TriggerCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::SpellsCastThisTurn { filter },
+                    qty: QuantityRef::SpellsCastThisTurn {
+                        scope: CountScope::Controller,
+                        filter,
+                    },
                 },
                 comparator: Comparator::EQ,
                 rhs: QuantityExpr::Fixed { value: 0 },
@@ -1700,7 +1707,10 @@ pub fn convert_player_predicate_trigger(
             let (comparator, rhs) = comparison_to_pair(cmp)?;
             TriggerCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::SpellsCastThisTurn { filter },
+                    qty: QuantityRef::SpellsCastThisTurn {
+                        scope: CountScope::Controller,
+                        filter,
+                    },
                 },
                 comparator,
                 rhs,
@@ -1944,7 +1954,10 @@ pub fn convert_player_predicate_ability(
             };
             AbilityCondition::QuantityCheck {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::SpellsCastThisTurn { filter },
+                    qty: QuantityRef::SpellsCastThisTurn {
+                        scope: CountScope::Controller,
+                        filter,
+                    },
                 },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 1 },
@@ -1964,7 +1977,10 @@ pub fn convert_player_predicate_ability(
             };
             AbilityCondition::QuantityCheck {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::SpellsCastThisTurn { filter },
+                    qty: QuantityRef::SpellsCastThisTurn {
+                        scope: CountScope::Controller,
+                        filter,
+                    },
                 },
                 comparator: Comparator::EQ,
                 rhs: QuantityExpr::Fixed { value: 0 },
@@ -1985,7 +2001,10 @@ pub fn convert_player_predicate_ability(
             let (comparator, rhs) = comparison_to_pair(cmp)?;
             AbilityCondition::QuantityCheck {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::SpellsCastThisTurn { filter },
+                    qty: QuantityRef::SpellsCastThisTurn {
+                        scope: CountScope::Controller,
+                        filter,
+                    },
                 },
                 comparator,
                 rhs,
@@ -2279,7 +2298,10 @@ pub fn convert_player_predicate_static(
             };
             StaticCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::SpellsCastThisTurn { filter },
+                    qty: QuantityRef::SpellsCastThisTurn {
+                        scope: CountScope::Controller,
+                        filter,
+                    },
                 },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 1 },
@@ -2299,7 +2321,10 @@ pub fn convert_player_predicate_static(
             };
             StaticCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::SpellsCastThisTurn { filter },
+                    qty: QuantityRef::SpellsCastThisTurn {
+                        scope: CountScope::Controller,
+                        filter,
+                    },
                 },
                 comparator: Comparator::EQ,
                 rhs: QuantityExpr::Fixed { value: 0 },
@@ -2320,7 +2345,10 @@ pub fn convert_player_predicate_static(
             let (comparator, rhs) = comparison_to_pair(cmp)?;
             StaticCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::SpellsCastThisTurn { filter },
+                    qty: QuantityRef::SpellsCastThisTurn {
+                        scope: CountScope::Controller,
+                        filter,
+                    },
                 },
                 comparator,
                 rhs,

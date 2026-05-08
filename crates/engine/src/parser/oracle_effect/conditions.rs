@@ -1,21 +1,22 @@
 use std::str::FromStr;
 
+use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
+use nom::character::complete::char;
 use nom::combinator::{all_consuming, opt, value};
 use nom::sequence::preceded;
 use nom::Parser;
-use nom_language::error::VerboseError;
 
 use super::super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower};
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_quantity::{canonicalize_quantity_ref, parse_cda_quantity};
 use super::super::oracle_target::parse_type_phrase;
-use super::super::oracle_util::{parse_comparison_suffix, TextPair};
+use super::super::oracle_util::{parse_comparison_suffix, parse_subtype, TextPair};
 use super::counter::normalize_counter_type;
-use super::{parse_effect_chain, scan_contains_phrase};
-use crate::parser::oracle_warnings::push_warning;
+use super::{parse_effect_chain, scan_contains_phrase, ParseContext};
+use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, CastVariantPaid, Comparator, ControllerRef,
     Duration, Effect, FilterProp, ObjectScope, QuantityExpr, QuantityRef, StaticCondition,
@@ -23,6 +24,7 @@ use crate::types::ability::{
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterMatch;
+use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::phase::Phase;
 use crate::types::zones::Zone;
@@ -43,7 +45,7 @@ fn maybe_negate(cond: AbilityCondition, negated: bool) -> AbilityCondition {
 
 pub(crate) fn split_leading_conditional(text: &str) -> Option<(String, String)> {
     let lower = text.to_lowercase();
-    if tag::<_, _, VerboseError<&str>>("if ")
+    if tag::<_, _, OracleError<'_>>("if ")
         .parse(lower.as_str())
         .is_err()
     {
@@ -105,7 +107,10 @@ pub(super) fn strip_leading_instead(text: &str) -> String {
     }
 }
 
-pub(crate) fn strip_leading_general_conditional(text: &str) -> (Option<AbilityCondition>, String) {
+pub(crate) fn strip_leading_general_conditional(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> (Option<AbilityCondition>, String) {
     if let Some((condition_fragment, body)) = split_leading_conditional(text) {
         let condition_lower = condition_fragment.to_lowercase();
         let cond_text = nom_on_lower(&condition_fragment, &condition_lower, |i| {
@@ -115,7 +120,7 @@ pub(crate) fn strip_leading_general_conditional(text: &str) -> (Option<AbilityCo
         .unwrap_or(&condition_fragment)
         .trim();
 
-        if let Some(condition) = try_nom_condition_as_ability_condition(cond_text)
+        if let Some(condition) = try_nom_condition_as_ability_condition(cond_text, ctx)
             .or_else(|| parse_condition_text(cond_text))
             .or_else(|| parse_control_count_as_ability_condition(cond_text))
         {
@@ -142,26 +147,24 @@ fn strip_quantified_kicker_conditional(
     // CR 603.4: Locate the "was kicked" anchor. Subject (~/it/this creature/
     // this spell) is consumed permissively — the typed shape is determined
     // entirely by what follows.
-    let after_if = tag::<_, _, VerboseError<&str>>("if ")
+    let after_if = tag::<_, _, OracleError<'_>>("if ")
         .parse(lower)
         .ok()
         .map(|(rest, _)| rest)?;
-    let (after_kicked, _) = take_until::<_, _, VerboseError<&str>>("was kicked")
+    let (after_kicked, _) = take_until::<_, _, OracleError<'_>>("was kicked")
         .parse(after_if)
         .ok()?;
-    let (after_kicked, _) = tag::<_, _, VerboseError<&str>>("was kicked")
+    let (after_kicked, _) = tag::<_, _, OracleError<'_>>("was kicked")
         .parse(after_kicked)
         .ok()?;
 
     // Branch 1: "was kicked with its {COST} kicker, [body]" — per-variant.
-    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>(" with its ").parse(after_kicked) {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(" with its ").parse(after_kicked) {
         let cost_start = text.len() - rest.len();
-        let (rest, cost_text) = take_until::<_, _, VerboseError<&str>>(" kicker, ")
+        let (rest, cost_text) = take_until::<_, _, OracleError<'_>>(" kicker, ")
             .parse(rest)
             .ok()?;
-        let (rest, _) = tag::<_, _, VerboseError<&str>>(" kicker, ")
-            .parse(rest)
-            .ok()?;
+        let (rest, _) = tag::<_, _, OracleError<'_>>(" kicker, ").parse(rest).ok()?;
         let offset = text.len() - rest.len();
         let cost =
             parse_kicker_condition_mana_cost(&text[cost_start..cost_start + cost_text.len()])?;
@@ -173,7 +176,7 @@ fn strip_quantified_kicker_conditional(
 
     // Branch 2: "was kicked twice, [body]" → min_count = 2.
     // CR 702.33b/c: "twice" is the printed form for kicked-N=2.
-    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>(" twice, ").parse(after_kicked) {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(" twice, ").parse(after_kicked) {
         let offset = text.len() - rest.len();
         return Some((
             AbilityCondition::additional_cost_paid_n_times(2),
@@ -184,9 +187,9 @@ fn strip_quantified_kicker_conditional(
     // Branch 3: "was kicked N times, [body]" → min_count = N. Accepts both
     // English number words (one through twenty) and digit forms via
     // `nom_primitives::parse_number`. "one time" is unprinted but harmless.
-    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>(" ").parse(after_kicked) {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(" ").parse(after_kicked) {
         if let Ok((rest, n)) = nom_primitives::parse_number(rest) {
-            if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>(" times, ").parse(rest) {
+            if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(" times, ").parse(rest) {
                 let offset = text.len() - rest.len();
                 return Some((
                     AbilityCondition::additional_cost_paid_n_times(n),
@@ -220,7 +223,7 @@ pub(super) fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCo
         );
     }
 
-    if alt((tag::<_, _, VerboseError<&str>>("if "), tag("then if ")))
+    if alt((tag::<_, _, OracleError<'_>>("if "), tag("then if ")))
         .parse(lower.as_str())
         .is_ok()
     {
@@ -250,7 +253,7 @@ pub(super) fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCo
         .parse(input)
     }) {
         Some(rest.to_string())
-    } else if tag::<_, _, VerboseError<&str>>("if ")
+    } else if tag::<_, _, OracleError<'_>>("if ")
         .parse(lower.as_str())
         .is_ok()
     {
@@ -374,7 +377,7 @@ pub(super) fn strip_if_you_do_conditional(text: &str) -> (Option<AbilityConditio
     // the multi-word "put onto the battlefield" verb, with subtype filters
     // (Aura/Equipment/...) via `parse_type_phrase`. Replaces the prior
     // hand-rolled past-tense / single-word / top-level-type-only matcher.
-    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("if ").parse(lower.as_str()) {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("if ").parse(lower.as_str()) {
         if let Ok((after_clause, (filter, _negated))) =
             crate::parser::oracle_nom::condition::parse_zone_changed_this_way_clause(rest)
         {
@@ -395,7 +398,10 @@ pub(super) fn strip_if_you_do_conditional(text: &str) -> (Option<AbilityConditio
     (None, text.to_string())
 }
 
-pub(super) fn strip_unless_entered_suffix(text: &str) -> (Option<AbilityCondition>, String) {
+pub(super) fn strip_unless_entered_suffix(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> (Option<AbilityCondition>, String) {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
     for pattern in &[
@@ -413,7 +419,7 @@ pub(super) fn strip_unless_entered_suffix(text: &str) -> (Option<AbilityConditio
     }
     if let Some((effect_part, condition_part)) = lower.rsplit_once(" unless ") {
         let condition_text = condition_part.trim_end_matches('.');
-        if let Some(cond) = try_nom_condition_as_unless(condition_text) {
+        if let Some(cond) = try_nom_condition_as_unless(condition_text, ctx) {
             let effect_text = text[..effect_part.len()].trim().to_string();
             return (Some(cond), effect_text);
         }
@@ -421,7 +427,10 @@ pub(super) fn strip_unless_entered_suffix(text: &str) -> (Option<AbilityConditio
     (None, text.to_string())
 }
 
-fn try_nom_condition_as_unless(condition_text: &str) -> Option<AbilityCondition> {
+fn try_nom_condition_as_unless(
+    condition_text: &str,
+    ctx: &mut ParseContext,
+) -> Option<AbilityCondition> {
     use crate::parser::oracle_nom::condition::parse_inner_condition;
 
     let (rest, inner) = parse_inner_condition(condition_text).ok()?;
@@ -431,7 +440,7 @@ fn try_nom_condition_as_unless(condition_text: &str) -> Option<AbilityCondition>
     let negated = StaticCondition::Not {
         condition: Box::new(inner),
     };
-    static_condition_to_ability_condition(&negated)
+    static_condition_to_ability_condition(&negated, ctx)
 }
 
 pub(super) fn strip_cast_from_zone_conditional(text: &str) -> (Option<AbilityCondition>, String) {
@@ -456,7 +465,7 @@ pub(super) fn strip_cast_from_zone_conditional(text: &str) -> (Option<AbilityCon
 pub(super) fn strip_card_type_conditional(text: &str) -> (Option<AbilityCondition>, String) {
     let lower = text.to_lowercase();
     let rest = alt((
-        tag::<_, _, VerboseError<&str>>("if it's a "),
+        tag::<_, _, OracleError<'_>>("if it's a "),
         tag("if it's an "),
     ))
     .parse(lower.as_str())
@@ -465,7 +474,7 @@ pub(super) fn strip_card_type_conditional(text: &str) -> (Option<AbilityConditio
     let Some(rest) = rest else {
         return (None, text.to_string());
     };
-    let (rest, negated) = opt(tag::<_, _, VerboseError<&str>>("non"))
+    let (rest, negated) = opt(tag::<_, _, OracleError<'_>>("non"))
         .parse(rest)
         .map(|(rest, matched)| (rest, matched.is_some()))
         .unwrap_or((rest, false));
@@ -481,7 +490,7 @@ pub(super) fn strip_card_type_conditional(text: &str) -> (Option<AbilityConditio
     if let Ok(card_type) = CoreType::from_str(&capitalized) {
         // CR 205.3m: Consume optional "of the chosen type" suffix after " card".
         let (after_type, additional_filter) = if let Ok((rest_after_chosen, _)) =
-            tag::<_, _, VerboseError<&str>>(" of the chosen type").parse(after_type)
+            tag::<_, _, OracleError<'_>>(" of the chosen type").parse(after_type)
         {
             (rest_after_chosen, Some(FilterProp::IsChosenCreatureType))
         } else {
@@ -504,10 +513,10 @@ pub(super) fn strip_card_type_conditional(text: &str) -> (Option<AbilityConditio
 }
 
 fn parse_its_a_type_condition(condition_text: &str) -> Option<AbilityCondition> {
-    let (rest, _) = alt((tag::<_, _, VerboseError<&str>>("it's a "), tag("it's an ")))
+    let (rest, _) = alt((tag::<_, _, OracleError<'_>>("it's a "), tag("it's an ")))
         .parse(condition_text)
         .ok()?;
-    let (rest, negated) = opt(tag::<_, _, VerboseError<&str>>("non"))
+    let (rest, negated) = opt(tag::<_, _, OracleError<'_>>("non"))
         .parse(rest)
         .map(|(rest, matched)| (rest, matched.is_some()))
         .unwrap_or((rest, false));
@@ -566,7 +575,7 @@ pub(super) fn try_parse_type_setting(text: &str) -> Option<AbilityDefinition> {
     let lower = text.to_lowercase();
     let lower = lower.trim_end_matches('.');
 
-    let (type_name, _) = alt((tag::<_, _, VerboseError<&str>>("it's a "), tag("it's an ")))
+    let (type_name, _) = alt((tag::<_, _, OracleError<'_>>("it's a "), tag("it's an ")))
         .parse(lower)
         .ok()?;
 
@@ -665,7 +674,7 @@ pub(super) fn strip_property_conditional(text: &str) -> (Option<AbilityCondition
 pub(super) fn strip_target_keyword_instead(text: &str) -> (Option<AbilityCondition>, String) {
     let lower = text.to_lowercase();
     let prefix = alt((
-        tag::<_, _, VerboseError<&str>>("if that creature has "),
+        tag::<_, _, OracleError<'_>>("if that creature has "),
         tag("if that permanent has "),
     ))
     .parse(lower.as_str())
@@ -694,16 +703,16 @@ fn parse_counter_threshold(text: &str) -> Option<(Comparator, i32, String, usize
     let original_len = text.len();
 
     fn parse_counter_on_suffix(after_type: &str) -> Option<&str> {
-        let (after_counter, _) = alt((tag::<_, _, VerboseError<&str>>("counters"), tag("counter")))
+        let (after_counter, _) = alt((tag::<_, _, OracleError<'_>>("counters"), tag("counter")))
             .parse(after_type)
             .ok()?;
-        let (after_on, _) = alt((tag::<_, _, VerboseError<&str>>("on it"), tag("on this")))
+        let (after_on, _) = alt((tag::<_, _, OracleError<'_>>("on it"), tag("on this")))
             .parse(after_counter.trim_start())
             .ok()?;
         Some(after_on)
     }
 
-    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("no ").parse(text) {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("no ").parse(text) {
         let type_end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
         let raw_type = &rest[..type_end];
         let counter_type = normalize_counter_type(raw_type);
@@ -715,7 +724,7 @@ fn parse_counter_threshold(text: &str) -> Option<(Comparator, i32, String, usize
 
     let (rest, threshold) = nom_primitives::parse_number.parse(text).ok()?;
     let rest = rest.trim_start();
-    type E<'a> = VerboseError<&'a str>;
+    type E<'a> = OracleError<'a>;
     let (rest, comparator) = alt((
         value(Comparator::GE, tag::<_, _, E>("or more ")),
         value(Comparator::LE, tag("or fewer ")),
@@ -753,7 +762,7 @@ pub(super) fn strip_counter_conditional(text: &str) -> (Option<AbilityCondition>
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
 
-    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("if it has ").parse(lower.as_str()) {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("if it has ").parse(lower.as_str()) {
         if let Some((comparator, threshold, counter_type, consumed)) = parse_counter_threshold(rest)
         {
             let after = rest[consumed..].trim_start();
@@ -793,7 +802,7 @@ pub(super) fn strip_mana_value_conditional(text: &str) -> (Option<AbilityConditi
 
     // Leading position: "If its mana value was N or less/greater, [effect]."
     if let Ok((rest, _)) =
-        tag::<_, _, VerboseError<&str>>("if its mana value was ").parse(lower.as_str())
+        tag::<_, _, OracleError<'_>>("if its mana value was ").parse(lower.as_str())
     {
         if let Some((condition, body)) = parse_past_mana_value_condition_body(text, rest) {
             return (Some(condition), body);
@@ -868,15 +877,15 @@ fn parse_past_mana_value_condition_body(
     condition_and_body: &str,
 ) -> Option<(AbilityCondition, String)> {
     let (rest, threshold) = nom_primitives::parse_number(condition_and_body).ok()?;
-    let (rest, _) = tag::<_, _, VerboseError<&str>>(" or ").parse(rest).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" or ").parse(rest).ok()?;
     let (rest, comparator) = alt((
-        value(Comparator::LE, tag::<_, _, VerboseError<&str>>("less")),
+        value(Comparator::LE, tag::<_, _, OracleError<'_>>("less")),
         value(Comparator::GE, tag("greater")),
     ))
     .parse(rest)
     .ok()?;
     let rest = rest.trim_start();
-    let (rest, _) = tag::<_, _, VerboseError<&str>>(",").parse(rest).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(",").parse(rest).ok()?;
     let rest = rest.trim_start();
     let body_start = original.len() - rest.len();
     let condition = AbilityCondition::TargetMatchesFilter {
@@ -896,7 +905,7 @@ fn parse_dynamic_mana_value_threshold(text: &str) -> Option<(Comparator, Quantit
     let (rest, comparator) = alt((
         value(
             Comparator::LE,
-            tag::<_, _, VerboseError<&str>>("less than or equal to "),
+            tag::<_, _, OracleError<'_>>("less than or equal to "),
         ),
         value(Comparator::LT, tag("less than ")),
         value(Comparator::GE, tag("greater than or equal to ")),
@@ -922,7 +931,7 @@ pub(super) fn strip_target_supertype_conditional(text: &str) -> (Option<AbilityC
     let tp = TextPair::new(text, &lower);
 
     if let Ok((rest, _)) =
-        tag::<_, _, VerboseError<&str>>("if that land was nonbasic, ").parse(lower.as_str())
+        tag::<_, _, OracleError<'_>>("if that land was nonbasic, ").parse(lower.as_str())
     {
         let body_start = text.len() - rest.len();
         return (
@@ -933,7 +942,7 @@ pub(super) fn strip_target_supertype_conditional(text: &str) -> (Option<AbilityC
 
     if let Some((before, after)) = tp.rsplit_around(" if that land was ") {
         if all_consuming(alt((
-            tag::<_, _, VerboseError<&str>>("nonbasic."),
+            tag::<_, _, OracleError<'_>>("nonbasic."),
             tag("nonbasic"),
         )))
         .parse(after.lower.trim())
@@ -997,9 +1006,9 @@ fn parse_mana_value_threshold(text: &str) -> Option<(Comparator, i32)> {
     let text = text.trim().trim_end_matches('.');
     // Parse: number + " or " + "less"/"greater"
     let (rest, n) = nom_primitives::parse_number(text).ok()?;
-    let (rest, _) = tag::<_, _, VerboseError<&str>>(" or ").parse(rest).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" or ").parse(rest).ok()?;
     let (_, comparator) = alt((
-        value(Comparator::LE, tag::<_, _, VerboseError<&str>>("less")),
+        value(Comparator::LE, tag::<_, _, OracleError<'_>>("less")),
         value(Comparator::GE, tag("greater")),
     ))
     .parse(rest)
@@ -1026,7 +1035,10 @@ fn find_last_top_level_if(text: &str) -> Option<usize> {
     last_pos
 }
 
-pub(super) fn strip_suffix_conditional(text: &str) -> (Option<AbilityCondition>, String) {
+pub(super) fn strip_suffix_conditional(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> (Option<AbilityCondition>, String) {
     let lower = text.to_lowercase();
     let Some(if_pos) = find_last_top_level_if(&lower) else {
         return (None, text.to_string());
@@ -1059,7 +1071,7 @@ pub(super) fn strip_suffix_conditional(text: &str) -> (Option<AbilityCondition>,
         return (Some(cond), effect_text);
     }
 
-    if let Some(condition) = try_nom_condition_as_ability_condition(condition_text)
+    if let Some(condition) = try_nom_condition_as_ability_condition(condition_text, ctx)
         .or_else(|| parse_condition_text(condition_text))
         .or_else(|| parse_control_count_as_ability_condition(condition_text))
     {
@@ -1071,7 +1083,7 @@ pub(super) fn strip_suffix_conditional(text: &str) -> (Option<AbilityCondition>,
 }
 
 pub(super) fn parse_quantity_comparison(text: &str) -> Option<(Comparator, QuantityExpr)> {
-    type E<'a> = VerboseError<&'a str>;
+    type E<'a> = OracleError<'a>;
     let mut comparator_prefixes = alt((
         value(Comparator::GE, tag::<_, _, E>("greater than or equal to ")),
         value(Comparator::LE, tag("less than or equal to ")),
@@ -1093,6 +1105,10 @@ pub(super) fn parse_quantity_comparison(text: &str) -> Option<(Comparator, Quant
 
 pub(super) fn parse_condition_text(text: &str) -> Option<AbilityCondition> {
     let text = text.trim().trim_end_matches('.');
+
+    if let Some(condition) = parse_you_control_urza_land_types_condition_text(text) {
+        return Some(condition);
+    }
 
     if let Some(condition) = parse_cast_during_phase_condition_text(text) {
         return Some(condition);
@@ -1120,6 +1136,56 @@ pub(super) fn parse_condition_text(text: &str) -> Option<AbilityCondition> {
     })
 }
 
+fn parse_you_control_urza_land_types_condition_text(text: &str) -> Option<AbilityCondition> {
+    let lower = text.to_ascii_lowercase();
+    let subtypes = nom_parse_lower(&lower, |i| {
+        all_consuming(parse_you_control_urza_land_types).parse(i)
+    })?;
+    let conditions = subtypes
+        .into_iter()
+        .map(|subtype| AbilityCondition::ControllerControlsMatching {
+            filter: TargetFilter::Typed(
+                TypedFilter::land()
+                    .subtype(subtype)
+                    .controller(ControllerRef::You),
+            ),
+        })
+        .collect();
+    Some(AbilityCondition::And { conditions })
+}
+
+fn parse_you_control_urza_land_types(
+    input: &str,
+) -> super::super::oracle_nom::error::OracleResult<'_, Vec<String>> {
+    let (mut input, _) = tag::<_, _, OracleError<'_>>("you control ").parse(input)?;
+    let (rest, first) = parse_urza_land_type(input)?;
+    input = rest;
+    let mut subtypes = vec![first];
+    while let Ok((rest, subtype)) =
+        preceded(tag::<_, _, OracleError<'_>>(" and "), parse_urza_land_type).parse(input)
+    {
+        subtypes.push(subtype);
+        input = rest;
+    }
+    let (input, _) = opt(char('.')).parse(input)?;
+    Ok((input, subtypes))
+}
+
+fn parse_urza_land_type(input: &str) -> super::super::oracle_nom::error::OracleResult<'_, String> {
+    let (input, _) = alt((
+        tag::<_, _, OracleError<'_>>("an "),
+        tag::<_, _, OracleError<'_>>("a "),
+    ))
+    .parse(input)?;
+    let (input, _) = tag("urza's ").parse(input)?;
+    alt((
+        value("Mine".to_string(), tag("mine")),
+        value("Power-Plant".to_string(), tag("power-plant")),
+        value("Tower".to_string(), tag("tower")),
+    ))
+    .parse(input)
+}
+
 fn parse_cast_during_phase_condition_text(text: &str) -> Option<AbilityCondition> {
     let lower = text.to_ascii_lowercase();
     nom_parse_lower(&lower, parse_cast_during_phase_condition)
@@ -1131,11 +1197,11 @@ fn parse_cast_during_phase_condition(
 ) -> super::super::oracle_nom::error::OracleResult<'_, Vec<Phase>> {
     all_consuming(|input| {
         let (rest, _) =
-            tag::<_, _, VerboseError<&str>>("you cast this spell during your ").parse(input)?;
+            tag::<_, _, OracleError<'_>>("you cast this spell during your ").parse(input)?;
         alt((
             value(
                 vec![Phase::PreCombatMain, Phase::PostCombatMain],
-                tag::<_, _, VerboseError<&str>>("main phase"),
+                tag::<_, _, OracleError<'_>>("main phase"),
             ),
             value(vec![Phase::PreCombatMain], tag("precombat main phase")),
             value(vec![Phase::PostCombatMain], tag("postcombat main phase")),
@@ -1237,16 +1303,16 @@ fn parse_paid_x_condition_text(text: &str) -> Option<AbilityCondition> {
     let lower = text.to_ascii_lowercase();
     let (comparator, amount) = nom_parse_lower(&lower, |input| {
         all_consuming(|input| {
-            let (rest, _) = tag::<_, _, VerboseError<&str>>("x is ").parse(input)?;
+            let (rest, _) = tag::<_, _, OracleError<'_>>("x is ").parse(input)?;
             let (rest, amount) = nom_primitives::parse_number(rest)?;
             let (rest, comparator) = alt((
-                value(Comparator::GE, tag::<_, _, VerboseError<&str>>(" or more")),
+                value(Comparator::GE, tag::<_, _, OracleError<'_>>(" or more")),
                 value(Comparator::LE, tag(" or less")),
                 value(Comparator::GE, tag(" or greater")),
                 value(Comparator::LE, tag(" or fewer")),
             ))
             .parse(rest)?;
-            let (rest, _) = opt(tag::<_, _, VerboseError<&str>>(".")).parse(rest)?;
+            let (rest, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(rest)?;
             Ok((rest, (comparator, amount)))
         })
         .parse(input)
@@ -1266,6 +1332,7 @@ fn parse_paid_x_condition_text(text: &str) -> Option<AbilityCondition> {
 pub(super) fn try_parse_generic_instead_clause(
     text: &str,
     kind: AbilityKind,
+    ctx: &mut ParseContext,
 ) -> Option<AbilityDefinition> {
     let (condition_fragment, raw_body) = split_leading_conditional(text)?;
     let condition_lower = condition_fragment.to_lowercase();
@@ -1288,7 +1355,7 @@ pub(super) fn try_parse_generic_instead_clause(
         return None;
     };
 
-    let condition = try_nom_condition_as_ability_condition(cond_text)
+    let condition = try_nom_condition_as_ability_condition(cond_text, ctx)
         .or_else(|| parse_condition_text(cond_text))
         .or_else(|| parse_control_count_as_ability_condition(cond_text))?;
 
@@ -1297,6 +1364,13 @@ pub(super) fn try_parse_generic_instead_clause(
     result.condition = Some(AbilityCondition::ConditionInstead {
         inner: Box::new(condition),
     });
+    if result
+        .condition
+        .as_ref()
+        .is_some_and(super::condition_refs_cost_paid_object)
+    {
+        super::rewrite_cost_paid_object_quantities_in_definition(&mut result);
+    }
     Some(result)
 }
 
@@ -1318,9 +1392,10 @@ pub(super) fn try_parse_dig_instead_alternative(
     text: &str,
     previous: Option<&AbilityDefinition>,
     kind: AbilityKind,
+    ctx: &mut ParseContext,
 ) -> Option<AbilityDefinition> {
     use super::sequence::parse_dig_from_among;
-    use super::types::ContinuationAst;
+    use crate::parser::oracle_ir::ast::ContinuationAst;
 
     // Gate: previous effect must be a Dig that the alternative can piggy-back on.
     let prev = previous?;
@@ -1372,7 +1447,7 @@ pub(super) fn try_parse_dig_instead_alternative(
         return None;
     };
 
-    let condition = try_nom_condition_as_ability_condition(cond_text)
+    let condition = try_nom_condition_as_ability_condition(cond_text, ctx)
         .or_else(|| parse_condition_text(cond_text))
         .or_else(|| parse_control_count_as_ability_condition(cond_text))?;
 
@@ -1398,11 +1473,11 @@ pub(super) fn try_parse_dig_instead_alternative(
 
 fn parse_control_count_as_ability_condition(text: &str) -> Option<AbilityCondition> {
     let text = text.trim();
-    let (rest, _) = tag::<_, _, VerboseError<&str>>("you control ")
+    let (rest, _) = tag::<_, _, OracleError<'_>>("you control ")
         .parse(text)
         .ok()?;
 
-    let (type_rest, _) = tag::<_, _, VerboseError<&str>>("fewer ").parse(rest).ok()?;
+    let (type_rest, _) = tag::<_, _, OracleError<'_>>("fewer ").parse(rest).ok()?;
     let pos = type_rest.find(" than ")?;
     let type_text = &type_rest[..pos];
     let (mut filter, leftover) = parse_type_phrase(type_text);
@@ -1482,7 +1557,10 @@ fn counter_threshold_to_condition(
     }
 }
 
-fn static_condition_to_ability_condition(sc: &StaticCondition) -> Option<AbilityCondition> {
+fn static_condition_to_ability_condition(
+    sc: &StaticCondition,
+    ctx: &mut ParseContext,
+) -> Option<AbilityCondition> {
     match sc {
         StaticCondition::DuringYourTurn => Some(AbilityCondition::IsYourTurn),
         StaticCondition::QuantityComparison {
@@ -1502,12 +1580,17 @@ fn static_condition_to_ability_condition(sc: &StaticCondition) -> Option<Ability
         }
         StaticCondition::SourceEnteredThisTurn => None,
         StaticCondition::IsPresent { filter } => {
-            let filter = filter.clone().unwrap_or_else(|| {
-                push_warning(
-                    "bare-filter: IsPresent condition has no filter, defaulting to Any".to_string(),
-                );
-                TargetFilter::Any
-            });
+            let filter = match filter {
+                Some(f) => f.clone(),
+                None => {
+                    ctx.push_diagnostic(OracleDiagnostic::TargetFallback {
+                        context: "IsPresent condition has no filter".into(),
+                        text: String::new(),
+                        line_index: 0,
+                    });
+                    TargetFilter::Any
+                }
+            };
             Some(AbilityCondition::QuantityCheck {
                 lhs: QuantityExpr::Ref {
                     qty: QuantityRef::ObjectCount { filter },
@@ -1533,13 +1616,17 @@ fn static_condition_to_ability_condition(sc: &StaticCondition) -> Option<Ability
                 rhs: rhs.clone(),
             }),
             StaticCondition::IsPresent { filter } => {
-                let filter = filter.clone().unwrap_or_else(|| {
-                    push_warning(
-                        "bare-filter: NegatedIsPresent has no filter, defaulting to Any"
-                            .to_string(),
-                    );
-                    TargetFilter::Any
-                });
+                let filter = match filter {
+                    Some(f) => f.clone(),
+                    None => {
+                        ctx.push_diagnostic(OracleDiagnostic::TargetFallback {
+                            context: "NegatedIsPresent has no filter".into(),
+                            text: String::new(),
+                            line_index: 0,
+                        });
+                        TargetFilter::Any
+                    }
+                };
                 Some(AbilityCondition::QuantityCheck {
                     lhs: QuantityExpr::Ref {
                         qty: QuantityRef::ObjectCount { filter },
@@ -1574,7 +1661,7 @@ fn static_condition_to_ability_condition(sc: &StaticCondition) -> Option<Ability
         StaticCondition::And { conditions } => {
             let mapped: Option<Vec<_>> = conditions
                 .iter()
-                .map(static_condition_to_ability_condition)
+                .map(|c| static_condition_to_ability_condition(c, ctx))
                 .collect();
             Some(AbilityCondition::And {
                 conditions: mapped?,
@@ -1583,7 +1670,7 @@ fn static_condition_to_ability_condition(sc: &StaticCondition) -> Option<Ability
         StaticCondition::Or { conditions } => {
             let mapped: Option<Vec<_>> = conditions
                 .iter()
-                .map(static_condition_to_ability_condition)
+                .map(|c| static_condition_to_ability_condition(c, ctx))
                 .collect();
             Some(AbilityCondition::Or {
                 conditions: mapped?,
@@ -1640,7 +1727,10 @@ fn static_condition_to_ability_condition(sc: &StaticCondition) -> Option<Ability
     }
 }
 
-pub(super) fn try_nom_condition_as_ability_condition(text: &str) -> Option<AbilityCondition> {
+pub(super) fn try_nom_condition_as_ability_condition(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<AbilityCondition> {
     use crate::parser::oracle_nom::condition::parse_inner_condition;
 
     let lower = text.to_lowercase();
@@ -1657,15 +1747,37 @@ pub(super) fn try_nom_condition_as_ability_condition(text: &str) -> Option<Abili
         return Some(condition);
     }
 
+    if let Some(condition) = parse_cost_paid_object_matches_filter_condition(lower.as_str()) {
+        return Some(condition);
+    }
+
+    // CR 702.62a: "it doesn't have [keyword]" / "it does not have [keyword]" — pronoun
+    // subject lacks-keyword check (e.g., "If it doesn't have suspend, it gains suspend").
+    // Mirrors the "~ doesn't have" / "this creature doesn't have" handler in oracle_condition.rs.
+    if let Ok((keyword_text, _)) = alt((
+        tag::<_, _, OracleError<'_>>("it doesn't have "),
+        tag("it does not have "),
+    ))
+    .parse(lower.as_str())
+    {
+        let keyword: Keyword = keyword_text
+            .trim()
+            .parse()
+            .unwrap_or(Keyword::Unknown(String::new()));
+        if !matches!(keyword, Keyword::Unknown(_)) {
+            return Some(AbilityCondition::SourceLacksKeyword { keyword });
+        }
+    }
+
     // CR 730.2a: "it's neither day nor night" — Daybound/Nightbound ETB initialization.
-    if tag::<_, _, VerboseError<&str>>("it's neither day nor night")
+    if tag::<_, _, OracleError<'_>>("it's neither day nor night")
         .parse(lower.as_str())
         .is_ok()
     {
         return Some(AbilityCondition::DayNightIsNeither);
     }
 
-    if tag::<_, _, VerboseError<&str>>("it's the first combat phase of the turn")
+    if tag::<_, _, OracleError<'_>>("it's the first combat phase of the turn")
         .parse(lower.as_str())
         .is_ok()
     {
@@ -1683,28 +1795,28 @@ pub(super) fn try_nom_condition_as_ability_condition(text: &str) -> Option<Abili
         return Some(AbilityCondition::NthResolutionThisTurn { n });
     }
 
-    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("you do or if ").parse(lower.as_str()) {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("you do or if ").parse(lower.as_str()) {
         let (rest, condition) = parse_inner_condition(rest).ok()?;
         if rest.trim().is_empty() {
             return Some(AbilityCondition::Or {
                 conditions: vec![
                     AbilityCondition::IfYouDo,
-                    static_condition_to_ability_condition(&condition)?,
+                    static_condition_to_ability_condition(&condition, ctx)?,
                 ],
             });
         }
     }
 
-    if tag::<_, _, VerboseError<&str>>("you win the clash")
+    if tag::<_, _, OracleError<'_>>("you win the clash")
         .parse(lower.as_str())
         .is_ok()
-        || tag::<_, _, VerboseError<&str>>("you won the clash")
+        || tag::<_, _, OracleError<'_>>("you won the clash")
             .parse(lower.as_str())
             .is_ok()
-        || tag::<_, _, VerboseError<&str>>("you win")
+        || tag::<_, _, OracleError<'_>>("you win")
             .parse(lower.as_str())
             .is_ok()
-        || tag::<_, _, VerboseError<&str>>("you won")
+        || tag::<_, _, OracleError<'_>>("you won")
             .parse(lower.as_str())
             .is_ok()
     {
@@ -1712,7 +1824,7 @@ pub(super) fn try_nom_condition_as_ability_condition(text: &str) -> Option<Abili
     }
 
     if alt((
-        tag::<_, _, VerboseError<&str>>("you don't"),
+        tag::<_, _, OracleError<'_>>("you don't"),
         tag("you do not"),
         tag("you didn't"),
         tag("you did not"),
@@ -1726,7 +1838,7 @@ pub(super) fn try_nom_condition_as_ability_condition(text: &str) -> Option<Abili
     }
 
     if let Ok((rest, _)) =
-        tag::<_, _, VerboseError<&str>>("this spell was cast from ").parse(lower.as_str())
+        tag::<_, _, OracleError<'_>>("this spell was cast from ").parse(lower.as_str())
     {
         let zone = match rest.trim() {
             "your hand" | "hand" => Some(Zone::Hand),
@@ -1739,7 +1851,7 @@ pub(super) fn try_nom_condition_as_ability_condition(text: &str) -> Option<Abili
         }
     }
 
-    if tag::<_, _, VerboseError<&str>>("this spell was foretold")
+    if tag::<_, _, OracleError<'_>>("this spell was foretold")
         .parse(lower.as_str())
         .is_ok()
     {
@@ -1769,7 +1881,7 @@ pub(super) fn try_nom_condition_as_ability_condition(text: &str) -> Option<Abili
     // Distinct from present-tense "it's a [type]" which uses RevealedHasCardType.
     {
         let mut lki_prefix = alt((
-            value(true, tag::<_, _, VerboseError<&str>>("it was not a ")),
+            value(true, tag::<_, _, OracleError<'_>>("it was not a ")),
             value(true, tag("it wasn't a ")),
             value(false, tag("it was a ")),
             value(false, tag("it was an ")),
@@ -1795,17 +1907,16 @@ pub(super) fn try_nom_condition_as_ability_condition(text: &str) -> Option<Abili
     }
 
     let (negated, rest_after_prefix) = if let Ok((rest, _)) =
-        tag::<_, _, VerboseError<&str>>("it's not a ").parse(lower.as_str())
+        tag::<_, _, OracleError<'_>>("it's not a ").parse(lower.as_str())
     {
         (true, Some(rest))
-    } else if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("it's a ").parse(lower.as_str()) {
+    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("it's a ").parse(lower.as_str()) {
         (false, Some(rest))
     } else if let Ok((rest, _)) =
-        tag::<_, _, VerboseError<&str>>("that card is a ").parse(lower.as_str())
+        tag::<_, _, OracleError<'_>>("that card is a ").parse(lower.as_str())
     {
         (false, Some(rest))
-    } else if let Ok((rest, _)) =
-        tag::<_, _, VerboseError<&str>>("it isn't a ").parse(lower.as_str())
+    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("it isn't a ").parse(lower.as_str())
     {
         (true, Some(rest))
     } else {
@@ -1849,11 +1960,11 @@ pub(super) fn try_nom_condition_as_ability_condition(text: &str) -> Option<Abili
     if !rest.trim().is_empty() {
         return None;
     }
-    static_condition_to_ability_condition(&condition)
+    static_condition_to_ability_condition(&condition, ctx)
 }
 
 fn parse_you_controlled_parent_target_condition(lower: &str) -> Option<AbilityCondition> {
-    type E<'a> = VerboseError<&'a str>;
+    type E<'a> = OracleError<'a>;
 
     let controller_only =
         TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You));
@@ -1906,6 +2017,55 @@ fn parse_you_controlled_parent_target_condition(lower: &str) -> Option<AbilityCo
     })
 }
 
+fn parse_cost_paid_object_matches_filter_condition(lower: &str) -> Option<AbilityCondition> {
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("you sacrificed "),
+        tag("you exiled "),
+        tag("you discarded "),
+    ))
+    .parse(lower)
+    .ok()?;
+    let (rest, _) = opt(alt((
+        tag::<_, _, OracleError<'_>>("a "),
+        tag("an "),
+        tag("the "),
+    )))
+    .parse(rest)
+    .ok()?;
+    let (rest, type_text) = take_until::<_, _, OracleError<'_>>(" this way")
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" this way").parse(rest).ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    let type_filter = parse_cost_paid_object_type_filter(type_text.trim())?;
+
+    Some(AbilityCondition::CostPaidObjectMatchesFilter {
+        filter: TargetFilter::Typed(TypedFilter::new(type_filter)),
+    })
+}
+
+fn parse_cost_paid_object_type_filter(text: &str) -> Option<TypeFilter> {
+    all_consuming(alt((
+        value(
+            TypeFilter::Creature,
+            tag::<_, _, OracleError<'_>>("creature"),
+        ),
+        value(TypeFilter::Artifact, tag("artifact")),
+        value(TypeFilter::Enchantment, tag("enchantment")),
+        value(TypeFilter::Land, tag("land")),
+        value(TypeFilter::Planeswalker, tag("planeswalker")),
+        value(TypeFilter::Permanent, tag("permanent")),
+        value(TypeFilter::Card, tag("card")),
+    )))
+    .parse(text)
+    .ok()
+    .map(|(_, filter)| filter)
+    .or_else(|| parse_subtype(text).map(|(subtype, _)| TypeFilter::Subtype(subtype)))
+}
+
 fn parse_zone_change_object_matches_filter_condition(lower: &str) -> Option<AbilityCondition> {
     let (type_text, negated) = parse_zone_change_object_type_text(lower).ok()?.1;
     let (filter, leftover) = parse_type_phrase(type_text);
@@ -1925,7 +2085,7 @@ fn parse_zone_change_object_matches_filter_condition(lower: &str) -> Option<Abil
 
 fn parse_zone_change_object_type_text(
     input: &str,
-) -> nom::IResult<&str, (&str, bool), VerboseError<&str>> {
+) -> nom::IResult<&str, (&str, bool), OracleError<'_>> {
     let (input, _) = tag("that ").parse(input)?;
     let (input, _) = alt((
         tag("permanent"),
@@ -1962,7 +2122,7 @@ fn parse_target_supertype_condition_text(lower: &str) -> Option<AbilityCondition
         value(
             true,
             alt((
-                tag::<_, _, VerboseError<&str>>("it is not "),
+                tag::<_, _, OracleError<'_>>("it is not "),
                 tag("it's not "),
                 tag("it isn't "),
             )),
@@ -1988,11 +2148,11 @@ fn parse_target_supertype_condition_text(lower: &str) -> Option<AbilityCondition
     ))
 }
 
-fn parse_supertype_word(input: &str) -> nom::IResult<&str, Supertype, VerboseError<&str>> {
+fn parse_supertype_word(input: &str) -> nom::IResult<&str, Supertype, OracleError<'_>> {
     alt((
         value(
             Supertype::Legendary,
-            tag::<_, _, VerboseError<&str>>("legendary"),
+            tag::<_, _, OracleError<'_>>("legendary"),
         ),
         value(Supertype::Basic, tag("basic")),
         value(Supertype::Snow, tag("snow")),
@@ -2024,8 +2184,8 @@ fn parse_supertype_word(input: &str) -> nom::IResult<&str, Supertype, VerboseErr
 /// lockstep on tense + verb coverage.
 fn parse_a_type_was_verbed_this_way(lower: &str) -> Option<(TypeFilter, bool)> {
     let (rest, _) = alt((
-        tag::<_, _, VerboseError<&str>>("an "),
-        tag::<_, _, VerboseError<&str>>("a "),
+        tag::<_, _, OracleError<'_>>("an "),
+        tag::<_, _, OracleError<'_>>("a "),
     ))
     .parse(lower)
     .ok()?;
@@ -2033,7 +2193,7 @@ fn parse_a_type_was_verbed_this_way(lower: &str) -> Option<(TypeFilter, bool)> {
     let (rest, type_filter) = alt((
         value(
             TypeFilter::Creature,
-            tag::<_, _, VerboseError<&str>>("creature"),
+            tag::<_, _, OracleError<'_>>("creature"),
         ),
         value(TypeFilter::Land, tag("land")),
         value(TypeFilter::Artifact, tag("artifact")),
@@ -2049,7 +2209,7 @@ fn parse_a_type_was_verbed_this_way(lower: &str) -> Option<(TypeFilter, bool)> {
     // independent `alt` chains so adding a new verb (or tense) is a single
     // tag arm, not an N×M permutation expansion.
     let (rest, negated) = alt((
-        value(true, tag::<_, _, VerboseError<&str>>(" wasn't ")),
+        value(true, tag::<_, _, OracleError<'_>>(" wasn't ")),
         value(true, tag(" isn't ")),
         value(true, tag(" was not ")),
         value(true, tag(" is not ")),
@@ -2063,7 +2223,7 @@ fn parse_a_type_was_verbed_this_way(lower: &str) -> Option<(TypeFilter, bool)> {
         // Multi-word verb listed first: longest-match-wins keeps the
         // single-word `tag("put")` (no such tag here, but defensive against
         // future additions) from short-circuiting the multi-word phrase.
-        tag::<_, _, VerboseError<&str>>("put onto the battlefield"),
+        tag::<_, _, OracleError<'_>>("put onto the battlefield"),
         tag("destroyed"),
         tag("exiled"),
         tag("sacrificed"),
@@ -2075,9 +2235,7 @@ fn parse_a_type_was_verbed_this_way(lower: &str) -> Option<(TypeFilter, bool)> {
     .parse(rest)
     .ok()?;
 
-    let (rest, _) = tag::<_, _, VerboseError<&str>>(" this way")
-        .parse(rest)
-        .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" this way").parse(rest).ok()?;
     if !rest.trim().is_empty() {
         return None;
     }
@@ -2091,7 +2249,7 @@ fn parse_a_type_was_verbed_this_way(lower: &str) -> Option<(TypeFilter, bool)> {
 /// printed in a prior sentence. Ordinals span first–tenth (Omnath/Ashling print
 /// up to third; the broader ceiling is conservative).
 fn parse_nth_resolution_condition(lower: &str) -> Option<u32> {
-    type E<'a> = VerboseError<&'a str>;
+    type E<'a> = OracleError<'a>;
     let (rest, _) = alt((
         tag::<_, _, E>("this is the "),
         tag("it's the "),
@@ -2135,6 +2293,7 @@ mod tests {
     fn leading_that_enchantment_is_aura_checks_zone_change_object() {
         let (condition, body) = strip_leading_general_conditional(
             "If that enchantment is an Aura, you may attach it to the token.",
+            &mut ParseContext::default(),
         );
         assert_eq!(body, "you may attach it to the token.");
 
@@ -2192,8 +2351,10 @@ mod tests {
 
     #[test]
     fn leading_its_legendary_checks_parent_target_supertype() {
-        let (condition, body) =
-            strip_leading_general_conditional("If it's legendary, gain 3 life.");
+        let (condition, body) = strip_leading_general_conditional(
+            "If it's legendary, gain 3 life.",
+            &mut ParseContext::default(),
+        );
         assert_eq!(body, "gain 3 life.");
         let Some(AbilityCondition::TargetMatchesFilter { filter, use_lki }) = condition else {
             panic!("expected TargetMatchesFilter, got {condition:?}");
@@ -2216,8 +2377,10 @@ mod tests {
 
     #[test]
     fn leading_its_color_checks_parent_target_color() {
-        let (condition, body) =
-            strip_leading_general_conditional("If it's red, you may cast it this turn.");
+        let (condition, body) = strip_leading_general_conditional(
+            "If it's red, you may cast it this turn.",
+            &mut ParseContext::default(),
+        );
         assert_eq!(body, "you may cast it this turn.");
         let Some(AbilityCondition::TargetMatchesFilter { filter, use_lki }) = condition else {
             panic!("expected TargetMatchesFilter, got {condition:?}");
@@ -2237,7 +2400,10 @@ mod tests {
 
     #[test]
     fn suffix_its_color_checks_parent_target_color() {
-        let (condition, body) = strip_suffix_conditional("Counter target spell if it's blue.");
+        let (condition, body) = strip_suffix_conditional(
+            "Counter target spell if it's blue.",
+            &mut ParseContext::default(),
+        );
         assert_eq!(body, "Counter target spell");
         let Some(AbilityCondition::TargetMatchesFilter { filter, use_lki }) = condition else {
             panic!("expected TargetMatchesFilter, got {condition:?}");
@@ -2259,6 +2425,7 @@ mod tests {
     fn leading_this_enchantment_isnt_creature_checks_source_type() {
         let (condition, body) = strip_leading_general_conditional(
             "If this enchantment isn't a creature, it becomes a 3/3 Angel creature with flying.",
+            &mut ParseContext::default(),
         );
         assert_eq!(body, "it becomes a 3/3 Angel creature with flying.");
         assert!(matches!(
@@ -2270,8 +2437,10 @@ mod tests {
 
     #[test]
     fn leading_you_win_maps_to_if_you_do_for_clash() {
-        let (condition, body) =
-            strip_leading_general_conditional("If you win, put a +1/+1 counter on this creature.");
+        let (condition, body) = strip_leading_general_conditional(
+            "If you win, put a +1/+1 counter on this creature.",
+            &mut ParseContext::default(),
+        );
         assert_eq!(body, "put a +1/+1 counter on this creature.");
         assert_eq!(condition, Some(AbilityCondition::IfYouDo));
     }
@@ -2280,6 +2449,7 @@ mod tests {
     fn leading_you_dont_maps_to_not_if_you_do() {
         let (condition, body) = strip_leading_general_conditional(
             "If you didn't put a card into your hand this way, draw a card.",
+            &mut ParseContext::default(),
         );
         assert_eq!(body, "draw a card.");
         assert_eq!(
@@ -2326,6 +2496,7 @@ mod tests {
     fn suffix_symbolic_mana_spent_condition_parses_single_color() {
         let (condition, body) = strip_suffix_conditional(
             "Each player loses 1 life for each attacking creature they control if {B} was spent to cast this spell.",
+            &mut ParseContext::default(),
         );
         assert_eq!(
             body,
@@ -2361,6 +2532,7 @@ mod tests {
     fn suffix_another_filtered_spell_condition_uses_spell_history_quantity() {
         let (condition, body) = strip_suffix_conditional(
             "Target creature you control gets +1/+0 until end of turn if you've cast another instant or sorcery spell this turn.",
+            &mut ParseContext::default(),
         );
         assert_eq!(
             body,
@@ -2371,6 +2543,7 @@ mod tests {
                 QuantityExpr::Ref {
                     qty:
                         QuantityRef::SpellsCastThisTurn {
+                            scope: crate::types::ability::CountScope::Controller,
                             filter: Some(TargetFilter::Or { filters }),
                         },
                 },
@@ -2397,6 +2570,7 @@ mod tests {
     fn suffix_night_condition_uses_day_night_designation() {
         let (condition, body) = strip_suffix_conditional(
             "Target creature you control gets +2/+0 until end of turn if it's night.",
+            &mut ParseContext::default(),
         );
         assert_eq!(
             body,
@@ -2414,6 +2588,7 @@ mod tests {
     fn leading_word_mana_spent_condition_parses_adamant() {
         let (condition, body) = strip_leading_general_conditional(
             "If at least three red mana was spent to cast this spell, it deals 4 damage instead.",
+            &mut ParseContext::default(),
         );
         assert_eq!(body, "it deals 4 damage instead.");
         assert_eq!(
@@ -2442,9 +2617,10 @@ mod tests {
                 maximum: Some(0),
             }
         );
-        let bridged = static_condition_to_ability_condition(&sc).expect(
-            "CounterMatch::Any must round-trip — None here is the silent-failure regression",
-        );
+        let bridged = static_condition_to_ability_condition(&sc, &mut ParseContext::default())
+            .expect(
+                "CounterMatch::Any must round-trip — None here is the silent-failure regression",
+            );
         match bridged {
             AbilityCondition::QuantityCheck {
                 lhs:
@@ -2468,7 +2644,8 @@ mod tests {
     fn bridge_has_counters_any_at_least_one_yields_any_counters_on_self_ge_one() {
         let (rest, sc) = parse_inner_condition("~ has a counter on it").unwrap();
         assert_eq!(rest, "");
-        let bridged = static_condition_to_ability_condition(&sc).expect("must bridge");
+        let bridged = static_condition_to_ability_condition(&sc, &mut ParseContext::default())
+            .expect("must bridge");
         match bridged {
             AbilityCondition::QuantityCheck {
                 lhs:
@@ -2496,7 +2673,8 @@ mod tests {
             minimum: 2,
             maximum: None,
         };
-        let bridged = static_condition_to_ability_condition(&sc).expect("must bridge");
+        let bridged = static_condition_to_ability_condition(&sc, &mut ParseContext::default())
+            .expect("must bridge");
         match bridged {
             AbilityCondition::QuantityCheck {
                 lhs:

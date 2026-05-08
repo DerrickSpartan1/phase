@@ -1,14 +1,15 @@
 import { useCallback, useMemo, useState } from "react";
 import { useSearchParams } from "react-router";
 
+import type { GameFormat } from "../adapter/types";
 import { useAudioContext } from "../audio/useAudioContext";
 import { CardPreview } from "../components/card/CardPreview";
 import { DeckBuilder } from "../components/deck-builder/DeckBuilder";
 import type { BrowserLegalityFilter, CardSearchFilters } from "../components/deck-builder/CardSearch";
-import type { DeckFormat } from "../components/deck-builder/FormatFilter";
+import { FORMAT_REGISTRY } from "../data/formatRegistry";
 import { useAltToggle } from "../hooks/useAltToggle";
 
-const DEFAULT_DECK_FORMAT: DeckFormat = "standard";
+const DEFAULT_DECK_FORMAT: GameFormat = "Standard";
 const DEFAULT_SEARCH_FILTERS: CardSearchFilters = {
   text: "",
   colors: [],
@@ -17,21 +18,13 @@ const DEFAULT_SEARCH_FILTERS: CardSearchFilters = {
   sets: [],
   browseFormat: "all",
 };
-const DECK_FORMATS: DeckFormat[] = [
-  "standard",
-  "commander",
-  "modern",
-  "pioneer",
-  "legacy",
-  "vintage",
-  "pauper",
-];
 
-function parseDeckFormat(value: string | null): DeckFormat {
-  if (value && DECK_FORMATS.includes(value as DeckFormat)) {
-    return value as DeckFormat;
-  }
-  return DEFAULT_DECK_FORMAT;
+function parseDeckFormat(value: string | null): GameFormat {
+  if (!value) return DEFAULT_DECK_FORMAT;
+  const match = FORMAT_REGISTRY.find(
+    (m) => m.format.toLowerCase() === value.toLowerCase(),
+  );
+  return match?.format ?? DEFAULT_DECK_FORMAT;
 }
 
 function parseBrowseFormat(value: string | null): BrowserLegalityFilter {
@@ -64,7 +57,7 @@ export function DeckBuilderPage() {
   useAudioContext("deck_builder");
   useAltToggle();
   const [searchParams, setSearchParams] = useSearchParams();
-  const [hoveredCardName, setHoveredCardName] = useState<string | null>(null);
+  const [hoveredCard, setHoveredCard] = useState<{ name: string; scryfallId?: string } | null>(null);
   const format = parseDeckFormat(searchParams.get("format"));
   const initialDeckName = searchParams.get("create") === "1"
     ? null
@@ -82,7 +75,7 @@ export function DeckBuilderPage() {
   }, [searchParams]);
 
   const updateSearchParams = useCallback((next: {
-    format?: DeckFormat;
+    format?: GameFormat;
     searchFilters?: CardSearchFilters;
   }) => {
     const params = new URLSearchParams(searchParams);
@@ -90,7 +83,7 @@ export function DeckBuilderPage() {
     const nextSearchFilters = next.searchFilters ?? searchFilters;
 
     if (nextFormat === DEFAULT_DECK_FORMAT) params.delete("format");
-    else params.set("format", nextFormat);
+    else params.set("format", nextFormat.toLowerCase());
 
     if (nextSearchFilters.text) params.set("q", nextSearchFilters.text);
     else params.delete("q");
@@ -108,12 +101,12 @@ export function DeckBuilderPage() {
     else params.delete("sets");
 
     if (nextSearchFilters.browseFormat === DEFAULT_SEARCH_FILTERS.browseFormat) params.delete("browseFormat");
-    else params.set("browseFormat", nextSearchFilters.browseFormat);
+    else params.set("browseFormat", nextSearchFilters.browseFormat.toLowerCase());
 
     setSearchParams(params, { replace: true });
   }, [format, searchFilters, searchParams, setSearchParams]);
 
-  const handleFormatChange = useCallback((nextFormat: DeckFormat) => {
+  const handleFormatChange = useCallback((nextFormat: GameFormat) => {
     updateSearchParams({ format: nextFormat });
   }, [updateSearchParams]);
 
@@ -128,7 +121,9 @@ export function DeckBuilderPage() {
   return (
     <div className="menu-scene h-screen overflow-hidden">
       <DeckBuilder
-        onCardHover={setHoveredCardName}
+        onCardHover={useCallback((name: string | null, scryfallId?: string) => {
+          setHoveredCard(name ? { name, scryfallId } : null);
+        }, [])}
         format={format}
         onFormatChange={handleFormatChange}
         initialDeckName={initialDeckName}
@@ -137,7 +132,7 @@ export function DeckBuilderPage() {
         onSearchFiltersChange={handleSearchFiltersChange}
         onResetSearch={handleResetSearch}
       />
-      <CardPreview cardName={hoveredCardName} />
+      <CardPreview cardName={hoveredCard?.name ?? null} scryfallId={hoveredCard?.scryfallId} />
     </div>
   );
 }

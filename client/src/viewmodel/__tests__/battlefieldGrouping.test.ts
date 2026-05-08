@@ -341,4 +341,34 @@ describe("groupByName", () => {
     expect(groups[1].name).toBe("Mountain");
     expect(groups[1].representative.id).toBe(9);
   });
+
+  it("groups face-down permanents by public characteristics instead of hidden names", () => {
+    const objects = [
+      makeGameObject({
+        id: 54,
+        name: "Hidden Sorcery",
+        face_down: true,
+        power: 2,
+        toughness: 2,
+        card_types: { supertypes: [], core_types: ["Creature"], subtypes: [] },
+      }),
+      makeGameObject({
+        id: 55,
+        name: "Hidden Instant",
+        face_down: true,
+        power: 2,
+        toughness: 2,
+        card_types: { supertypes: [], core_types: ["Creature"], subtypes: [] },
+      }),
+    ];
+
+    const groups = groupByName(objects);
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0]).toMatchObject({
+      name: "Face-down card",
+      ids: [54, 55],
+      count: 2,
+    });
+  });
 });

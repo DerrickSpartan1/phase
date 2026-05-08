@@ -1,0 +1,30 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&ir"
+---
+{
+  "items": [
+    {
+      "PreLoweredSpell": {
+        "kind": "Spell",
+        "effect": {
+          "type": "Unimplemented",
+          "name": "unknown",
+          "description": "Players can't search libraries. Any player may pay {2} for that player to ignore this effect until end of turn."
+        },
+        "cost": null,
+        "sub_ability": null,
+        "duration": null,
+        "description": "Players can't search libraries. Any player may pay {2} for that player to ignore this effect until end of turn.",
+        "target_prompt": null,
+        "sorcery_speed": false,
+        "condition": null,
+        "optional_targeting": false,
+        "optional": false,
+        "forward_result": false
+      }
+    }
+  ],
+  "source_text": "Players can't search libraries. Any player may pay {2} for that player to ignore this effect until end of turn.",
+  "card_name": "Leonin Arbiter"
+}

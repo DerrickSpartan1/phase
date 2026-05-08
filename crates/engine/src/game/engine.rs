@@ -19,6 +19,7 @@ use crate::types::zones::Zone;
 
 use super::ability_utils::{
     begin_target_selection_for_ability, build_target_slots, compute_unavailable_modes,
+    modal_choice_for_player,
 };
 use super::casting;
 use super::casting_costs;
@@ -141,6 +142,7 @@ pub fn apply(
     // last_effect_count is set by interactive handlers (e.g., DiscardChoice) and
     // consumed by sub_ability continuations via EventContextAmount fallback.
     state.last_effect_count = None;
+    state.last_effect_counts_by_player.clear();
     state.exiled_from_hand_this_resolution = 0;
     check_actor_authorization(state, actor, &action)?;
     let mut result = apply_action(state, actor, action)?;
@@ -180,7 +182,10 @@ fn check_actor_authorization(
     }
     if matches!(
         action,
-        GameAction::SetPhaseStops { .. } | GameAction::CancelAutoPass
+        GameAction::SetPhaseStops { .. }
+            | GameAction::CancelAutoPass
+            | GameAction::Debug(_)
+            | GameAction::ReorderHand { .. }
     ) {
         return Ok(());
     }
@@ -937,6 +942,56 @@ fn apply_action(
         });
     }
 
+    // CR 402.3: Hand order has no game-rules significance — ReorderHand is a
+    // display-preference update on the actor's own hand. Validated as a strict
+    // permutation of the current hand and applied with no event emission, no
+    // WaitingFor transition, and no auto-pass / lands-tapped clearing. Mirrors
+    // the SetPhaseStops / CancelAutoPass pattern: any-state, routed by `actor`.
+    if let GameAction::ReorderHand { order } = &action {
+        // Canonical accessor in this crate is direct indexing — see
+        // `state.players[player.0 as usize]` throughout `ai_support/candidates.rs`,
+        // `game/companion.rs`, and the existing test module. Bounds-check via
+        // `len()` rather than swapping to `.get_mut()`, to stay idiomatic with
+        // the rest of the file.
+        if (actor.0 as usize) >= state.players.len() {
+            return Err(EngineError::InvalidAction(format!(
+                "ReorderHand: actor {:?} is not a valid player index",
+                actor
+            )));
+        }
+        let player = &mut state.players[actor.0 as usize];
+
+        if order.len() != player.hand.len() {
+            return Err(EngineError::InvalidAction(format!(
+                "ReorderHand: expected {} ids, got {}",
+                player.hand.len(),
+                order.len()
+            )));
+        }
+
+        // Permutation check: same multiset. Sort copies and compare — O(n log n)
+        // is fine for hand sizes (typically <= 7, capped well under any realistic
+        // limit by CR 402.2 and our zone semantics). ObjectId is not Ord, so
+        // sort by the inner u64 key directly.
+        let mut current: Vec<ObjectId> = player.hand.iter().copied().collect();
+        let mut requested = order.clone();
+        current.sort_unstable_by_key(|id| id.0);
+        requested.sort_unstable_by_key(|id| id.0);
+        if current != requested {
+            return Err(EngineError::InvalidAction(
+                "ReorderHand: order is not a permutation of the current hand".into(),
+            ));
+        }
+
+        player.hand = order.iter().copied().collect();
+
+        return Ok(ActionResult {
+            events: vec![],
+            waiting_for: state.waiting_for.clone(),
+            log_entries: vec![],
+        });
+    }
+
     // CR 104.3a: A player may concede at any time. Concede bypasses the WaitingFor
     // dispatch entirely — there is no priority/state check. Eliminating the player
     // performs CR 800.4a object cleanup and advances `waiting_for` if the conceder
@@ -951,10 +1006,22 @@ fn apply_action(
         });
     }
 
+    // Debug actions bypass WaitingFor dispatch — gated on debug_mode flag.
+    if let GameAction::Debug(debug_action) = action {
+        if !state.debug_mode {
+            return Err(EngineError::InvalidAction(
+                "Debug actions require debug_mode to be enabled".into(),
+            ));
+        }
+        return super::engine_debug::apply_debug_action(state, actor, debug_action, &mut events);
+    }
+
     // Any deliberate player action (not auto-pass-related or a simple pass) cancels their auto-pass
     if let Some(player) = turn_control::authorized_submitter(state) {
         match &action {
-            GameAction::SetAutoPass { .. } | GameAction::PassPriority => {}
+            GameAction::SetAutoPass { .. }
+            | GameAction::PassPriority
+            | GameAction::ReorderHand { .. } => {}
             _ => {
                 state.auto_pass.remove(&player);
             }
@@ -970,6 +1037,7 @@ fn apply_action(
             | GameAction::CastSpell { .. }
             | GameAction::Foretell { .. }
             | GameAction::CastSpellAsSneak { .. }
+            | GameAction::CastSpellAsWebSlinging { .. }
             | GameAction::CastSpellForFree { .. }
             | GameAction::CastSpellAsMiracle { .. }
             | GameAction::CancelCast
@@ -1234,6 +1302,23 @@ fn apply_action(
             *object_id,
             *card_id,
             use_overload,
+            &mut events,
+        )?,
+        // CR 702.103a: Player chooses normal cast or Bestow cast from hand.
+        (
+            WaitingFor::BestowCostChoice {
+                player,
+                object_id,
+                card_id,
+                ..
+            },
+            GameAction::ChooseBestowCost { use_bestow },
+        ) => casting::handle_bestow_cost_choice(
+            state,
+            *player,
+            *object_id,
+            *card_id,
+            use_bestow,
             &mut events,
         )?,
         (WaitingFor::ModeChoice { player, .. }, GameAction::SelectModes { indices }) => {
@@ -1505,26 +1590,36 @@ fn apply_action(
                 choice, context, ..
             },
             GameAction::ChooseManaColor { choice: chosen },
-        ) => match context {
-            crate::types::game_state::ManaChoiceContext::ManaAbility(pending_mana_ability) => {
-                engine_casting::handle_choose_mana_color(
-                    state,
-                    pending_mana_ability,
-                    choice,
-                    chosen.clone(),
-                    &mut events,
-                )?
+        ) => {
+            let events_before = events.len();
+            let wf = match context {
+                crate::types::game_state::ManaChoiceContext::ManaAbility(pending_mana_ability) => {
+                    engine_casting::handle_choose_mana_color(
+                        state,
+                        pending_mana_ability,
+                        choice,
+                        chosen.clone(),
+                        &mut events,
+                    )?
+                }
+                crate::types::game_state::ManaChoiceContext::ResolvingEffect(pending_effect) => {
+                    effects::mana::handle_choose_mana_effect(
+                        state,
+                        pending_effect,
+                        choice,
+                        chosen.clone(),
+                        &mut events,
+                    )?
+                }
+            };
+            // CR 605.1b: Process TapsForMana triggers inline after mana color
+            // choice resolves (dual land during mana payment).
+            if events.len() > events_before {
+                let mana_events: Vec<_> = events[events_before..].to_vec();
+                super::triggers::process_triggers(state, &mana_events);
             }
-            crate::types::game_state::ManaChoiceContext::ResolvingEffect(pending_effect) => {
-                effects::mana::handle_choose_mana_effect(
-                    state,
-                    pending_effect,
-                    choice,
-                    chosen.clone(),
-                    &mut events,
-                )?
-            }
-        },
+            wf
+        }
         // CR 605.3a + CR 601.2h + CR 107.4e: Player submits the per-hybrid-shard
         // color vector for a mana-ability mana sub-cost (filter lands, etc.).
         (
@@ -1621,6 +1716,15 @@ fn apply_action(
         (WaitingFor::OptionalEffectChoice { .. }, GameAction::DecideOptionalEffect { accept }) => {
             engine_payment_choices::handle_optional_effect_choice(state, accept, &mut events)?
         }
+        (
+            waiting_for @ WaitingFor::OptionalEffectChoice { .. },
+            GameAction::DecideOptionalEffectAndRemember { choice },
+        ) => engine_payment_choices::handle_optional_effect_choice_and_remember(
+            state,
+            waiting_for.clone(),
+            choice,
+            &mut events,
+        )?,
         // CR 608.2d: Opponent decided on "any opponent may" effect.
         (
             waiting_for @ WaitingFor::OpponentMayChoice { .. },
@@ -1904,8 +2008,9 @@ fn apply_action(
             if ability_index < obj.abilities.len()
                 && mana_abilities::is_mana_ability(&obj.abilities[ability_index])
             {
+                let events_before = events.len();
                 let ability_def = obj.abilities[ability_index].clone();
-                mana_abilities::activate_mana_ability(
+                let wf = mana_abilities::activate_mana_ability(
                     state,
                     source_id,
                     *player,
@@ -1916,7 +2021,14 @@ fn apply_action(
                         convoke_mode: *convoke_mode,
                     },
                     None,
-                )?
+                )?;
+                // CR 605.1b: Process TapsForMana triggers inline during mana payment
+                // (same rationale as the TapLandForMana arm below).
+                if events.len() > events_before {
+                    let mana_events: Vec<_> = events[events_before..].to_vec();
+                    super::triggers::process_triggers(state, &mana_events);
+                }
+                wf
             } else {
                 return Err(EngineError::ActionNotAllowed(
                     "Only mana abilities can be activated during mana payment".to_string(),
@@ -1931,12 +2043,22 @@ fn apply_action(
             },
             GameAction::TapLandForMana { object_id },
         ) => {
+            let events_before = events.len();
             handle_tap_land_for_mana(state, object_id, &mut events)?;
             state
                 .lands_tapped_for_mana
                 .entry(state.priority_player)
                 .or_default()
                 .push(object_id);
+            // CR 605.1b: TapsForMana triggered mana abilities (Wild Growth, Vorinclex,
+            // Fertile Ground, Mana Flare class) must resolve inline when mana is
+            // produced during cost payment. The ManaPayment path does not flow through
+            // run_post_action_pipeline, so process triggers explicitly here so the
+            // bonus mana reaches the pool before the payment check.
+            if events.len() > events_before {
+                let mana_events: Vec<_> = events[events_before..].to_vec();
+                super::triggers::process_triggers(state, &mana_events);
+            }
             WaitingFor::ManaPayment {
                 player: *player,
                 convoke_mode: *convoke_mode,
@@ -2262,7 +2384,7 @@ fn apply_action(
         (
             WaitingFor::Priority { player },
             GameAction::ActivateNinjutsu {
-                ninjutsu_card_id,
+                ninjutsu_object_id,
                 creature_to_return,
             },
         ) => {
@@ -2270,7 +2392,7 @@ fn apply_action(
             super::keywords::activate_ninjutsu(
                 state,
                 p,
-                ninjutsu_card_id,
+                ninjutsu_object_id,
                 creature_to_return,
                 &mut events,
             )
@@ -2291,6 +2413,26 @@ fn apply_action(
         ) => {
             let p = *player;
             super::casting::handle_cast_spell_as_sneak(
+                state,
+                p,
+                hand_object,
+                card_id,
+                creature_to_return,
+                &mut events,
+            )?
+        }
+        // CR 702.188a: Web-slinging — cast a spell from hand by paying the
+        // Web-slinging cost and returning a tapped creature you control.
+        (
+            WaitingFor::Priority { player },
+            GameAction::CastSpellAsWebSlinging {
+                hand_object,
+                card_id,
+                creature_to_return,
+            },
+        ) => {
+            let p = *player;
+            super::casting::handle_cast_spell_as_web_slinging(
                 state,
                 p,
                 hand_object,
@@ -2377,6 +2519,7 @@ fn apply_action(
                 modal: None,
                 mode_abilities: vec![],
                 description: Some("Miracle — you may cast this card".to_string()),
+                may_trigger_origin: None,
             };
             super::triggers::push_pending_trigger_to_stack(state, trigger, &mut events);
 
@@ -2962,7 +3105,14 @@ pub(super) fn begin_pending_trigger_target_selection(
     // CR 700.2a: Modal trigger — prompt for mode selection before stack.
     if let Some(ref modal) = trigger.modal {
         if !trigger.mode_abilities.is_empty() {
-            let unavailable_modes = compute_unavailable_modes(state, trigger.source_id, modal);
+            let modal = modal_choice_for_player(
+                state,
+                trigger.controller,
+                trigger.source_id,
+                modal,
+                &crate::types::ability::SpellContext::default(),
+            );
+            let unavailable_modes = compute_unavailable_modes(state, trigger.source_id, &modal);
 
             // CR 700.2: All modes already chosen — ability cannot be put on the stack
             // without a mode selection. Clear pending trigger and skip.
@@ -2973,7 +3123,7 @@ pub(super) fn begin_pending_trigger_target_selection(
 
             return Ok(Some(WaitingFor::AbilityModeChoice {
                 player: trigger.controller,
-                modal: modal.clone(),
+                modal,
                 source_id: trigger.source_id,
                 mode_abilities: trigger.mode_abilities.clone(),
                 is_activated: false,
@@ -3246,6 +3396,7 @@ fn handle_play_land(
             if let Some(effect_def) = state.post_replacement_effect.take() {
                 state.post_replacement_source = None;
                 state.post_replacement_event_source = None;
+                state.post_replacement_event_target = None;
                 if let Some(next_waiting_for) = engine_replacement::apply_post_replacement_effect(
                     state,
                     &effect_def,
@@ -4294,8 +4445,9 @@ mod tests {
     use crate::game::game_object::{BackFaceData, RoomDoor};
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, Effect, ManaContribution, ManaProduction,
-        QuantityExpr, ResolvedAbility, TargetFilter, TriggerDefinition, TypedFilter,
+        AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect, GainLifePlayer,
+        ManaContribution, ManaProduction, QuantityExpr, ResolvedAbility, TargetFilter,
+        TriggerDefinition, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CardType;
     use crate::types::card_type::CoreType;
@@ -5411,6 +5563,158 @@ mod tests {
     }
 
     #[test]
+    fn vorinclex_mana_doubling_trigger_fires_on_tap() {
+        // Vorinclex, Voice of Hunger: "Whenever you tap a land for mana,
+        // add one mana of any type that land produced."
+        // The trigger is on Vorinclex (creature), not on the land itself.
+        // valid_card: Typed(Land), valid_target: Controller.
+        let mut state = setup_game_at_main_phase();
+
+        let forest = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&forest).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Forest".to_string());
+            obj.entered_battlefield_turn = Some(1);
+        }
+
+        let vorinclex = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Vorinclex, Voice of Hunger".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&vorinclex).unwrap();
+            obj.card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Creature);
+            obj.entered_battlefield_turn = Some(1);
+            // Trigger 1: mana doubling for your lands
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::TapsForMana)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::Mana {
+                            produced: ManaProduction::TriggerEventManaType,
+                            restrictions: vec![],
+                            grants: vec![],
+                            expiry: None,
+                            target: None,
+                        },
+                    ))
+                    .valid_card(TargetFilter::Typed(TypedFilter::land()))
+                    .valid_target(TargetFilter::Controller),
+            );
+        }
+
+        // Tap the Forest — should produce {G} (land) + {G} (Vorinclex doubler).
+        apply_as_current(&mut state, GameAction::TapLandForMana { object_id: forest }).unwrap();
+        assert_eq!(
+            state.players[0]
+                .mana_pool
+                .count_color(crate::types::mana::ManaType::Green),
+            2,
+            "Vorinclex must double land mana: {{G}} (land) + {{G}} (trigger)"
+        );
+    }
+
+    #[test]
+    fn vorinclex_cant_untap_trigger_fires_on_opponent_tap() {
+        // Vorinclex, Voice of Hunger: "Whenever an opponent taps a land for
+        // mana, that land doesn't untap during its controller's next untap step."
+        // The trigger is a GenericEffect (CantUntap) that goes on the stack.
+        use crate::types::ability::{
+            ContinuousModification, ControllerRef, Duration, PlayerScope, StaticDefinition,
+        };
+        let mut state = setup_game_at_main_phase();
+        // Set P1 as active player so they have priority to tap
+        state.active_player = PlayerId(1);
+        state.priority_player = PlayerId(1);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(1),
+        };
+
+        let opp_forest = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&opp_forest).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Forest".to_string());
+            obj.entered_battlefield_turn = Some(1);
+        }
+
+        let vorinclex = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Vorinclex, Voice of Hunger".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let duration = Duration::UntilNextUntapStepOf {
+                player: PlayerScope::Controller,
+            };
+            let obj = state.objects.get_mut(&vorinclex).unwrap();
+            obj.card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Creature);
+            obj.entered_battlefield_turn = Some(1);
+            // Trigger 2: opponent lands can't untap
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::TapsForMana)
+                    .execute(
+                        AbilityDefinition::new(
+                            AbilityKind::Database,
+                            Effect::GenericEffect {
+                                static_abilities: vec![StaticDefinition::new(
+                                    StaticMode::CantUntap,
+                                )
+                                .affected(TargetFilter::ParentTarget)
+                                .modifications(vec![ContinuousModification::AddStaticMode {
+                                    mode: StaticMode::CantUntap,
+                                }])],
+                                duration: Some(duration.clone()),
+                                target: Some(TargetFilter::TriggeringSource),
+                            },
+                        )
+                        .duration(duration),
+                    )
+                    .valid_card(TargetFilter::Typed(
+                        TypedFilter::land().controller(ControllerRef::Opponent),
+                    )),
+            );
+        }
+
+        // Opponent taps the Forest
+        apply(
+            &mut state,
+            PlayerId(1),
+            GameAction::TapLandForMana {
+                object_id: opp_forest,
+            },
+        )
+        .unwrap();
+        // The trigger should have been placed on the stack.
+        assert!(
+            !state.stack.is_empty() || !state.transient_continuous_effects.is_empty(),
+            "Vorinclex's CantUntap trigger must fire when opponent taps land"
+        );
+    }
+
+    #[test]
     fn untap_land_for_mana_aura_bonus_helper_lists_attached_aura() {
         // Sanity check on the aura-source enumerator that
         // `handle_untap_land_for_mana` consults: it must include the Wild
@@ -6117,6 +6421,114 @@ mod tests {
     }
 
     #[test]
+    fn brainstorm_resolves_draw_then_put_two_cards_on_top() {
+        use crate::types::ability::{ControllerRef, FilterProp, LibraryPosition};
+        use crate::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+
+        let mut state = setup_game_at_main_phase();
+        let brainstorm = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Brainstorm".to_string(),
+            Zone::Hand,
+        );
+        let first_hand = create_object(
+            &mut state,
+            CardId(20),
+            PlayerId(0),
+            "First Hand Card".to_string(),
+            Zone::Hand,
+        );
+        let second_hand = create_object(
+            &mut state,
+            CardId(21),
+            PlayerId(0),
+            "Second Hand Card".to_string(),
+            Zone::Hand,
+        );
+        for i in 0..3 {
+            create_object(
+                &mut state,
+                CardId(100 + i),
+                PlayerId(0),
+                format!("Library Card {i}"),
+                Zone::Library,
+            );
+        }
+
+        let mut brainstorm_ability = make_draw_ability(3);
+        brainstorm_ability.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::Typed(
+                    TypedFilter::card()
+                        .controller(ControllerRef::You)
+                        .properties(vec![FilterProp::InZone { zone: Zone::Hand }]),
+                ),
+                count: QuantityExpr::Fixed { value: 2 },
+                position: LibraryPosition::Top,
+            },
+        )));
+        {
+            let obj = state.objects.get_mut(&brainstorm).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            Arc::make_mut(&mut obj.abilities).push(brainstorm_ability);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 0,
+            };
+        }
+        state.players[0].mana_pool.add(ManaUnit {
+            color: ManaType::Blue,
+            source_id: ObjectId(0),
+            snow: false,
+            restrictions: Vec::new(),
+            grants: vec![],
+            expiry: None,
+        });
+
+        apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: brainstorm,
+                card_id: CardId(10),
+                targets: vec![],
+            },
+        )
+        .unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        let result = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+
+        assert!(matches!(
+            result.waiting_for,
+            WaitingFor::EffectZoneChoice {
+                player: PlayerId(0),
+                count: 2,
+                effect_kind: EffectKind::PutAtLibraryPosition,
+                zone: Zone::Hand,
+                ..
+            }
+        ));
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![first_hand, second_hand],
+            },
+        )
+        .unwrap();
+
+        assert!(matches!(result.waiting_for, WaitingFor::Priority { .. }));
+        assert!(state.stack.is_empty());
+        assert!(state.players[0].graveyard.contains(&brainstorm));
+        assert_eq!(state.players[0].library[0], first_hand);
+        assert_eq!(state.players[0].library[1], second_hand);
+        assert!(!state.players[0].hand.contains(&first_hand));
+        assert!(!state.players[0].hand.contains(&second_hand));
+    }
+
+    #[test]
     fn fizzle_target_removed_before_resolution() {
         use crate::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 
@@ -6716,6 +7128,8 @@ mod tests {
             distribute: None,
             origin_zone: crate::types::zones::Zone::Hand,
             additional_cost_flow: None,
+            deferred_modal_choice: None,
+            declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
         }));
@@ -6909,6 +7323,174 @@ mod tests {
                 .mana_pool
                 .count_color(crate::types::mana::ManaType::Green),
             1
+        );
+    }
+
+    #[test]
+    fn non_mana_activation_tap_creatures_cost_prompts_then_pays() {
+        let mut state = setup_game_at_main_phase();
+
+        let lathril = create_object(
+            &mut state,
+            CardId(200),
+            PlayerId(0),
+            "Lathril, Blade of the Elves".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&lathril).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Elf".to_string());
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 10 },
+                        player: GainLifePlayer::Controller,
+                    },
+                )
+                .cost(AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::Tap,
+                        AbilityCost::TapCreatures {
+                            count: 2,
+                            filter: TypedFilter::creature()
+                                .with_type(TypeFilter::Subtype("Elf".to_string()))
+                                .controller(ControllerRef::You)
+                                .into(),
+                        },
+                    ],
+                }),
+            );
+        }
+
+        let elf_a = create_object(
+            &mut state,
+            CardId(201),
+            PlayerId(0),
+            "Elf A".to_string(),
+            Zone::Battlefield,
+        );
+        let elf_b = create_object(
+            &mut state,
+            CardId(202),
+            PlayerId(0),
+            "Elf B".to_string(),
+            Zone::Battlefield,
+        );
+        let non_elf = create_object(
+            &mut state,
+            CardId(203),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        for (id, subtype) in [(elf_a, "Elf"), (elf_b, "Elf"), (non_elf, "Bear")] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push(subtype.to_string());
+        }
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: lathril,
+                ability_index: 0,
+            },
+        )
+        .unwrap();
+
+        match result.waiting_for {
+            WaitingFor::TapCreaturesForSpellCost {
+                player,
+                count,
+                creatures,
+                ..
+            } => {
+                assert_eq!(player, PlayerId(0));
+                assert_eq!(count, 2);
+                assert_eq!(creatures, vec![elf_a, elf_b]);
+            }
+            other => panic!("expected TapCreaturesForSpellCost, got {other:?}"),
+        }
+        assert!(!state.objects.get(&lathril).unwrap().tapped);
+
+        apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![elf_a, elf_b],
+            },
+        )
+        .unwrap();
+
+        assert!(state.objects.get(&lathril).unwrap().tapped);
+        assert!(state.objects.get(&elf_a).unwrap().tapped);
+        assert!(state.objects.get(&elf_b).unwrap().tapped);
+        assert!(!state.objects.get(&non_elf).unwrap().tapped);
+        assert_eq!(state.stack.len(), 1);
+    }
+
+    #[test]
+    fn non_mana_activation_tap_creatures_cost_rejects_tapped_source_before_prompt() {
+        let mut state = setup_game_at_main_phase();
+
+        let source = create_object(
+            &mut state,
+            CardId(204),
+            PlayerId(0),
+            "Tapped Elf Caller".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Elf".to_string());
+            obj.tapped = true;
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        player: GainLifePlayer::Controller,
+                    },
+                )
+                .cost(AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::Tap,
+                        AbilityCost::TapCreatures {
+                            count: 1,
+                            filter: TypedFilter::creature()
+                                .with_type(TypeFilter::Subtype("Elf".to_string()))
+                                .controller(ControllerRef::You)
+                                .into(),
+                        },
+                    ],
+                }),
+            );
+        }
+
+        let elf = create_object(
+            &mut state,
+            CardId(205),
+            PlayerId(0),
+            "Elf".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&elf).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.card_types.subtypes.push("Elf".to_string());
+
+        let err = apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 0,
+            },
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(err, EngineError::ActionNotAllowed(message) if message == "Cannot activate tap ability: permanent is tapped")
         );
     }
 
@@ -7740,6 +8322,96 @@ mod tests {
             }
         )));
     }
+
+    // CR 402.3: Hand order has no game-rules significance — ReorderHand is a
+    // display-preference update only.
+    #[test]
+    fn reorder_hand_replaces_hand_order() {
+        let mut state = setup_game_at_main_phase();
+        let p0 = PlayerId(0);
+
+        let a = ObjectId(100);
+        let b = ObjectId(101);
+        let c = ObjectId(102);
+        state.players[0].hand = crate::im::Vector::from(vec![a, b, c]);
+
+        let result = apply(
+            &mut state,
+            p0,
+            GameAction::ReorderHand {
+                order: vec![c, a, b],
+            },
+        )
+        .expect("reorder should succeed");
+
+        assert!(result.events.is_empty(), "reorder must emit no events");
+        assert_eq!(
+            state.players[0].hand.iter().copied().collect::<Vec<_>>(),
+            vec![c, a, b],
+        );
+    }
+
+    #[test]
+    fn reorder_hand_rejects_non_permutation() {
+        let mut state = setup_game_at_main_phase();
+        let p0 = PlayerId(0);
+        let a = ObjectId(100);
+        let b = ObjectId(101);
+        state.players[0].hand = crate::im::Vector::from(vec![a, b]);
+
+        // Wrong length.
+        let err = apply(&mut state, p0, GameAction::ReorderHand { order: vec![a] })
+            .expect_err("wrong length must error");
+        assert!(matches!(err, EngineError::InvalidAction(_)));
+
+        // Right length, wrong contents.
+        let stranger = ObjectId(999);
+        let err = apply(
+            &mut state,
+            p0,
+            GameAction::ReorderHand {
+                order: vec![a, stranger],
+            },
+        )
+        .expect_err("stranger id must error");
+        assert!(matches!(err, EngineError::InvalidAction(_)));
+
+        // Hand unchanged after rejected calls.
+        assert_eq!(
+            state.players[0].hand.iter().copied().collect::<Vec<_>>(),
+            vec![a, b],
+        );
+    }
+
+    #[test]
+    fn reorder_hand_succeeds_while_opponent_holds_priority() {
+        // Verifies the `check_actor_authorization` whitelist: P0 must be able
+        // to reorder their own hand even though P1 is the priority player and
+        // holds the WaitingFor::Priority slot.
+        let mut state = setup_game_at_main_phase();
+        state.priority_player = PlayerId(1);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(1),
+        };
+
+        let a = ObjectId(200);
+        let b = ObjectId(201);
+        state.players[0].hand = crate::im::Vector::from(vec![a, b]);
+
+        apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::ReorderHand { order: vec![b, a] },
+        )
+        .expect("non-priority actor reordering own hand must succeed");
+
+        assert_eq!(
+            state.players[0].hand.iter().copied().collect::<Vec<_>>(),
+            vec![b, a],
+        );
+        // Priority hasn't moved — reorder doesn't transition WaitingFor.
+        assert_eq!(state.priority_player, PlayerId(1));
+    }
 }
 
 #[cfg(test)]
@@ -7748,8 +8420,8 @@ mod trigger_target_tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, ControllerRef, Effect, GainLifePlayer, ModalChoice,
-        ModalSelectionConstraint, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
-        TypedFilter,
+        ModalSelectionConstraint, QuantityExpr, ResolvedAbility, StaticCondition, TargetFilter,
+        TargetRef, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::game_state::TargetSelectionConstraint;
@@ -7843,6 +8515,7 @@ mod trigger_target_tests {
             modal: None,
             mode_abilities: vec![],
             description: None,
+            may_trigger_origin: None,
         });
 
         let legal_targets = vec![TargetRef::Object(target1), TargetRef::Object(target2)];
@@ -7932,6 +8605,7 @@ mod trigger_target_tests {
             modal: None,
             mode_abilities: vec![],
             description: None,
+            may_trigger_origin: None,
         });
 
         state.waiting_for = WaitingFor::TriggerTargetSelection {
@@ -8000,6 +8674,7 @@ mod trigger_target_tests {
                 },
             )],
             description: Some("Choose two target players".to_string()),
+            may_trigger_origin: None,
         });
         state.waiting_for = WaitingFor::AbilityModeChoice {
             player: PlayerId(0),
@@ -8105,6 +8780,7 @@ mod trigger_target_tests {
                 ),
             ],
             description: Some("Whenever you cast your second spell each turn".to_string()),
+            may_trigger_origin: None,
         });
         state.waiting_for = WaitingFor::AbilityModeChoice {
             player: PlayerId(0),
@@ -8164,6 +8840,92 @@ mod trigger_target_tests {
     }
 
     #[test]
+    fn triggered_commander_modal_cap_uses_controller_board_state() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = ObjectId(22);
+        state.pending_trigger = Some(crate::game::triggers::PendingTrigger {
+            source_id,
+            controller: PlayerId(0),
+            condition: None,
+            ability: ResolvedAbility::new(
+                Effect::Unimplemented {
+                    name: "modal_placeholder".to_string(),
+                    description: None,
+                },
+                vec![],
+                source_id,
+                PlayerId(0),
+            ),
+            timestamp: 1,
+            target_constraints: Vec::new(),
+            trigger_event: None,
+            modal: Some(ModalChoice {
+                min_choices: 1,
+                max_choices: 2,
+                mode_count: 2,
+                mode_descriptions: vec![
+                    "Create a token.".to_string(),
+                    "Put a counter.".to_string(),
+                ],
+                constraints: vec![ModalSelectionConstraint::ConditionalMaxChoices {
+                    condition: crate::types::ability::ModalSelectionCondition::Static {
+                        condition: StaticCondition::ControlsCommander,
+                    },
+                    max_choices: 2,
+                    otherwise_max_choices: 1,
+                }],
+                ..Default::default()
+            }),
+            mode_abilities: vec![
+                AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        player: GainLifePlayer::Controller,
+                    },
+                ),
+                AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                ),
+            ],
+            description: Some("Choose one or both with commander".to_string()),
+            may_trigger_origin: None,
+        });
+
+        let waiting = begin_pending_trigger_target_selection(&mut state)
+            .unwrap()
+            .expect("modal choice should be required");
+        match waiting {
+            WaitingFor::AbilityModeChoice { modal, .. } => {
+                assert_eq!(modal.max_choices, 1);
+            }
+            other => panic!("expected AbilityModeChoice, got {other:?}"),
+        }
+
+        let commander_id = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(0),
+            "Commander".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&commander_id).unwrap().is_commander = true;
+        let waiting = begin_pending_trigger_target_selection(&mut state)
+            .unwrap()
+            .expect("modal choice should still be required");
+        match waiting {
+            WaitingFor::AbilityModeChoice { modal, .. } => {
+                assert_eq!(modal.max_choices, 2);
+            }
+            other => panic!("expected AbilityModeChoice, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn trigger_target_selection_enforces_different_player_constraint() {
         let mut state = GameState::new_two_player(42);
         state.active_player = PlayerId(0);
@@ -8199,6 +8961,7 @@ mod trigger_target_tests {
             modal: None,
             mode_abilities: vec![],
             description: None,
+            may_trigger_origin: None,
         });
         state.waiting_for = WaitingFor::TriggerTargetSelection {
             player: PlayerId(0),
@@ -8315,6 +9078,7 @@ mod trigger_target_tests {
             modal: None,
             mode_abilities: vec![],
             description: None,
+            may_trigger_origin: None,
         });
         state.waiting_for = WaitingFor::TriggerTargetSelection {
             player: PlayerId(0),
@@ -8405,6 +9169,7 @@ mod trigger_target_tests {
                 },
             )],
             description: Some("Choose different target players".to_string()),
+            may_trigger_origin: None,
         });
         state.waiting_for = WaitingFor::AbilityModeChoice {
             player: PlayerId(0),
@@ -8504,6 +9269,7 @@ mod trigger_target_tests {
                 ),
             ],
             description: None,
+            may_trigger_origin: None,
         });
 
         // Call the private function via the engine path.
@@ -9186,6 +9952,7 @@ mod phase_trigger_regression_tests {
         UnlessCost, UnlessPayModifier,
     };
     use crate::types::card_type::CoreType;
+    use crate::types::format::FormatConfig;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
     use crate::types::player::PlayerId;
@@ -9202,6 +9969,16 @@ mod phase_trigger_regression_tests {
             player: PlayerId(0),
         };
         state
+    }
+
+    fn draw_ability(count: i32) -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: count },
+                target: TargetFilter::Controller,
+            },
+        )
     }
 
     fn draw_that_many(source_id: ObjectId, controller: PlayerId) -> ResolvedAbility {
@@ -10177,6 +10954,7 @@ mod phase_trigger_regression_tests {
             player: PlayerId(0),
             source_id,
             description: None,
+            may_trigger_key: None,
         };
 
         let result = apply_as_current(
@@ -10282,6 +11060,65 @@ mod phase_trigger_regression_tests {
             }
         ));
         assert!(state.pending_continuation.is_some());
+    }
+
+    #[test]
+    fn unless_discard_payment_filters_eligible_hand_cards() {
+        let mut state = setup_game_at_main_phase();
+        let source_id = create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let land_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Land Card".to_string(),
+            Zone::Hand,
+        );
+        let creature_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Creature Card".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&land_id)
+            .expect("land object")
+            .card_types
+            .core_types = vec![CoreType::Land];
+        state
+            .objects
+            .get_mut(&creature_id)
+            .expect("creature object")
+            .card_types
+            .core_types = vec![CoreType::Creature];
+
+        state.waiting_for = WaitingFor::UnlessPayment {
+            player: PlayerId(0),
+            cost: UnlessCost::DiscardCard {
+                filter: Some(TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Land],
+                    controller: None,
+                    properties: vec![],
+                })),
+            },
+            pending_effect: Box::new(draw_that_many(source_id, PlayerId(0))),
+            trigger_event: None,
+            effect_description: None,
+        };
+
+        let result = apply_as_current(&mut state, GameAction::PayUnlessCost { pay: true }).unwrap();
+
+        match result.waiting_for {
+            WaitingFor::WardDiscardChoice { cards, .. } => assert_eq!(cards, vec![land_id]),
+            other => panic!("expected filtered WardDiscardChoice, got {other:?}"),
+        }
     }
 
     #[test]
@@ -10422,6 +11259,269 @@ mod phase_trigger_regression_tests {
         assert!(state.players[0].graveyard.contains(&obj_id));
         assert_eq!(state.players[0].life, 22);
         assert_eq!(state.last_effect_count, Some(1));
+    }
+
+    #[test]
+    fn choose_one_of_enters_branch_choice_state() {
+        let mut state = setup_game_at_main_phase();
+        let source_id = ObjectId(100);
+        let ability = ResolvedAbility::new(
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::Controller,
+                branches: vec![draw_ability(1), draw_ability(2)],
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        effects::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ChooseOneOfBranch {
+                player: PlayerId(0),
+                controller: PlayerId(0),
+                source_id: ObjectId(100),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn choose_one_of_branch_resolves_selected_branch_with_original_controller() {
+        let mut state = setup_game_at_main_phase();
+        let source_id = ObjectId(100);
+        let branch_gain = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                player: GainLifePlayer::Controller,
+            },
+        );
+        let branch_lose = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: None,
+            },
+        );
+        state.waiting_for = WaitingFor::ChooseOneOfBranch {
+            player: PlayerId(1),
+            controller: PlayerId(0),
+            source_id,
+            branches: vec![branch_gain, branch_lose],
+            branch_descriptions: vec!["Gain 3 life.".to_string(), "Lose 3 life.".to_string()],
+            parent_targets: vec![],
+            context: Default::default(),
+            remaining_players: vec![],
+        };
+
+        apply_as_current(&mut state, GameAction::ChooseBranch { index: 0 }).unwrap();
+
+        assert_eq!(
+            state.players[0].life, 23,
+            "branch text using controller must resolve for original controller"
+        );
+        assert_eq!(state.players[1].life, 20);
+    }
+
+    #[test]
+    fn choose_one_of_each_opponent_prompts_apnap_and_branch_targets_faced_player() {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(1);
+        state.priority_player = PlayerId(1);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(1),
+        };
+        let source_id = ObjectId(100);
+        let branch_target_player_loses_life = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: Some(TargetFilter::Player),
+            },
+        );
+        let ability = ResolvedAbility::new(
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::Opponent,
+                branches: vec![branch_target_player_loses_life.clone(), draw_ability(1)],
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        effects::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ChooseOneOfBranch {
+                player: PlayerId(1),
+                remaining_players: ref rest,
+                ..
+            } if rest == &vec![PlayerId(2)]
+        ));
+
+        apply_as_current(&mut state, GameAction::ChooseBranch { index: 0 }).unwrap();
+
+        assert_eq!(state.players[1].life, 19);
+        assert_eq!(state.players[2].life, 20);
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ChooseOneOfBranch {
+                player: PlayerId(2),
+                remaining_players: ref rest,
+                ..
+            } if rest.is_empty()
+        ));
+
+        apply_as_current(&mut state, GameAction::ChooseBranch { index: 0 }).unwrap();
+
+        assert_eq!(state.players[1].life, 19);
+        assert_eq!(state.players[2].life, 19);
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    }
+
+    #[test]
+    fn choose_one_of_scoped_player_sacrifice_prompts_faced_opponent() {
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let source_id = ObjectId(100);
+        let own_creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Controller Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let opp_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opponent Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let opp_creature_b = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Second Opponent Creature".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [own_creature, opp_creature, opp_creature_b] {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+        let sacrifice_branch = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Sacrifice {
+                target: TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::ScopedPlayer),
+                ),
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+        );
+        let ability = ResolvedAbility::new(
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::Opponent,
+                branches: vec![sacrifice_branch, draw_ability(1)],
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        effects::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        apply_as_current(&mut state, GameAction::ChooseBranch { index: 0 }).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::EffectZoneChoice { player, cards, .. } => {
+                assert_eq!(*player, PlayerId(1));
+                assert_eq!(cards, &vec![opp_creature, opp_creature_b]);
+                assert!(!cards.contains(&own_creature));
+            }
+            other => panic!("expected EffectZoneChoice for faced opponent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn choose_one_of_controller_token_branch_ignores_faced_opponent() {
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let source_id = ObjectId(100);
+        let sacrifice_branch = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Sacrifice {
+                target: TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::ScopedPlayer),
+                ),
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+        );
+        let token_branch = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Token {
+                name: "b_3_3_a_dalek_menace".to_string(),
+                power: crate::types::ability::PtValue::Fixed(0),
+                toughness: crate::types::ability::PtValue::Fixed(0),
+                types: vec![],
+                colors: vec![],
+                keywords: vec![],
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                owner: TargetFilter::Controller,
+                attach_to: None,
+                enters_attacking: false,
+                supertypes: vec![],
+                static_abilities: vec![],
+                enter_with_counters: vec![],
+            },
+        );
+        let ability = ResolvedAbility::new(
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::Opponent,
+                branches: vec![sacrifice_branch, token_branch],
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        effects::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        apply_as_current(&mut state, GameAction::ChooseBranch { index: 1 }).unwrap();
+
+        let token = state
+            .battlefield
+            .iter()
+            .filter_map(|id| state.objects.get(id))
+            .find(|object| object.is_token)
+            .expect("expected Dalek token");
+        assert_eq!(token.controller, PlayerId(0));
+        assert_eq!(token.owner, PlayerId(0));
     }
 
     #[test]

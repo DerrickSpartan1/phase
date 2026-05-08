@@ -56,9 +56,14 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
         | (WaitingFor::Priority { .. }, GameAction::TurnFaceUp { object_id })
         | (WaitingFor::Priority { .. }, GameAction::PlayFaceDown { object_id, .. })
         | (WaitingFor::Priority { .. }, GameAction::TapLandForMana { object_id })
-        | (WaitingFor::Priority { .. }, GameAction::UntapLandForMana { object_id }) => {
-            !state.objects.contains_key(object_id)
-        }
+        | (WaitingFor::Priority { .. }, GameAction::UntapLandForMana { object_id })
+        | (
+            WaitingFor::Priority { .. },
+            GameAction::ActivateNinjutsu {
+                ninjutsu_object_id: object_id,
+                ..
+            },
+        ) => !state.objects.contains_key(object_id),
         (WaitingFor::Priority { .. }, GameAction::ActivateAbility { source_id, .. })
         | (
             WaitingFor::Priority { .. },
@@ -127,6 +132,9 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
         (WaitingFor::NamedChoice { options, .. }, GameAction::ChooseOption { choice }) => {
             !options.is_empty() && !options.iter().any(|option| option == choice)
         }
+        (WaitingFor::ChooseOneOfBranch { branches, .. }, GameAction::ChooseBranch { index }) => {
+            *index >= branches.len()
+        }
         (
             WaitingFor::DamageSourceChoice { options, .. },
             GameAction::ChooseDamageSource { source },
@@ -148,6 +156,13 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
         | (WaitingFor::OptionalCostChoice { .. }, GameAction::DecideOptionalCost { .. })
         | (WaitingFor::DefilerPayment { .. }, GameAction::DecideOptionalCost { .. })
         | (WaitingFor::OptionalEffectChoice { .. }, GameAction::DecideOptionalEffect { .. })
+        | (
+            WaitingFor::OptionalEffectChoice {
+                may_trigger_key: Some(_),
+                ..
+            },
+            GameAction::DecideOptionalEffectAndRemember { .. },
+        )
         | (WaitingFor::OpponentMayChoice { .. }, GameAction::DecideOptionalEffect { .. })
         | (WaitingFor::TributeChoice { .. }, GameAction::DecideOptionalEffect { .. })
         | (WaitingFor::UnlessPayment { .. }, GameAction::PayUnlessCost { .. })
@@ -156,7 +171,8 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
         | (WaitingFor::ModalFaceChoice { .. }, GameAction::ChooseModalFace { .. })
         | (WaitingFor::WarpCostChoice { .. }, GameAction::ChooseWarpCost { .. })
         | (WaitingFor::EvokeCostChoice { .. }, GameAction::ChooseEvokeCost { .. })
-        | (WaitingFor::OverloadCostChoice { .. }, GameAction::ChooseOverloadCost { .. }) => false,
+        | (WaitingFor::OverloadCostChoice { .. }, GameAction::ChooseOverloadCost { .. })
+        | (WaitingFor::BestowCostChoice { .. }, GameAction::ChooseBestowCost { .. }) => false,
         // CR 107.1c + CR 107.14: Submitted amount must fall within [min, max].
         (WaitingFor::PayAmountChoice { min, max, .. }, GameAction::SubmitPayAmount { amount }) => {
             *amount < *min || *amount > *max
@@ -312,6 +328,19 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
         ) => {
             let exact = if *up_to { None } else { Some(*count) };
             selection_mismatch(chosen, cards, exact) || (*up_to && chosen.len() > *count)
+        }
+        (
+            WaitingFor::DrawnThisTurnTopdeckChoice {
+                cards,
+                count,
+                min_count,
+                ..
+            },
+            GameAction::SelectCards { cards: chosen },
+        ) => {
+            selection_mismatch(chosen, cards, None)
+                || chosen.len() > *count
+                || chosen.len() < *min_count
         }
         (
             WaitingFor::DigChoice {

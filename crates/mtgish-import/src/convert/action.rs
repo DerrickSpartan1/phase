@@ -242,7 +242,7 @@ fn rewrite_bound_x_in_quantity_expr(expr: &mut QuantityExpr, binding: &QuantityE
             1
         }
         QuantityExpr::Fixed { .. } | QuantityExpr::Ref { .. } => 0,
-        QuantityExpr::HalfRounded { inner, .. }
+        QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::Offset { inner, .. }
         | QuantityExpr::Multiply { inner, .. }
         | QuantityExpr::UpTo { max: inner } => rewrite_bound_x_in_quantity_expr(inner, binding),
@@ -332,6 +332,7 @@ fn rewrite_bound_x_in_ability_cost(cost: &mut AbilityCost, binding: &QuantityExp
         | AbilityCost::Reveal { .. }
         | AbilityCost::Waterbend { .. }
         | AbilityCost::NinjutsuFamily { .. }
+        | AbilityCost::EffectCost { .. }
         | AbilityCost::Unimplemented { .. } => 0,
     }
 }
@@ -519,7 +520,7 @@ fn rewrite_bound_x_in_effect(effect: &mut Effect, binding: &QuantityExpr) -> usi
             .iter_mut()
             .map(|card| rewrite_bound_x_in_quantity_expr(&mut card.count, binding))
             .sum(),
-        Effect::ChooseOneOf { branches } => branches
+        Effect::ChooseOneOf { branches, .. } => branches
             .iter_mut()
             .map(|branch| rewrite_bound_x_in_ability_definition(branch, binding))
             .sum(),

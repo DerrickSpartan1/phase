@@ -176,6 +176,7 @@ pub const ORDERING_MANIFEST: &[((&str, &str), OrderingClass)] = &[
         OrderingClass::SetEquivalent,
     ),
     // ----- FilterProp variants with embedded Vec<...> -----
+    (("FilterProp", "costs"), OrderingClass::SetEquivalent),
     (("FilterProp", "kinds"), OrderingClass::SetEquivalent),
     (("FilterProp", "props"), OrderingClass::SetEquivalent),
     (("FilterProp", "zones"), OrderingClass::SetEquivalent),
@@ -245,6 +246,7 @@ pub const ORDERING_MANIFEST: &[((&str, &str), OrderingClass)] = &[
         ("Effect", "enter_with_counters"),
         OrderingClass::SetEquivalent,
     ),
+    (("Effect", "followed_by"), OrderingClass::OrderSignificant),
     (("Effect", "extra_keywords"), OrderingClass::SetEquivalent),
     (("Effect", "grants"), OrderingClass::SetEquivalent),
     (("Effect", "keywords"), OrderingClass::SetEquivalent),

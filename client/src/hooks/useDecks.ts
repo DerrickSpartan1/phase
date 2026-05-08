@@ -23,10 +23,14 @@ export interface DeckEntry {
 
 export type DeckMap = Record<string, DeckEntry>;
 
+export function isCommanderPreconDeck(deck: DeckEntry): boolean {
+  return deck.type === "Commander Deck";
+}
+
 let cached: DeckMap | null = null;
 let fetchPromise: Promise<DeckMap | null> | null = null;
 
-function fetchDecks(): Promise<DeckMap | null> {
+export function loadPreconDeckMap(): Promise<DeckMap | null> {
   if (!fetchPromise) {
     fetchPromise = fetch(__DECKS_URL__)
       .then((res) => (res.ok ? (res.json() as Promise<DeckMap>) : null))
@@ -51,7 +55,7 @@ export function useDecks(): DeckMap | null {
 
   useEffect(() => {
     if (cached) return;
-    fetchDecks().then((d) => { if (d) setDecks(d); });
+    loadPreconDeckMap().then((d) => { if (d) setDecks(d); });
   }, []);
 
   return decks;

@@ -6,14 +6,16 @@
 //! (partial parses become Unimplemented).
 
 use nom::IResult;
-use nom_language::error::VerboseError;
 
 use crate::types::ability::Effect;
 
-/// Standard result type for all Oracle text parser combinators.
-/// Uses `VerboseError` for error chain accumulation across branches,
-/// enabling detailed diagnostics when a combinator chain fails.
-pub type OracleResult<'a, O> = IResult<&'a str, O, VerboseError<&'a str>>;
+pub type OracleError<'a> = nom::error::Error<&'a str>;
+
+pub type OracleResult<'a, O> = IResult<&'a str, O, OracleError<'a>>;
+
+pub fn oracle_err(input: &str) -> nom::Err<OracleError<'_>> {
+    nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Fail))
+}
 
 /// Convert a nom parse attempt into an `Effect`, returning `Effect::Unimplemented`
 /// with error trace when all branches fail (D-12) or when input is not fully
@@ -27,21 +29,15 @@ where
     F: FnMut(&'a str) -> OracleResult<'a, Effect>,
 {
     match parser(input) {
-        Ok(("", effect)) => effect, // Fully consumed — success
-        Ok((rest, _)) => {
-            // D-13: partial parse = entire line is Unimplemented
-            Effect::Unimplemented {
-                name: "partial_parse".into(),
-                description: Some(format!("Unparsed remainder: {}", truncate(rest, 80))),
-            }
-        }
-        Err(nom::Err::Error(e) | nom::Err::Failure(e)) => {
-            // D-12: emit Unimplemented with VerboseError trace
-            Effect::Unimplemented {
-                name: "parse_failed".into(),
-                description: Some(format_verbose_error(input, &e)),
-            }
-        }
+        Ok(("", effect)) => effect,
+        Ok((rest, _)) => Effect::Unimplemented {
+            name: "partial_parse".into(),
+            description: Some(format!("Unparsed remainder: {}", truncate(rest, 80))),
+        },
+        Err(nom::Err::Error(e) | nom::Err::Failure(e)) => Effect::Unimplemented {
+            name: "parse_failed".into(),
+            description: Some(format!("at '{}': {:?}", truncate(e.input, 80), e.code)),
+        },
         Err(nom::Err::Incomplete(_)) => Effect::Unimplemented {
             name: "incomplete".into(),
             description: Some(format!("Incomplete input: {}", truncate(input, 80))),
@@ -49,23 +45,10 @@ where
     }
 }
 
-/// Format a `VerboseError` into a human-readable string showing which branches
-/// were attempted and where they failed.
-fn format_verbose_error(input: &str, error: &VerboseError<&str>) -> String {
-    nom_language::error::convert_error(input, error.clone())
-}
-
-/// Adapt an `Option`-returning parser into a nom combinator for use in `alt()` chains.
-///
-/// When the parser returns `Some(effect)`, this produces `Ok(("", effect))` (full consumption).
-/// When it returns `None`, this produces a nom `Error` with a context label so that
-/// `VerboseError` traces show which branch was attempted.
-pub fn option_to_nom<'a>(label: &'static str, result: Option<Effect>) -> OracleResult<'a, Effect> {
+pub fn option_to_nom<'a>(_label: &'static str, result: Option<Effect>) -> OracleResult<'a, Effect> {
     match result {
         Some(effect) => Ok(("", effect)),
-        None => Err(nom::Err::Error(VerboseError {
-            errors: vec![("", nom_language::error::VerboseErrorKind::Context(label))],
-        })),
+        None => Err(oracle_err("")),
     }
 }
 

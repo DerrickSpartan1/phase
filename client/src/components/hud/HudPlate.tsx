@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import { motion, useReducedMotion } from "framer-motion";
 
 import { UnderAttackOverlay } from "./UnderAttackOverlay.tsx";
@@ -23,6 +23,8 @@ interface HudPlateProps {
    *  "it's my turn AND I'm under attack" stays legible. Motion suppressed
    *  under prefers-reduced-motion. */
   underAttack?: boolean;
+  /** Planeswalker art crop URL for the player avatar. */
+  avatarUrl?: string | null;
 }
 
 const TONE_CLASSES: Record<HudTone, string> = {
@@ -61,17 +63,18 @@ export function HudPlate({
   active = false,
   seatColor,
   underAttack = false,
+  avatarUrl,
 }: HudPlateProps) {
   const Component = onClick ? "button" : "div";
   const shouldReduceMotion = useReducedMotion();
   const activeRing = active ? ` ${ACTIVE_RING_CLASSES[tone]} ring-offset-2 ring-offset-black/40` : "";
   const [pulseLo, pulseHi] = ACTIVE_PULSE_RGBA[tone];
 
-  return (
+  const plate = (
     <Component
       type={onClick ? "button" : undefined}
       onClick={onClick}
-      className={`group relative inline-flex max-w-full items-center gap-2 rounded-[18px] border px-2.5 py-1.5 backdrop-blur-xl transition-all duration-200 ${TONE_CLASSES[tone]}${activeRing} ${
+      className={`group relative inline-flex max-w-full items-center gap-2 rounded-xl border px-1.5 py-1 backdrop-blur-xl transition-all duration-200 lg:gap-2.5 lg:rounded-[18px] lg:px-2.5 lg:py-1.5 ${TONE_CLASSES[tone]}${activeRing} ${
         onClick ? "cursor-pointer hover:-translate-y-0.5 hover:border-white/30" : ""
       }`}
     >
@@ -93,8 +96,6 @@ export function HudPlate({
           }}
         />
       )}
-      {/* Under-attack overlay — layered atop the active-turn pulse so "my
-          turn + I'm being attacked" renders both signals. */}
       {underAttack && (
         <>
           <UnderAttackOverlay />
@@ -102,20 +103,30 @@ export function HudPlate({
         </>
       )}
       <div className="absolute inset-[1px] rounded-[16px] bg-gradient-to-b from-white/8 via-transparent to-black/10" />
-      <div className="relative min-w-0">
-        <div className="mb-0.5 flex items-center justify-center gap-1.5">
-          {seatColor && (
+      {avatarUrl ? (
+        <HudAvatar
+          label={label}
+          avatarUrl={avatarUrl}
+          seatColor={seatColor}
+        />
+      ) : null}
+      <div className="relative flex min-w-0 flex-col items-center justify-center gap-1">
+        <div className="flex min-w-0 items-center justify-center gap-1">
+          {!avatarUrl && seatColor && (
             <span
               aria-hidden
-              className="h-1.5 w-1.5 shrink-0 rounded-full ring-1 ring-black/30"
-              style={{ backgroundColor: seatColor }}
+              className="h-2.5 w-2.5 shrink-0 rounded-full ring-1 ring-black/30 shadow-[0_0_6px_var(--seat-glow)]"
+              style={{ backgroundColor: seatColor, "--seat-glow": `${seatColor}88` } as CSSProperties}
             />
           )}
-          <span className="text-[9px] font-semibold uppercase tracking-[0.18em] text-white/68">
+          <span
+            className="truncate text-[9px] font-semibold uppercase tracking-[0.18em]"
+            style={seatColor ? { color: seatColor } : { color: "rgba(255,255,255,0.68)" }}
+          >
             {label}
           </span>
         </div>
-        <div className="flex items-center justify-center gap-2">
+        <div className="flex min-w-0 items-center justify-center gap-2">
           {children}
         </div>
       </div>
@@ -125,5 +136,34 @@ export function HudPlate({
         </div>
       ) : null}
     </Component>
+  );
+
+  return plate;
+}
+
+function HudAvatar({
+  label,
+  avatarUrl,
+  seatColor,
+}: {
+  label: string;
+  avatarUrl: string;
+  seatColor?: string;
+}) {
+  return (
+    <div
+      className="relative h-12 w-10 shrink-0 overflow-hidden rounded-lg border border-white/15 bg-slate-950 shadow-[0_10px_24px_rgba(0,0,0,0.35)] lg:h-14 lg:w-12"
+      style={seatColor ? {
+        borderColor: `${seatColor}cc`,
+        boxShadow: `0 0 0 1px ${seatColor}55, 0 10px 24px rgba(0,0,0,0.35), 0 0 18px ${seatColor}33`,
+      } : undefined}
+    >
+      <img
+        src={avatarUrl}
+        alt={label}
+        className="h-full w-full object-cover"
+      />
+      <div className="absolute inset-0 bg-gradient-to-b from-white/12 via-transparent to-black/32" />
+    </div>
   );
 }

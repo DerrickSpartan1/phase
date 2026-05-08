@@ -1,6 +1,6 @@
+use crate::parser::oracle_nom::error::OracleError;
 use nom::bytes::complete::tag;
 use nom::Parser;
-use nom_language::error::VerboseError;
 
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ActivationRestriction, Effect, StaticCondition,
@@ -15,6 +15,7 @@ use super::oracle_classifier::{
 };
 use super::oracle_cost::parse_oracle_cost;
 use super::oracle_effect::parse_effect_chain;
+use super::oracle_ir::context::ParseContext;
 use super::oracle_keyword::extract_keyword_line;
 use super::oracle_modal::strip_ability_word;
 use super::oracle_nom::primitives as nom_primitives;
@@ -148,8 +149,12 @@ pub(crate) fn parse_class_oracle_text(
                 // trigger slot. Without this, level-gated triggers using
                 // `RetainPrintedTriggerFromSource` would point at the wrong
                 // (or non-existent) source trigger index.
-                let mut triggers =
-                    parse_trigger_lines_at_index(line, card_name, Some(result.triggers.len()));
+                let mut triggers = parse_trigger_lines_at_index(
+                    line,
+                    card_name,
+                    Some(result.triggers.len()),
+                    &mut ParseContext::default(),
+                );
                 // CR 716.2a: Gate continuous triggers at levels > 1.
                 if section.level > 1 {
                     for trigger in &mut triggers {
@@ -208,6 +213,7 @@ pub(crate) fn parse_class_oracle_text(
                         &effect_text,
                         card_name,
                         Some(result.triggers.len()),
+                        &mut ParseContext::default(),
                     );
                     if section.level > 1 {
                         for trigger in &mut triggers {
@@ -256,7 +262,7 @@ pub(crate) fn parse_class_oracle_text(
 /// parser entry point (e.g. direct tests passing pre-normalization text).
 pub(crate) fn is_class_level_trigger(lower: &str, card_name: &str) -> bool {
     // Prefix: CR 603 trigger phrase "when ".
-    let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("when ").parse(lower) else {
+    let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("when ").parse(lower) else {
         return false;
     };
     // Required body phrase "becomes level ".

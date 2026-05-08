@@ -3,7 +3,9 @@ import { memo, useMemo } from "react";
 import type { PTColor } from "../../viewmodel/cardProps";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
+import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { cardImageLookup } from "../../services/cardImageLookup.ts";
+import { CARD_BACK_URL } from "../../services/scryfall.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
@@ -23,6 +25,7 @@ const PT_COLORS: Record<PTColor, string> = {
 
 export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardProps) {
   const obj = useGameStore((s) => s.gameState?.objects[objectId]);
+  const isMobile = useIsMobile();
   const inspectObject = useUiStore((s) => s.inspectObject);
   const showKeywordStrip = usePreferencesStore((s) => s.showKeywordStrip) ?? true;
   const isCompactHeight = useIsCompactHeight();
@@ -30,18 +33,18 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
     (s) => obj && s.gameState?.players?.find((p) => p.id === obj.controller)?.commander_color_identity,
   );
 
-  const cardName = obj?.name ?? "";
+  const cardName = obj?.face_down ? "Face-down card" : (obj?.name ?? "");
   const imageLookup = obj
     ? cardImageLookup(obj)
     : { name: "", faceIndex: 0, oracleId: undefined, faceName: undefined };
   const isToken = obj?.display_source === "Token";
-  const { src, isLoading } = useCardImage(imageLookup.name, {
+  const { src: cardSrc, isLoading: cardLoading } = useCardImage(obj?.face_down ? "" : imageLookup.name, {
     size: "art_crop",
     faceIndex: imageLookup.faceIndex,
-    isToken,
-    tokenFilters: isToken ? { power: obj?.power, toughness: obj?.toughness, colors: obj?.color } : undefined,
-    oracleId: imageLookup.oracleId,
-    faceName: imageLookup.faceName,
+    isToken: obj?.face_down ? false : isToken,
+    tokenFilters: !obj?.face_down && isToken ? { power: obj?.power, toughness: obj?.toughness, colors: obj?.color } : undefined,
+    oracleId: obj?.face_down ? undefined : imageLookup.oracleId,
+    faceName: obj?.face_down ? undefined : imageLookup.faceName,
   });
 
   const { frameGradient, lightText, ptDisplay } = useMemo(() => {
@@ -57,7 +60,9 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
 
   if (!obj) return null;
 
-  const hasDfc = obj.back_face != null;
+  const src = obj.face_down ? CARD_BACK_URL : cardSrc;
+  const isLoading = obj.face_down ? false : cardLoading;
+  const hasDfc = !obj.face_down && obj.back_face != null;
   // Filter out loyalty counters — shown separately as the loyalty badge
   const counters = Object.entries(obj.counters).filter((entry): entry is [string, number] => entry[1] != null && entry[0] !== "loyalty");
   const devotionValue = obj.devotion ?? null;
@@ -87,7 +92,7 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
     }
   }
 
-  if (isLoading || !src) {
+  if (!obj.face_down && (isLoading || !src)) {
     return (
       <div className="relative" style={{ width: "var(--art-crop-w)", height: "var(--art-crop-h)" }}>
         <div className="absolute inset-0 rounded-[6px] bg-[#151515] p-[3px] shadow-md">
@@ -96,6 +101,8 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
       </div>
     );
   }
+
+  const renderedSrc = obj.face_down ? CARD_BACK_URL : (src ?? "");
 
   return (
     <div className="relative select-none drop-shadow-[0_4px_6px_rgba(0,0,0,0.6)]" style={{ width: "var(--art-crop-w)", height: "var(--art-crop-h)" }}>
@@ -122,7 +129,7 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
           <div className="flex-1 w-full px-[2px] pb-[2px] flex flex-col relative z-0">
             <div className="w-full h-full relative rounded-[1.5px] overflow-hidden border border-black/80 shadow-[inset_0_1px_3px_rgba(0,0,0,0.6)] bg-black">
               <img
-                src={src}
+                src={renderedSrc}
                 alt={cardName}
                 draggable={false}
                 className="absolute inset-0 w-full h-full object-cover"
@@ -153,8 +160,8 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
                 <button
                   type="button"
                   className="absolute bottom-1 left-4 z-30 bg-gray-900/90 border border-gray-500 rounded-sm px-1 py-0.5 text-[8px] font-bold text-gray-300 hover:bg-gray-700 hover:text-white cursor-pointer shadow-md"
-                  onMouseEnter={() => inspectObject(objectId, 1)}
-                  onMouseLeave={() => inspectObject(objectId, 0)}
+                  onMouseEnter={isMobile ? undefined : () => inspectObject(objectId, 1)}
+                  onMouseLeave={isMobile ? undefined : () => inspectObject(objectId, 0)}
                 >
                   DFC
                 </button>

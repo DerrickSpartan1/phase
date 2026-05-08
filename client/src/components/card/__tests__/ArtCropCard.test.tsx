@@ -1,4 +1,4 @@
-import { cleanup, render } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { GameObject } from "../../../adapter/types.ts";
@@ -86,6 +86,36 @@ describe("ArtCropCard", () => {
       expect.objectContaining({
         size: "art_crop",
         faceIndex: 1,
+      }),
+    );
+  });
+
+  it("renders the card back for face-down permanents", () => {
+    const permanent = {
+      ...transformedPermanent(),
+      face_down: true,
+      name: "Hidden Sorcery",
+      transformed: false,
+      back_face: null,
+      color: [],
+      base_color: [],
+    };
+
+    useGameStore.setState({
+      gameState: {
+        objects: { [permanent.id]: permanent },
+      } as never,
+    });
+
+    render(<ArtCropCard objectId={101} />);
+
+    expect(screen.getByAltText("Face-down card")).toBeInTheDocument();
+    expect(mockUseCardImage).toHaveBeenCalledWith(
+      "",
+      expect.objectContaining({
+        size: "art_crop",
+        oracleId: undefined,
+        faceName: undefined,
       }),
     );
   });

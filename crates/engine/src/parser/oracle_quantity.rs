@@ -8,13 +8,14 @@
 
 use std::str::FromStr;
 
+use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::combinator::{all_consuming, value};
+use nom::combinator::value;
 use nom::sequence::terminated;
 use nom::Parser;
-use nom_language::error::VerboseError;
 
+use super::oracle_ir::context::ParseContext;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_nom::target as nom_target;
@@ -55,7 +56,7 @@ pub(crate) fn parse_quantity_ref(text: &str) -> Option<QuantityRef> {
         .or_else(|| trimmed.strip_suffix(" counter on ~"))
         .or_else(|| trimmed.strip_suffix(" counter on it"))
     {
-        let raw_type = tag::<_, _, VerboseError<&str>>("the number of ")
+        let raw_type = tag::<_, _, OracleError<'_>>("the number of ")
             .parse(rest)
             .map_or(rest, |(r, _)| r)
             .trim();
@@ -76,7 +77,7 @@ pub(crate) fn parse_quantity_ref(text: &str) -> Option<QuantityRef> {
         .or_else(|| trimmed.strip_suffix(" counter on that creature"))
         .or_else(|| trimmed.strip_suffix(" counter on that permanent"))
     {
-        let raw_type = tag::<_, _, VerboseError<&str>>("the number of ")
+        let raw_type = tag::<_, _, OracleError<'_>>("the number of ")
             .parse(rest)
             .map_or(rest, |(r, _)| r)
             .trim();
@@ -91,7 +92,7 @@ pub(crate) fn parse_quantity_ref(text: &str) -> Option<QuantityRef> {
 
     // "the number of [counter type] counters on [filter]" — total counters across
     // all matching objects, distinct from object count.
-    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("the number of ").parse(trimmed) {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("the number of ").parse(trimmed) {
         for suffix in [
             " counters on ",
             " counter on ",
@@ -99,11 +100,11 @@ pub(crate) fn parse_quantity_ref(text: &str) -> Option<QuantityRef> {
             " counter among ",
         ] {
             let Ok((after_suffix, counter_text)) =
-                take_until::<_, _, VerboseError<&str>>(suffix).parse(rest)
+                take_until::<_, _, OracleError<'_>>(suffix).parse(rest)
             else {
                 continue;
             };
-            let Ok((after_filter, _)) = tag::<_, _, VerboseError<&str>>(suffix).parse(after_suffix)
+            let Ok((after_filter, _)) = tag::<_, _, OracleError<'_>>(suffix).parse(after_suffix)
             else {
                 continue;
             };
@@ -125,7 +126,7 @@ pub(crate) fn parse_quantity_ref(text: &str) -> Option<QuantityRef> {
     if let Ok((rest, (func, prop))) = alt((
         value(
             (AggregateFunction::Max, ObjectProperty::Power),
-            tag::<_, _, VerboseError<&str>>("the greatest power among "),
+            tag::<_, _, OracleError<'_>>("the greatest power among "),
         ),
         value(
             (AggregateFunction::Max, ObjectProperty::Toughness),
@@ -138,6 +139,20 @@ pub(crate) fn parse_quantity_ref(text: &str) -> Option<QuantityRef> {
         value(
             (AggregateFunction::Sum, ObjectProperty::Power),
             tag("the total power of "),
+        ),
+        // CR 208.1: total toughness sum for "the total toughness of <filter>"
+        // phrasing. Building-block companion to the trigger-condition predicate
+        // "<filter> have total toughness N or greater" added in
+        // `oracle_nom::condition::parse_filter_have_total_property`.
+        value(
+            (AggregateFunction::Sum, ObjectProperty::Toughness),
+            tag("the total toughness of "),
+        ),
+        // CR 202.3: total mana value sum, parallel building block to the
+        // power and toughness aggregates above.
+        value(
+            (AggregateFunction::Sum, ObjectProperty::ManaValue),
+            tag("the total mana value of "),
         ),
     ))
     .parse(trimmed)
@@ -154,7 +169,7 @@ pub(crate) fn parse_quantity_ref(text: &str) -> Option<QuantityRef> {
 
     // "the number of {type} you control" → ObjectCount { filter }
     // "the number of opponents you have" → PlayerCount { Opponent }
-    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("the number of ").parse(trimmed) {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("the number of ").parse(trimmed) {
         if rest == "opponents you have" || rest == "opponent you have" {
             return Some(QuantityRef::PlayerCount {
                 filter: PlayerFilter::Opponent,
@@ -167,8 +182,8 @@ pub(crate) fn parse_quantity_ref(text: &str) -> Option<QuantityRef> {
     }
     // "your devotion to that color" / "your devotion to {color}" /
     // "your devotion to {color} and {color}"
-    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("your devotion to ").parse(trimmed) {
-        if tag::<_, _, VerboseError<&str>>("that color")
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("your devotion to ").parse(trimmed) {
+        if tag::<_, _, OracleError<'_>>("that color")
             .parse(rest)
             .is_ok()
         {
@@ -237,7 +252,7 @@ pub(crate) fn parse_cda_quantity(text: &str) -> Option<QuantityExpr> {
 
     // "twice [inner]" or "three times [inner]" → Multiply { factor, inner }
     if let Ok((rest, factor)) = alt((
-        value(2i32, tag::<_, _, VerboseError<&str>>("twice ")),
+        value(2i32, tag::<_, _, OracleError<'_>>("twice ")),
         value(3, tag("three times ")),
     ))
     .parse(text)
@@ -256,7 +271,7 @@ pub(crate) fn parse_cda_quantity(text: &str) -> Option<QuantityExpr> {
     if let Ok((rest, (n, sign))) = (
         nom_primitives::parse_number,
         alt((
-            value(1i32, tag::<_, _, VerboseError<&str>>(" plus ")),
+            value(1i32, tag::<_, _, OracleError<'_>>(" plus ")),
             value(-1i32, tag(" minus ")),
         )),
     )
@@ -302,7 +317,7 @@ pub(crate) fn parse_cda_quantity(text: &str) -> Option<QuantityExpr> {
 
     // "the number of noncreature spells they've cast this turn"
     // "the number of spells they've cast this turn"
-    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("the number of ").parse(text) {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("the number of ").parse(text) {
         // Note: "this turn" may already be stripped by strip_trailing_duration at the clause
         // level, so we also match the bare " they've cast" / " that player has cast" suffixes.
         if let Some(spell_part) = rest
@@ -332,7 +347,10 @@ pub(crate) fn parse_cda_quantity(text: &str) -> Option<QuantityExpr> {
                 }
             };
             return Some(QuantityExpr::Ref {
-                qty: QuantityRef::SpellsCastThisTurn { filter },
+                qty: QuantityRef::SpellsCastThisTurn {
+                    scope: CountScope::Controller,
+                    filter,
+                },
             });
         }
     }
@@ -370,8 +388,8 @@ pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
     // `last_effect_count`. Single combinator: optional "the " determiner
     // composed via `nom::combinator::opt` over the bare phrase tag.
     if nom::combinator::all_consuming(nom::sequence::preceded(
-        nom::combinator::opt(tag::<_, _, VerboseError<&str>>("the ")),
-        tag::<_, _, VerboseError<&str>>("damage prevented this way"),
+        nom::combinator::opt(tag::<_, _, OracleError<'_>>("the ")),
+        tag::<_, _, OracleError<'_>>("damage prevented this way"),
     ))
     .parse(lower)
     .is_ok()
@@ -381,9 +399,41 @@ pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
         });
     }
 
+    if nom::combinator::all_consuming((
+        tag::<_, _, OracleError<'_>>("the "),
+        alt((tag("greatest "), tag("highest "))),
+        tag("number of cards "),
+        nom::combinator::opt(alt((tag("a player "), tag("any player ")))),
+        tag("discarded this way"),
+    ))
+    .parse(lower)
+    .is_ok()
+    {
+        return Some(QuantityExpr::Ref {
+            qty: QuantityRef::PreviousEffectAmount,
+        });
+    }
+
+    if let Ok((_, (_, offset))) = nom::combinator::all_consuming((
+        alt((
+            tag::<_, _, OracleError<'_>>("that many cards minus "),
+            tag("that many minus "),
+        )),
+        nom_primitives::parse_number,
+    ))
+    .parse(lower)
+    {
+        return Some(QuantityExpr::Offset {
+            inner: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            }),
+            offset: -(offset as i32),
+        });
+    }
+
     match lower {
         // allow-noncombinator: dispatching on already-classified pre-trimmed phrase
-        "that much" | "that many" => {
+        "that much" | "that many" | "that many cards" => {
             return Some(QuantityExpr::Ref {
                 qty: QuantityRef::EventContextAmount,
             })
@@ -457,7 +507,7 @@ pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
     // Strip leading "the " article before matching.
     // Exclude target-referent variants (TargetPower, TargetLifeTotal) — these
     // reference a targeting selection, not an event-context source object.
-    let stripped = tag::<_, _, VerboseError<&str>>("the ")
+    let stripped = tag::<_, _, OracleError<'_>>("the ")
         .parse(lower)
         .map_or(lower, |(r, _)| r);
     if let Some(qty) = parse_quantity_ref(stripped) {
@@ -487,14 +537,14 @@ pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
 ///   Expressive Firedancer rider, Mana Sculpt rider).
 fn parse_mana_spent_to_cast_amount(input: &str) -> Option<QuantityRef> {
     // Consume optional leading "the ".
-    let rest = tag::<_, _, VerboseError<&str>>("the ")
+    let rest = tag::<_, _, OracleError<'_>>("the ")
         .parse(input)
         .map_or(input, |(r, _)| r);
     // Consume the core phrase. Accept both "mana you spent" and "mana spent".
     let rest = alt((
         value(
             (),
-            tag::<_, _, VerboseError<&str>>("amount of mana you spent to cast "),
+            tag::<_, _, OracleError<'_>>("amount of mana you spent to cast "),
         ),
         value((), tag("amount of mana spent to cast ")),
     ))
@@ -509,7 +559,7 @@ fn parse_mana_spent_to_cast_amount(input: &str) -> Option<QuantityRef> {
                 metric: crate::types::ability::CastManaSpentMetric::Total,
             },
             alt((
-                tag::<_, _, VerboseError<&str>>("this spell"),
+                tag::<_, _, OracleError<'_>>("this spell"),
                 tag("this creature"),
                 tag("it"),
                 tag("~"),
@@ -573,9 +623,9 @@ fn is_event_context_referent(prefix: &str) -> bool {
 /// every word boundary and returns `Some(())` on the first match.
 fn try_parse_exiled_from_hand_this_way(lower: &str) -> Option<()> {
     crate::parser::oracle_nom::primitives::scan_at_word_boundaries(lower, |input| {
-        let (rest, _) = tag::<_, _, VerboseError<&str>>("exiled from ").parse(input)?;
+        let (rest, _) = tag::<_, _, OracleError<'_>>("exiled from ").parse(input)?;
         let (rest, _) = alt((
-            value((), tag::<_, _, VerboseError<&str>>("their hand")),
+            value((), tag::<_, _, OracleError<'_>>("their hand")),
             value((), tag("its owner's hand")),
             value((), tag("that player's hand")),
         ))
@@ -598,8 +648,8 @@ fn try_parse_exiled_from_hand_this_way(lower: &str) -> Option<()> {
 fn try_parse_counters_removed_this_way(lower: &str) -> bool {
     crate::parser::oracle_nom::primitives::scan_at_word_boundaries(lower, |input| {
         let (rest, _) = alt((
-            value((), tag::<_, _, VerboseError<&str>>("counters")),
-            value((), tag::<_, _, VerboseError<&str>>("counter")),
+            value((), tag::<_, _, OracleError<'_>>("counters")),
+            value((), tag::<_, _, OracleError<'_>>("counter")),
         ))
         .parse(input)?;
         let (rest, _) = tag(" removed this way").parse(rest)?;
@@ -616,6 +666,22 @@ fn try_parse_counters_removed_this_way(lower: &str) -> bool {
 /// Class: A-Alrund ("+1/+1 for each card in your hand and each foretold
 /// card you own in exile") and ~21 similar cards in the database.
 pub(crate) fn parse_for_each_clause_expr(clause: &str) -> Option<QuantityExpr> {
+    parse_for_each_clause_expr_with_parser(clause, parse_for_each_clause)
+}
+
+pub(crate) fn parse_for_each_clause_expr_with_context(
+    clause: &str,
+    ctx: &ParseContext,
+) -> Option<QuantityExpr> {
+    parse_for_each_clause_expr_with_parser(clause, |segment| {
+        parse_for_each_clause_with_context(segment, ctx)
+    })
+}
+
+fn parse_for_each_clause_expr_with_parser(
+    clause: &str,
+    parse_clause: impl Fn(&str) -> Option<QuantityRef> + Copy,
+) -> Option<QuantityExpr> {
     use nom::branch::alt;
     use nom::bytes::complete::{tag, take_until};
     use nom::combinator::rest;
@@ -629,25 +695,22 @@ pub(crate) fn parse_for_each_clause_expr(clause: &str) -> Option<QuantityExpr> {
         }
     }
 
-    if let Ok((rest, expr)) = parse_for_each_beyond_first_clause_expr(clause) {
-        if rest.is_empty() {
-            return Some(expr);
-        }
+    if let Some((rest, expr)) =
+        parse_for_each_beyond_first_clause_expr_with_parser(clause, parse_clause)
+    {
+        return rest.is_empty().then_some(expr);
     }
 
-    fn segment(i: &str) -> nom::IResult<&str, &str, VerboseError<&str>> {
+    fn segment(i: &str) -> nom::IResult<&str, &str, OracleError<'_>> {
         alt((take_until(" and each "), rest)).parse(i)
     }
-    let mut split = separated_list1(tag::<_, _, VerboseError<&str>>(" and each "), segment);
+    let mut split = separated_list1(tag::<_, _, OracleError<'_>>(" and each "), segment);
     let segments: Vec<&str> = split
         .parse(clause)
         .map(|(_, v)| v)
         .unwrap_or_else(|_| vec![clause]);
 
-    let refs: Option<Vec<QuantityRef>> = segments
-        .iter()
-        .map(|s| parse_for_each_clause(s.trim()))
-        .collect();
+    let refs: Option<Vec<QuantityRef>> = segments.iter().map(|s| parse_clause(s.trim())).collect();
     let mut exprs: Vec<QuantityExpr> = refs?
         .into_iter()
         .map(|qty| QuantityExpr::Ref { qty })
@@ -662,13 +725,18 @@ pub(crate) fn parse_for_each_clause_expr(clause: &str) -> Option<QuantityExpr> {
 /// normal object-count quantity with an offset of -1. This preserves the
 /// shared `for each` grammar and keeps "beyond the first" as an expression
 /// modifier rather than adding a leaf-level `QuantityRef` variant.
-fn parse_for_each_beyond_first_clause_expr(
+fn parse_for_each_beyond_first_clause_expr_with_parser(
     input: &str,
-) -> nom::IResult<&str, QuantityExpr, VerboseError<&str>> {
-    let (input, base_clause) =
-        terminated(take_until(" beyond the first"), tag(" beyond the first")).parse(input)?;
-    let (_, qty) = all_consuming(nom_quantity::parse_for_each_clause_ref).parse(base_clause)?;
-    Ok((
+    parse_clause: impl Fn(&str) -> Option<QuantityRef>,
+) -> Option<(&str, QuantityExpr)> {
+    let (input, base_clause) = terminated::<_, _, OracleError<'_>, _, _>(
+        take_until(" beyond the first"),
+        tag(" beyond the first"),
+    )
+    .parse(input)
+    .ok()?;
+    let qty = parse_clause(base_clause)?;
+    Some((
         input,
         QuantityExpr::Offset {
             inner: Box::new(QuantityExpr::Ref { qty }),
@@ -683,7 +751,7 @@ fn parse_for_each_beyond_first_clause_expr(
 /// are a disjunction, so a red Mountain is counted once.
 fn parse_target_hand_type_or_color_clause(
     input: &str,
-) -> nom::IResult<&str, QuantityExpr, VerboseError<&str>> {
+) -> nom::IResult<&str, QuantityExpr, OracleError<'_>> {
     let (input, type_filter) = nom_target::parse_type_filter_word(input)?;
     let (input, _) = tag(" and ").parse(input)?;
     let (input, color) = nom_primitives::parse_color(input)?;
@@ -730,7 +798,7 @@ fn target_hand_card_filter(
 /// a player who searched and failed to find.
 fn parse_opponent_searched_library_this_way(
     input: &str,
-) -> nom::IResult<&str, (), VerboseError<&str>> {
+) -> nom::IResult<&str, (), OracleError<'_>> {
     let (input, _) = tag("opponent who ").parse(input)?;
     let (input, _) = alt((tag("searches"), tag("searched"))).parse(input)?;
     let (input, _) = tag(" ").parse(input)?;
@@ -741,13 +809,36 @@ fn parse_opponent_searched_library_this_way(
 
 /// Parse the clause after "for each" into a QuantityRef.
 pub(crate) fn parse_for_each_clause(clause: &str) -> Option<QuantityRef> {
+    parse_for_each_clause_with_they_controller(clause, ControllerRef::ScopedPlayer)
+}
+
+pub(crate) fn parse_for_each_clause_with_context(
+    clause: &str,
+    ctx: &ParseContext,
+) -> Option<QuantityRef> {
+    let they_controller = ctx
+        .third_person_player_controller_ref()
+        .unwrap_or(ControllerRef::ScopedPlayer);
+    parse_for_each_clause_with_they_controller(clause, they_controller)
+}
+
+fn parse_for_each_clause_with_they_controller(
+    clause: &str,
+    they_controller: ControllerRef,
+) -> Option<QuantityRef> {
     let clause = clause.trim().trim_end_matches('.');
 
     if let Some(qty) = parse_for_each_kicker_count(clause) {
         return Some(qty);
     }
 
-    if let Ok((rest, qty)) = nom_quantity::parse_for_each_clause_ref.parse(clause) {
+    if let Ok((rest, qty)) = nom_quantity::parse_for_each_clause_ref_with_context(
+        clause,
+        &ParseContext {
+            relative_player_scope: Some(they_controller),
+            ..Default::default()
+        },
+    ) {
         if rest.is_empty() {
             return Some(qty);
         }
@@ -756,7 +847,7 @@ pub(crate) fn parse_for_each_clause(clause: &str) -> Option<QuantityRef> {
     // CR 106.1 + CR 109.1: "color among [type-phrase]" — distinct colors among
     // matching objects. Used by Faeburrow Elder's "+1/+1 for each color among
     // permanents you control" and by the Converge mechanic adjacent class.
-    if let Ok((after_among, _)) = tag::<_, _, VerboseError<&str>>("color among ").parse(clause) {
+    if let Ok((after_among, _)) = tag::<_, _, OracleError<'_>>("color among ").parse(clause) {
         let (filter, remainder) = parse_type_phrase(after_among);
         if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
             return Some(QuantityRef::DistinctColorsAmongPermanents { filter });
@@ -858,7 +949,7 @@ pub(crate) fn parse_for_each_clause(clause: &str) -> Option<QuantityRef> {
     // otherwise misroute any clause containing "counter on" to CountersOnSelf and
     // discard the subject type phrase (Inspiring Call bug: "creature you control
     // with a +1/+1 counter on it" → CountersOnSelf{ "creature you control with a +1/+1" }).
-    if let Ok((_, type_part)) = take_until::<_, _, VerboseError<&str>>(" with ").parse(clause) {
+    if let Ok((_, type_part)) = take_until::<_, _, OracleError<'_>>(" with ").parse(clause) {
         let suffix_part = &clause[type_part.len() + 1..]; // starts at "with "
         if let Some((counter_prop, consumed)) =
             crate::parser::oracle_target::parse_counter_suffix(suffix_part)
@@ -937,7 +1028,10 @@ pub(crate) fn parse_for_each_clause(clause: &str) -> Option<QuantityRef> {
                 None
             }
         };
-        return Some(QuantityRef::SpellsCastThisTurn { filter });
+        return Some(QuantityRef::SpellsCastThisTurn {
+            scope: CountScope::Controller,
+            filter,
+        });
     }
 
     // CR 603.10a + CR 603.6e: "[Aura|Equipment] you controlled that was attached to it"
@@ -973,6 +1067,20 @@ pub(crate) fn parse_for_each_clause(clause: &str) -> Option<QuantityRef> {
         return Some(qty);
     }
 
+    if let Ok((rest, _)) = terminated(
+        alt((tag::<_, _, OracleError<'_>>("creature"), tag("creatures"))),
+        alt((
+            tag(" you attacked with this turn"),
+            tag(" you attacked with"),
+        )),
+    )
+    .parse(clause)
+    {
+        if rest.is_empty() {
+            return Some(QuantityRef::AttackedThisTurn);
+        }
+    }
+
     // "creature you control", "artifact you control", etc.
     // Use parse_type_phrase (not parse_target) to avoid generating spurious
     // target-fallback warnings for quantity text that isn't a target clause.
@@ -984,12 +1092,56 @@ pub(crate) fn parse_for_each_clause(clause: &str) -> Option<QuantityRef> {
     None
 }
 
+/// CR 608.2c + CR 609.3: Parse the object set named by a "for each [object]"
+/// clause when the following instruction acts on each object itself rather than
+/// only needing the count. This preserves object identity for patterns such as
+/// "for each token you control that entered this turn, create a token that's a
+/// copy of it".
+pub(crate) fn parse_for_each_object_filter_clause(clause: &str) -> Option<TargetFilter> {
+    match parse_for_each_clause(clause)? {
+        QuantityRef::ObjectCount { filter } => Some(filter),
+        QuantityRef::EnteredThisTurn { filter } => {
+            Some(add_filter_property(filter, FilterProp::EnteredThisTurn))
+        }
+        _ => None,
+    }
+}
+
+fn add_filter_property(filter: TargetFilter, property: FilterProp) -> TargetFilter {
+    match filter {
+        TargetFilter::Typed(mut typed) => {
+            if !typed
+                .properties
+                .iter()
+                .any(|existing| existing == &property)
+            {
+                typed.properties.push(property);
+            }
+            TargetFilter::Typed(typed)
+        }
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters
+                .into_iter()
+                .map(|filter| add_filter_property(filter, property.clone()))
+                .collect(),
+        },
+        TargetFilter::And { filters } => TargetFilter::And {
+            filters: filters
+                .into_iter()
+                .map(|filter| add_filter_property(filter, property.clone()))
+                .collect(),
+        },
+        TargetFilter::Not { filter } => TargetFilter::Not {
+            filter: Box::new(add_filter_property(*filter, property)),
+        },
+        other => other,
+    }
+}
+
 fn parse_for_each_kicker_count(clause: &str) -> Option<QuantityRef> {
-    let (rest, _) = tag::<_, _, VerboseError<&str>>("time ")
-        .parse(clause)
-        .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("time ").parse(clause).ok()?;
     let (rest, _) = alt((
-        tag::<_, _, VerboseError<&str>>("it was kicked"),
+        tag::<_, _, OracleError<'_>>("it was kicked"),
         tag("this spell was kicked"),
     ))
     .parse(rest)
@@ -1000,11 +1152,11 @@ fn parse_for_each_kicker_count(clause: &str) -> Option<QuantityRef> {
 fn parse_for_each_target_controlled_type(clause: &str) -> Option<QuantityRef> {
     let (rest, type_text) = alt((
         terminated(
-            take_until::<_, _, VerboseError<&str>>(" target opponent controls"),
+            take_until::<_, _, OracleError<'_>>(" target opponent controls"),
             tag(" target opponent controls"),
         ),
         terminated(
-            take_until::<_, _, VerboseError<&str>>(" target player controls"),
+            take_until::<_, _, OracleError<'_>>(" target player controls"),
             tag(" target player controls"),
         ),
     ))
@@ -1140,6 +1292,12 @@ mod tests {
                 ),
             },
         );
+    }
+
+    #[test]
+    fn for_each_creature_you_attacked_with_this_turn_counts_attacking_creatures() {
+        let qty = parse_for_each_clause("creature you attacked with this turn").unwrap();
+        assert_eq!(qty, QuantityRef::AttackedThisTurn);
     }
 
     #[test]

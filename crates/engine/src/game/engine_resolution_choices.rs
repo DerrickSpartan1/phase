@@ -1,20 +1,21 @@
 use crate::types::ability::{
-    CategoryChooserScope, ChoiceType, ChoiceValue, ChosenAttribute, EffectKind, ResolvedAbility,
-    TargetRef,
+    CategoryChooserScope, ChoiceType, ChoiceValue, ChosenAttribute, Effect, EffectKind,
+    PaymentCost, QuantityExpr, QuantityRef, ResolvedAbility, TargetRef,
 };
 use crate::types::actions::{GameAction, LearnOption};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    ActionResult, ChosenDamageSource, GameState, PendingContinuation, WaitingFor,
+    ActionResult, ChosenDamageSource, GameState, PayableResource, PendingContinuation, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
+use crate::types::mana::ManaCost;
 use crate::types::zones::Zone;
 
-use super::casting_costs;
 use super::effects;
 use super::engine::EngineError;
 use super::turns;
 use super::zones;
+use super::{casting, casting_costs};
 
 pub(super) enum ResolutionChoiceOutcome {
     WaitingFor(WaitingFor),
@@ -38,16 +39,19 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::RevealChoice { .. }
             | WaitingFor::SearchChoice { .. }
             | WaitingFor::ChooseFromZoneChoice { .. }
+            | WaitingFor::ChooseOneOfBranch { .. }
             | WaitingFor::DiscardToHandSize { .. }
             | WaitingFor::ConniveDiscard { .. }
             | WaitingFor::DiscardChoice { .. }
             | WaitingFor::EffectZoneChoice { .. }
+            | WaitingFor::DrawnThisTurnTopdeckChoice { .. }
             | WaitingFor::NamedChoice { .. }
             | WaitingFor::DamageSourceChoice { .. }
             | WaitingFor::ChooseRingBearer { .. }
             | WaitingFor::ChooseDungeon { .. }
             | WaitingFor::ChooseDungeonRoom { .. }
             | WaitingFor::ChooseLegend { .. }
+            | WaitingFor::CommanderZoneChoice { .. }
             | WaitingFor::BattleProtectorChoice { .. }
             | WaitingFor::CategoryChoice { .. }
             | WaitingFor::PayAmountChoice { .. }
@@ -264,6 +268,8 @@ pub(super) fn handle_resolution_choice(
                 resource,
                 min,
                 max,
+                accumulated,
+                source_id,
             },
             GameAction::SubmitPayAmount { amount },
         ) => {
@@ -274,7 +280,7 @@ pub(super) fn handle_resolution_choice(
                 )));
             }
             match resource {
-                crate::types::game_state::PayableResource::Energy => {
+                PayableResource::Energy => {
                     // CR 107.14: Remove N energy counters from the player.
                     if let Some(p) = state.players.iter_mut().find(|p| p.id == player) {
                         if p.energy < amount {
@@ -290,12 +296,45 @@ pub(super) fn handle_resolution_choice(
                         });
                     }
                 }
+                PayableResource::ManaGeneric { per_x } => {
+                    let cost = ManaCost::Cost {
+                        shards: vec![],
+                        generic: amount.saturating_mul(per_x),
+                    };
+                    if !casting::can_pay_cost_after_auto_tap(state, player, source_id, &cost) {
+                        return Err(EngineError::InvalidAction(format!(
+                            "Player {:?} cannot pay {} generic mana",
+                            player,
+                            cost.mana_value()
+                        )));
+                    }
+                    let _ = casting::pay_unless_cost(state, player, &cost, events);
+                }
             }
             // CR 603.7c: Bind the paid amount for downstream chain steps that
             // read `QuantityRef::EventContextAmount` (e.g. "deals that much
             // damage"). `last_effect_count` is the documented fallback slot.
-            state.last_effect_count = Some(amount as i32);
-            ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+            let total = accumulated.saturating_add(amount);
+            state.last_effect_count = Some(total as i32);
+            let pending_starts_with_pay_amount = state
+                .pending_continuation
+                .as_ref()
+                .is_some_and(|cont| starts_with_pay_amount_prompt(&cont.chain));
+            if !pending_starts_with_pay_amount {
+                if let Some(cont) = state.pending_continuation.as_mut() {
+                    cont.chain.set_chosen_x_recursive(total);
+                }
+            }
+            let mut waiting_for = finish_with_continuation(state, player, events);
+            if let WaitingFor::PayAmountChoice {
+                accumulated: next_accumulated,
+                ..
+            } = &mut waiting_for
+            {
+                *next_accumulated = total;
+                state.waiting_for = waiting_for.clone();
+            }
+            ResolutionChoiceOutcome::WaitingFor(waiting_for)
         }
         (
             WaitingFor::PopulateChoice {
@@ -780,6 +819,37 @@ pub(super) fn handle_resolution_choice(
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
         (
+            WaitingFor::ChooseOneOfBranch {
+                player,
+                controller,
+                source_id,
+                branches,
+                branch_descriptions: _,
+                parent_targets,
+                context,
+                remaining_players,
+            },
+            GameAction::ChooseBranch { index },
+        ) => {
+            set_priority(state, player);
+            effects::choose_one_of::resolve_branch(
+                state,
+                effects::choose_one_of::BranchSelection {
+                    player,
+                    controller,
+                    source_id,
+                    branches,
+                    parent_targets,
+                    context,
+                    remaining_players,
+                    index,
+                },
+                events,
+            )
+            .map_err(|err| EngineError::InvalidAction(err.to_string()))?;
+            ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+        }
+        (
             WaitingFor::DiscardToHandSize {
                 player,
                 count,
@@ -925,7 +995,13 @@ pub(super) fn handle_resolution_choice(
 
             for &card_id in &chosen {
                 if let effects::discard::DiscardOutcome::NeedsReplacementChoice(choice_player) =
-                    effects::discard::discard_as_cost(state, card_id, player, events)
+                    effects::discard::discard_as_cost_with_source(
+                        state,
+                        card_id,
+                        player,
+                        Some(source_id),
+                        events,
+                    )
                 {
                     state.waiting_for =
                         super::replacement::replacement_choice_waiting_for(choice_player, state);
@@ -1077,6 +1153,15 @@ pub(super) fn handle_resolution_choice(
                         }
                     }
                 }
+                // CR 701.24g + CR 115.1: Resolution-time selection for
+                // PutAtLibraryPosition from a private zone (e.g. Brainstorm's
+                // "put two cards from your hand on top of your library").
+                // Cards are placed in selection order (first chosen = top).
+                EffectKind::PutAtLibraryPosition => {
+                    for &card_id in chosen.iter().rev() {
+                        super::zones::move_to_library_at_index(state, card_id, Some(0), events);
+                    }
+                }
                 other => {
                     return Err(EngineError::InvalidAction(format!(
                         "EffectZoneChoice unsupported for {other:?}"
@@ -1089,6 +1174,36 @@ pub(super) fn handle_resolution_choice(
                 kind: effect_kind,
                 source_id,
             });
+            set_priority(state, player);
+            resume_with_error_propagation(state, events)?;
+            ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+        }
+        (
+            WaitingFor::DrawnThisTurnTopdeckChoice {
+                player,
+                cards,
+                count,
+                min_count,
+                life_payment,
+                source_id,
+            },
+            GameAction::SelectCards { cards: chosen },
+        ) => {
+            effects::drawn_this_turn_choice::handle_topdeck_choice(
+                state,
+                effects::drawn_this_turn_choice::TopdeckChoice {
+                    player,
+                    eligible: &cards,
+                    count,
+                    min_count,
+                    life_payment,
+                    source_id,
+                    chosen_to_topdeck: &chosen,
+                },
+                events,
+            )
+            .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+            state.last_effect_count = Some(chosen.len() as i32);
             set_priority(state, player);
             resume_with_error_propagation(state, events)?;
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
@@ -1240,6 +1355,23 @@ pub(super) fn handle_resolution_choice(
                 player: state.active_player,
             })
         }
+        // CR 903.9a: Owner decides whether to return their commander to the command zone.
+        // Accept = move to command zone; Decline = leave in current zone (marked as
+        // declined so SBA doesn't re-ask).
+        // Returning to Priority re-runs SBA, which will find any remaining commanders.
+        (
+            WaitingFor::CommanderZoneChoice { commander_id, .. },
+            GameAction::DecideOptionalEffect { accept },
+        ) => {
+            if accept {
+                zones::move_to_zone(state, commander_id, Zone::Command, events);
+            } else {
+                state.commander_declined_zone_return.insert(commander_id);
+            }
+            ResolutionChoiceOutcome::WaitingFor(WaitingFor::Priority {
+                player: state.active_player,
+            })
+        }
         // CR 310.10 + CR 704.5w + CR 704.5x: controller assigns the battle's new
         // protector. Re-running the SBA fixpoint (via the Priority resumption) will
         // find any remaining battles still needing reassignment.
@@ -1380,6 +1512,25 @@ fn action_result_outcome(
 fn set_priority(state: &mut GameState, player: crate::types::player::PlayerId) {
     state.waiting_for = WaitingFor::Priority { player };
     state.priority_player = player;
+}
+
+fn starts_with_pay_amount_prompt(ability: &ResolvedAbility) -> bool {
+    match &ability.effect {
+        Effect::PayCost {
+            cost: PaymentCost::Mana { cost },
+            ..
+        } => casting_costs::cost_has_x(cost),
+        Effect::PayCost {
+            cost: PaymentCost::Energy { amount },
+            ..
+        } => matches!(
+            amount,
+            QuantityExpr::Ref {
+                qty: QuantityRef::Variable { name },
+            } if name == "X"
+        ),
+        _ => false,
+    }
 }
 
 fn finish_with_continuation(

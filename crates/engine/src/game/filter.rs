@@ -169,6 +169,36 @@ impl<'a> FilterContext<'a> {
     }
 }
 
+fn scoped_player_or_controller(
+    ability: Option<&ResolvedAbility>,
+    source_controller: Option<PlayerId>,
+) -> Option<PlayerId> {
+    ability.and_then(|a| a.scoped_player).or(source_controller)
+}
+
+fn controller_ref_player(
+    state: &GameState,
+    source_id: ObjectId,
+    source_controller: Option<PlayerId>,
+    ability: Option<&ResolvedAbility>,
+    controller: &ControllerRef,
+) -> Option<PlayerId> {
+    match controller {
+        ControllerRef::You => source_controller,
+        ControllerRef::Opponent => None,
+        ControllerRef::ScopedPlayer => scoped_player_or_controller(ability, source_controller),
+        ControllerRef::TargetPlayer => ability.and_then(|a| {
+            a.targets.iter().find_map(|t| match t {
+                TargetRef::Player(pid) => Some(*pid),
+                TargetRef::Object(_) => None,
+            })
+        }),
+        ControllerRef::DefendingPlayer => {
+            crate::game::combat::defending_player_for_attacker(state, source_id)
+        }
+    }
+}
+
 /// Check if an object matches a typed TargetFilter against the given context.
 ///
 /// This is the unified entry point for filter evaluation. Build a
@@ -399,8 +429,9 @@ fn filter_inner_for_object(
     match filter {
         TargetFilter::None => false,
         TargetFilter::Any => true,
-        TargetFilter::Player => false,     // Players are not objects
-        TargetFilter::Controller => false, // Controller is a player, not an object
+        TargetFilter::Player => false,       // Players are not objects
+        TargetFilter::Controller => false,   // Controller is a player, not an object
+        TargetFilter::ScopedPlayer => false, // ScopedPlayer is a player, not an object
         TargetFilter::SelfRef => object_id == source_id,
         TargetFilter::Typed(TypedFilter {
             type_filters,
@@ -424,6 +455,12 @@ fn filter_inner_for_object(
                     ControllerRef::Opponent => {
                         if source_controller == Some(obj.controller) {
                             return false;
+                        }
+                    }
+                    ControllerRef::ScopedPlayer => {
+                        match scoped_player_or_controller(ability, source_controller) {
+                            Some(pid) if pid == obj.controller => {}
+                            _ => return false,
                         }
                     }
                     // CR 109.4 + CR 115.1: "target player controls" — filter scope
@@ -517,7 +554,7 @@ fn filter_inner_for_object(
         // StackAbility/StackSpell targeting is handled directly at call sites, not via filter
         TargetFilter::StackAbility | TargetFilter::StackSpell => false,
         TargetFilter::SpecificObject { id: target_id } => object_id == *target_id,
-        // SpecificPlayer scopes to a player, not an object — no object matches.
+        // SpecificPlayer scopes to players, not objects — no object matches.
         TargetFilter::SpecificPlayer { .. } => false,
         TargetFilter::AttachedTo => state
             .objects
@@ -526,6 +563,9 @@ fn filter_inner_for_object(
             .and_then(|t| t.as_object())
             .is_some_and(|attached| attached == object_id),
         TargetFilter::LastCreated => state.last_created_token_ids.contains(&object_id),
+        TargetFilter::CostPaidObject => ability
+            .and_then(|ability| ability.cost_paid_object.as_ref())
+            .is_some_and(|snapshot| snapshot.object_id == object_id),
         // CR 603.7: Match objects in a tracked set from the originating effect.
         TargetFilter::TrackedSet { id } => state
             .tracked_object_sets
@@ -573,8 +613,10 @@ fn filter_inner_for_object(
         // ParentTarget/ParentTargetController/PostReplacementSourceController resolve
         // at resolution time, not via object matching.
         TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::ParentTargetController
-        | TargetFilter::PostReplacementSourceController => false,
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageTarget => false,
         // "card with the chosen name" — match against source's ChosenAttribute::CardName.
         TargetFilter::HasChosenName => {
             let chosen_name = state.objects.get(&source_id).and_then(|obj| {
@@ -652,6 +694,7 @@ fn zone_change_filter_inner(
         TargetFilter::Any => true,
         TargetFilter::Player => false,
         TargetFilter::Controller => false,
+        TargetFilter::ScopedPlayer => false,
         TargetFilter::SelfRef => record.object_id == source_id,
         TargetFilter::Typed(TypedFilter {
             type_filters,
@@ -671,6 +714,12 @@ fn zone_change_filter_inner(
                     }
                     ControllerRef::Opponent if source_controller == Some(record.controller) => {
                         return false;
+                    }
+                    ControllerRef::ScopedPlayer => {
+                        match scoped_player_or_controller(ability, source_controller) {
+                            Some(pid) if pid == record.controller => {}
+                            _ => return false,
+                        }
                     }
                     // CR 109.4 + CR 115.1: "target player controls" — match the
                     // record's controller against the chosen player target.
@@ -728,8 +777,8 @@ fn zone_change_filter_inner(
             zone_change_filter_inner(state, record, inner, source_id, source_controller, ability)
         }),
         TargetFilter::SpecificObject { id } => record.object_id == *id,
-        // SpecificPlayer scopes to a player, not an object — a zone-change
-        // record is always an object transition.
+        // SpecificPlayer scopes to players, not objects — a zone-change record
+        // is always an object transition.
         TargetFilter::SpecificPlayer { .. } => false,
         TargetFilter::HasChosenName => {
             let chosen_name = state.objects.get(&source_id).and_then(|obj| {
@@ -757,6 +806,7 @@ fn zone_change_filter_inner(
             .iter()
             .any(|att| att.object_id == source_id),
         TargetFilter::LastCreated
+        | TargetFilter::CostPaidObject
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
@@ -765,8 +815,10 @@ fn zone_change_filter_inner(
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
         | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::DefendingPlayer
         | TargetFilter::StackAbility
         | TargetFilter::StackSpell
@@ -929,6 +981,7 @@ pub fn spell_record_matches_filter(
                 match ctrl {
                     ControllerRef::You => {}
                     ControllerRef::Opponent => return false,
+                    ControllerRef::ScopedPlayer => return false,
                     // CR 109.4: A target-player-scoped filter has no meaning for
                     // a spell-history record (no ability context to resolve the
                     // target). Fail closed — this combination should not be
@@ -957,6 +1010,7 @@ pub fn spell_record_matches_filter(
         TargetFilter::None
         | TargetFilter::Player
         | TargetFilter::Controller
+        | TargetFilter::ScopedPlayer
         | TargetFilter::SelfRef
         | TargetFilter::StackAbility
         | TargetFilter::StackSpell
@@ -964,6 +1018,7 @@ pub fn spell_record_matches_filter(
         | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::AttachedTo
         | TargetFilter::LastCreated
+        | TargetFilter::CostPaidObject
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
@@ -972,8 +1027,10 @@ pub fn spell_record_matches_filter(
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
         | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::DefendingPlayer
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource
@@ -1105,6 +1162,7 @@ fn spell_object_matches_filter_inner(
                 match ctrl {
                     ControllerRef::You if caster != source_controller => return false,
                     ControllerRef::Opponent if caster == source_controller => return false,
+                    ControllerRef::ScopedPlayer => return false,
                     // CR 109.4: Target-player scope is undefined for spell-cast
                     // history (no ability context). Fail closed.
                     ControllerRef::TargetPlayer => return false,
@@ -1115,9 +1173,9 @@ fn spell_object_matches_filter_inner(
 
             type_filters.iter().all(|type_filter| {
                 spell_record_matches_type_filter(record, type_filter, all_creature_types)
-            }) && properties
-                .iter()
-                .all(|prop| spell_object_matches_property(record, zone, prop, context))
+            }) && properties.iter().all(|prop| {
+                spell_object_matches_property(record, zone, prop, all_creature_types, context)
+            })
         }
         TargetFilter::Or { filters } => filters.iter().any(|inner| {
             spell_object_matches_filter_inner(
@@ -1153,6 +1211,7 @@ fn spell_object_matches_filter_inner(
         TargetFilter::None
         | TargetFilter::Player
         | TargetFilter::Controller
+        | TargetFilter::ScopedPlayer
         | TargetFilter::SelfRef
         | TargetFilter::StackAbility
         | TargetFilter::StackSpell
@@ -1160,6 +1219,7 @@ fn spell_object_matches_filter_inner(
         | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::AttachedTo
         | TargetFilter::LastCreated
+        | TargetFilter::CostPaidObject
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
@@ -1168,8 +1228,10 @@ fn spell_object_matches_filter_inner(
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
         | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::DefendingPlayer
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource
@@ -1182,6 +1244,7 @@ fn spell_object_matches_property(
     record: &SpellCastRecord,
     zone: Zone,
     prop: &FilterProp,
+    all_creature_types: &[String],
     context: Option<SpellFilterContext<'_>>,
 ) -> bool {
     match prop {
@@ -1204,6 +1267,47 @@ fn spell_object_matches_property(
             };
             comparator.evaluate(record.mana_value as i32, threshold)
         }
+        FilterProp::IsChosenCreatureType => context.is_some_and(|context| {
+            context
+                .state
+                .objects
+                .get(&context.source_id)
+                .and_then(|source| source.chosen_creature_type())
+                .is_some_and(|chosen| {
+                    subtype_matches_with_changeling(
+                        chosen,
+                        &record.subtypes,
+                        &record.keywords,
+                        all_creature_types,
+                    )
+                })
+        }),
+        FilterProp::IsChosenColor => context.is_some_and(|context| {
+            context
+                .state
+                .objects
+                .get(&context.source_id)
+                .and_then(|source| {
+                    source.chosen_attributes.iter().find_map(|attr| match attr {
+                        ChosenAttribute::Color(color) => Some(color),
+                        _ => None,
+                    })
+                })
+                .is_some_and(|color| record.colors.contains(color))
+        }),
+        FilterProp::IsChosenCardType => context.is_some_and(|context| {
+            context
+                .state
+                .objects
+                .get(&context.source_id)
+                .and_then(|source| {
+                    source.chosen_attributes.iter().find_map(|attr| match attr {
+                        ChosenAttribute::CardType(card_type) => Some(card_type),
+                        _ => None,
+                    })
+                })
+                .is_some_and(|card_type| record.core_types.contains(card_type))
+        }),
         _ => spell_record_matches_property(record, prop),
     }
 }
@@ -1257,6 +1361,9 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         FilterProp::WithoutKeywordKind { value } => {
             !record.keywords.iter().any(|k| k.kind() == *value)
         }
+        // CR 303.4: "could enchant [target]" needs live target context and
+        // Aura attachment legality; stack snapshots only record keyword values.
+        FilterProp::CanEnchant { .. } => false,
         FilterProp::HasColor { color } => record.colors.contains(color),
         FilterProp::NotColor { color } => !record.colors.contains(color),
         FilterProp::HasSupertype { value } => record.supertypes.contains(value),
@@ -1280,16 +1387,30 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
                 false
             }
         },
+        // CR 202.1: Exact printed mana cost is not captured in cast-history
+        // snapshots. Fail closed rather than approximating with mana value
+        // (CR 202.3), which would conflate {W} with {1}.
+        FilterProp::ManaCostIn { .. } => false,
         // CR 107.3 + CR 202.1: The snapshot captured whether the printed mana
         // cost contained an `{X}` shard at cast time.
         FilterProp::HasXInManaCost => record.has_x_in_cost,
+        // CR 605.1: Spell-cast records snapshot the spell object, not the
+        // object's ability list. Fail closed for history predicates.
+        FilterProp::HasManaAbility
+        // CR 113.1 + CR 113.3: Spell-cast records snapshot keywords but not
+        // all ability lists, so "no abilities" cannot be proven here.
+        | FilterProp::HasNoAbilities => false,
         // Disjunctive composite: recurse into inner props under the same snapshot.
         FilterProp::AnyOf { props } => props
             .iter()
             .any(|p| spell_record_matches_property(record, p)),
+        // CR 111.1: Spell-cast records only track cast spells. Tokens are
+        // permanents, so token identity is false and nontoken identity is true
+        // for this snapshot shape.
+        FilterProp::Token => false,
+        FilterProp::NonToken => true,
         // All remaining props require on-battlefield or stack state unavailable from a snapshot.
-        FilterProp::Token
-        | FilterProp::Attacking
+        FilterProp::Attacking
         | FilterProp::AttackingController
         | FilterProp::Blocking
         | FilterProp::BlockingSource
@@ -1398,6 +1519,46 @@ fn parent_target_name(state: &GameState, ability: Option<&ResolvedAbility>) -> O
     state.lki_cache.get(&id).map(|lki| lki.name.clone())
 }
 
+fn referenced_targets_for_filter<'a>(
+    target: &TargetFilter,
+    ability: Option<&'a ResolvedAbility>,
+) -> Vec<&'a TargetRef> {
+    let Some(ability) = ability else {
+        return vec![];
+    };
+    match target {
+        TargetFilter::ParentTarget => ability.targets.iter().collect(),
+        TargetFilter::ParentTargetSlot { index } => {
+            ability.targets.get(*index).into_iter().collect()
+        }
+        _ => vec![],
+    }
+}
+
+fn aura_can_enchant_referenced_target(
+    state: &GameState,
+    aura: &GameObject,
+    aura_id: ObjectId,
+    enchant_filter: &TargetFilter,
+    target_ref: &TargetRef,
+    source: &SourceContext<'_>,
+) -> bool {
+    match target_ref {
+        TargetRef::Object(target_id) => filter_inner(
+            state,
+            *target_id,
+            enchant_filter,
+            aura_id,
+            Some(aura.controller),
+            source.ability,
+            source.recipient_id,
+        ),
+        TargetRef::Player(player_id) => {
+            player_matches_target_filter(enchant_filter, *player_id, Some(aura.controller))
+        }
+    }
+}
+
 /// Resolve a dynamic filter threshold against the source context.
 ///
 /// When the filter evaluation has an ability in scope (e.g. SearchLibrary resolving
@@ -1445,6 +1606,11 @@ fn matches_filter_prop(
             .objects
             .get(&object_id)
             .is_some_and(|obj| obj.is_token),
+        // CR 111.1: Nontoken identity of the live object.
+        FilterProp::NonToken => state
+            .objects
+            .get(&object_id)
+            .is_some_and(|obj| !obj.is_token),
         FilterProp::Attacking => state.combat.as_ref().is_some_and(|combat| {
             combat
                 .attackers
@@ -1480,6 +1646,23 @@ fn matches_filter_prop(
         // CR 302.6 / CR 110.5: Untapped status as targeting qualifier.
         FilterProp::Untapped => !obj.tapped,
         FilterProp::WithKeyword { value } => obj.has_keyword(value),
+        FilterProp::CanEnchant { target } => obj.keywords.iter().any(|keyword| {
+            let Keyword::Enchant(enchant_filter) = keyword else {
+                return false;
+            };
+            referenced_targets_for_filter(target, source.ability)
+                .iter()
+                .any(|target_ref| {
+                    aura_can_enchant_referenced_target(
+                        state,
+                        obj,
+                        object_id,
+                        enchant_filter,
+                        target_ref,
+                        source,
+                    )
+                })
+        }),
         FilterProp::HasKeywordKind { value } => {
             crate::game::keywords::object_has_effective_keyword_kind(state, object_id, *value)
         }
@@ -1509,6 +1692,8 @@ fn matches_filter_prop(
             let cmc = obj.mana_cost.mana_value() as i32;
             comparator.evaluate(cmc, resolve_filter_threshold(state, value, source))
         }
+        // CR 202.1: Compare exact printed mana cost, not mana value (CR 202.3).
+        FilterProp::ManaCostIn { costs } => costs.iter().any(|cost| cost == &obj.mana_cost),
         // CR 702.143c-d: Foretold is a designation of a card in exile, tracked
         // directly on the object. It is not equivalent to `KeywordKind::Foretell`.
         FilterProp::Foretold => obj.foretold,
@@ -1516,6 +1701,15 @@ fn matches_filter_prop(
         // printed mana cost for an `{X}` shard. Applies to spells on the stack
         // and to any live-object evaluation path (e.g. static-ability filters).
         FilterProp::HasXInManaCost => crate::game::casting_costs::cost_has_x(&obj.mana_cost),
+        // CR 605.1: Delegate to the single mana-ability classifier instead of
+        // duplicating the definition at the filter layer.
+        FilterProp::HasManaAbility => obj
+            .abilities
+            .iter()
+            .any(crate::game::mana_abilities::is_mana_ability),
+        // CR 113.1 + CR 113.3: "no abilities" means no keyword abilities and
+        // no activated, triggered, replacement, or static abilities.
+        FilterProp::HasNoAbilities => object_has_no_abilities(obj),
         // CR 201.2: Name matching is exact (case-insensitive comparison).
         FilterProp::Named { name } => obj.name.eq_ignore_ascii_case(name),
         // SameName: matches objects with the same name as the tracked card from context.
@@ -1538,18 +1732,8 @@ fn matches_filter_prop(
         // Name comparison is case-insensitive per `FilterProp::Named` /
         // `FilterProp::SameName` conventions.
         FilterProp::NameMatchesAnyPermanent { controller } => {
-            let controller_pid = controller.as_ref().and_then(|c| match c {
-                ControllerRef::You => source.controller,
-                ControllerRef::Opponent => None,
-                ControllerRef::TargetPlayer => source.ability.and_then(|a| {
-                    a.targets.iter().find_map(|t| match t {
-                        TargetRef::Player(pid) => Some(*pid),
-                        TargetRef::Object(_) => None,
-                    })
-                }),
-                ControllerRef::DefendingPlayer => {
-                    crate::game::combat::defending_player_for_attacker(state, source.id)
-                }
+            let controller_pid = controller.as_ref().and_then(|c| {
+                controller_ref_player(state, source.id, source.controller, source.ability, c)
             });
             state.objects.values().any(|perm| {
                 if perm.zone != crate::types::zones::Zone::Battlefield {
@@ -1560,6 +1744,7 @@ fn matches_filter_prop(
                     (Some(ControllerRef::Opponent), _) => {
                         source.controller.is_some() && Some(perm.controller) != source.controller
                     }
+                    (Some(ControllerRef::ScopedPlayer), Some(pid)) => perm.controller == pid,
                     (Some(ControllerRef::TargetPlayer), Some(pid)) => perm.controller == pid,
                     (Some(ControllerRef::DefendingPlayer), Some(pid)) => perm.controller == pid,
                     (Some(_), None) => false,
@@ -1573,6 +1758,10 @@ fn matches_filter_prop(
             ControllerRef::You => source.controller == Some(obj.owner),
             ControllerRef::Opponent => {
                 source.controller.is_some() && source.controller != Some(obj.owner)
+            }
+            ControllerRef::ScopedPlayer => {
+                scoped_player_or_controller(source.ability, source.controller)
+                    .is_some_and(|pid| pid == obj.owner)
             }
             // CR 109.5: Ownership relative to a chosen target player.
             // Resolves against the first TargetRef::Player in ability.targets.
@@ -1682,26 +1871,7 @@ fn matches_filter_prop(
             if !kind_matches {
                 return false;
             }
-            match controller {
-                None => true,
-                Some(ControllerRef::You) => source.controller == Some(att.controller),
-                Some(ControllerRef::Opponent) => {
-                    source.controller.is_some_and(|c| c != att.controller)
-                }
-                Some(ControllerRef::TargetPlayer) => source
-                    .ability
-                    .and_then(|a| {
-                        a.targets.iter().find_map(|t| match t {
-                            crate::types::ability::TargetRef::Player(pid) => Some(*pid),
-                            crate::types::ability::TargetRef::Object(_) => None,
-                        })
-                    })
-                    .is_some_and(|pid| pid == att.controller),
-                Some(ControllerRef::DefendingPlayer) => {
-                    crate::game::combat::defending_player_for_attacker(state, source.id)
-                        .is_some_and(|pid| pid == att.controller)
-                }
-            }
+            attachment_controller_matches(controller.as_ref(), att.controller, state, source)
         }),
         // CR 303.4 + CR 301.5: Disjunctive attachment predicate — matches when the
         // object has at least one attachment whose subtype is in `kinds` and whose
@@ -1723,26 +1893,7 @@ fn matches_filter_prop(
                 if !kind_matches {
                     return false;
                 }
-                match controller {
-                    None => true,
-                    Some(ControllerRef::You) => source.controller == Some(att.controller),
-                    Some(ControllerRef::Opponent) => {
-                        source.controller.is_some_and(|c| c != att.controller)
-                    }
-                    Some(ControllerRef::TargetPlayer) => source
-                        .ability
-                        .and_then(|a| {
-                            a.targets.iter().find_map(|t| match t {
-                                crate::types::ability::TargetRef::Player(pid) => Some(*pid),
-                                crate::types::ability::TargetRef::Object(_) => None,
-                            })
-                        })
-                        .is_some_and(|pid| pid == att.controller),
-                    Some(ControllerRef::DefendingPlayer) => {
-                        crate::game::combat::defending_player_for_attacker(state, source.id)
-                            .is_some_and(|pid| pid == att.controller)
-                    }
-                }
+                attachment_controller_matches(controller.as_ref(), att.controller, state, source)
             })
         }
         // CR 613.4c: In per-recipient layer contexts, "other" is relative to
@@ -1941,6 +2092,14 @@ fn matches_filter_prop(
     }
 }
 
+fn object_has_no_abilities(obj: &GameObject) -> bool {
+    obj.keywords.is_empty()
+        && obj.abilities.is_empty()
+        && obj.trigger_definitions.is_empty()
+        && obj.replacement_definitions.is_empty()
+        && obj.static_definitions.is_empty()
+}
+
 /// CR 603.10: Evaluate a `FilterProp` against a zone-change event snapshot.
 ///
 /// Properties fall into four groups:
@@ -1971,6 +2130,9 @@ fn zone_change_record_matches_property(
         FilterProp::WithoutKeywordKind { value } => {
             !record.keywords.iter().any(|k| k.kind() == *value)
         }
+        // CR 303.4: Requires live target context; zone-change snapshots cannot
+        // prove attachment legality against a referenced target.
+        FilterProp::CanEnchant { .. } => false,
         // CR 205.4a: Supertype membership as of the zone change.
         FilterProp::HasSupertype { value } => record.supertypes.contains(value),
         FilterProp::NotSupertype { value } => !record.supertypes.contains(value),
@@ -2005,6 +2167,9 @@ fn zone_change_record_matches_property(
             record.mana_value as i32,
             resolve_filter_threshold(state, value, source),
         ),
+        // CR 202.1: Zone-change records currently snapshot mana value, not the
+        // full printed mana cost. Exact-cost predicates fail closed here.
+        FilterProp::ManaCostIn { .. } => false,
         // CR 105.1 / CR 202.2: Color membership on the event-time object.
         FilterProp::HasColor { color } => record.colors.contains(color),
         FilterProp::NotColor { color } => !record.colors.contains(color),
@@ -2018,6 +2183,8 @@ fn zone_change_record_matches_property(
         // triggers evaluate correctly after the token has moved to the
         // graveyard (and then ceased to exist per CR 111.7).
         FilterProp::Token => record.is_token,
+        // CR 111.1 + CR 603.6a: Nontoken identity as of the zone change.
+        FilterProp::NonToken => !record.is_token,
 
         // -------- Group 2: source/event relational --------
         // CR 109.1 "another": same-object check against the triggering source.
@@ -2036,6 +2203,10 @@ fn zone_change_record_matches_property(
             ControllerRef::You => source.controller == Some(record.owner),
             ControllerRef::Opponent => {
                 source.controller.is_some() && source.controller != Some(record.owner)
+            }
+            ControllerRef::ScopedPlayer => {
+                scoped_player_or_controller(source.ability, source.controller)
+                    .is_some_and(|pid| pid == record.owner)
             }
             // CR 109.5: Ownership relative to a chosen target player.
             ControllerRef::TargetPlayer => source
@@ -2094,6 +2265,26 @@ fn zone_change_record_matches_property(
         FilterProp::Unblocked => {
             record.combat_status.attacking && !record.combat_status.blocked
         }
+        FilterProp::HasAttachment { kind, controller } => record.attachments.iter().any(|att| {
+            att.kind == *kind
+                && attachment_controller_matches(
+                    controller.as_ref(),
+                    att.controller,
+                    state,
+                    source,
+                )
+        }),
+        FilterProp::HasAnyAttachmentOf { kinds, controller } => {
+            record.attachments.iter().any(|att| {
+                kinds.contains(&att.kind)
+                    && attachment_controller_matches(
+                        controller.as_ref(),
+                        att.controller,
+                        state,
+                        source,
+                    )
+            })
+        }
 
         // These predicates query live battlefield state (tap status, attachment,
         // current counters, face-down). The snapshot has already left its public
@@ -2118,8 +2309,6 @@ fn zone_change_record_matches_property(
         | FilterProp::EquippedBy
         | FilterProp::AttachedToSource
         | FilterProp::AttachedToRecipient
-        | FilterProp::HasAttachment { .. }
-        | FilterProp::HasAnyAttachmentOf { .. }
         | FilterProp::FaceDown
         | FilterProp::Foretold
         // CR 201.2: Name-matches-any-permanent is a live-battlefield predicate
@@ -2154,12 +2343,49 @@ fn zone_change_record_matches_property(
         // meaning for a zone-change record (the object has already left the stack
         // or never was a spell). Fail closed — the snapshot carries no such info.
         | FilterProp::HasXInManaCost
+        // CR 605.1: Zone-change records do not snapshot ability lists.
+        | FilterProp::HasManaAbility
+        // CR 113.1 + CR 113.3: Zone-change records do not snapshot all
+        // ability lists, so "no abilities" cannot be proven here.
+        | FilterProp::HasNoAbilities
         // CR 903.3d + CR 903.3: Commander designation is preserved across zones,
         // but zone-change records do not carry it. Fail closed — zone-change
         // triggers that need to filter by commander status will require record
         // plumbing (no current consumer).
         | FilterProp::IsCommander
         | FilterProp::Other { .. } => false,
+    }
+}
+
+fn attachment_controller_matches(
+    controller: Option<&ControllerRef>,
+    attachment_controller: PlayerId,
+    state: &GameState,
+    source: &SourceContext<'_>,
+) -> bool {
+    match controller {
+        None => true,
+        Some(ControllerRef::You) => source.controller == Some(attachment_controller),
+        Some(ControllerRef::Opponent) => source
+            .controller
+            .is_some_and(|controller| controller != attachment_controller),
+        Some(ControllerRef::ScopedPlayer) => {
+            scoped_player_or_controller(source.ability, source.controller)
+                .is_some_and(|pid| pid == attachment_controller)
+        }
+        Some(ControllerRef::TargetPlayer) => source
+            .ability
+            .and_then(|a| {
+                a.targets.iter().find_map(|t| match t {
+                    TargetRef::Player(pid) => Some(*pid),
+                    TargetRef::Object(_) => None,
+                })
+            })
+            .is_some_and(|pid| pid == attachment_controller),
+        Some(ControllerRef::DefendingPlayer) => {
+            combat::defending_player_for_attacker(state, source.id)
+                .is_some_and(|pid| pid == attachment_controller)
+        }
     }
 }
 
@@ -2494,9 +2720,11 @@ pub fn player_matches_target_filter(
         TargetFilter::Any | TargetFilter::Player => true,
         TargetFilter::SelfRef => false, // SelfRef refers to objects, not players
         TargetFilter::Controller => source_controller == Some(player_id),
+        TargetFilter::ScopedPlayer => false,
         TargetFilter::Typed(ref tf) if tf.type_filters.is_empty() => match &tf.controller {
             Some(ControllerRef::You) => source_controller == Some(player_id),
             Some(ControllerRef::Opponent) => source_controller.is_some_and(|c| c != player_id),
+            Some(ControllerRef::ScopedPlayer) => false,
             // CR 109.4: TargetPlayer has no meaning when matching a player against
             // a filter without ability context. Fail closed (mirrors the pattern
             // established at filter.rs:526–569 for spell-record filters).
@@ -2521,15 +2749,21 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AggregateFunction, ChosenAttribute, Comparator, ControllerRef, FilterProp, PlayerScope,
-        QuantityExpr, QuantityRef, TargetFilter,
+        AbilityDefinition, AbilityKind, AggregateFunction, AttachmentKind, ChosenAttribute,
+        Comparator, ControllerRef, Effect, FilterProp, ManaContribution, ManaProduction,
+        PlayerScope, QuantityExpr, QuantityRef, ReplacementDefinition, StaticDefinition,
+        TargetFilter, TriggerDefinition,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::events::GameEvent;
+    use crate::types::game_state::{AttachmentSnapshot, ZoneChangeRecord};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::keywords::Keyword;
-    use crate::types::mana::{ManaColor, ManaCost};
+    use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
     use crate::types::player::PlayerId;
+    use crate::types::replacements::ReplacementEvent;
+    use crate::types::statics::StaticMode;
+    use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
 
     /// Terse 4-arg wrapper for filter-matching tests.
@@ -2744,6 +2978,182 @@ mod tests {
             !spell_record_matches_filter(&non_x_record, &filter, PlayerId(0), &[]),
             "record without X in cost must NOT match HasXInManaCost filter"
         );
+    }
+
+    #[test]
+    fn object_has_mana_ability_filter_uses_mana_ability_classifier() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Source");
+        let mana_rock = create_object(
+            &mut state,
+            CardId(410),
+            PlayerId(0),
+            "Mana Rock".to_string(),
+            Zone::Battlefield,
+        );
+        let draw_rock = create_object(
+            &mut state,
+            CardId(411),
+            PlayerId(0),
+            "Draw Rock".to_string(),
+            Zone::Battlefield,
+        );
+
+        for id in [mana_rock, draw_rock] {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Artifact);
+        }
+        let mana_ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Fixed {
+                    colors: vec![ManaColor::Green],
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        );
+        let draw_ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+        std::sync::Arc::make_mut(&mut state.objects.get_mut(&mana_rock).unwrap().abilities)
+            .push(mana_ability);
+        std::sync::Arc::make_mut(&mut state.objects.get_mut(&draw_rock).unwrap().abilities)
+            .push(draw_ability);
+
+        let filter = TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Artifact).properties(vec![FilterProp::HasManaAbility]),
+        );
+
+        assert!(matches_target_filter(&state, mana_rock, &filter, source));
+        assert!(!matches_target_filter(&state, draw_rock, &filter, source));
+    }
+
+    #[test]
+    fn object_has_no_abilities_filter_checks_all_ability_kinds() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Source");
+        let vanilla = add_creature(&mut state, PlayerId(0), "Vanilla");
+        let keyworded = add_creature(&mut state, PlayerId(0), "Keyworded");
+        let activated = add_creature(&mut state, PlayerId(0), "Activated");
+        let triggered = add_creature(&mut state, PlayerId(0), "Triggered");
+        let replacement = add_creature(&mut state, PlayerId(0), "Replacement");
+        let static_ability = add_creature(&mut state, PlayerId(0), "Static");
+
+        state
+            .objects
+            .get_mut(&keyworded)
+            .unwrap()
+            .keywords
+            .push(Keyword::Flying);
+        std::sync::Arc::make_mut(&mut state.objects.get_mut(&activated).unwrap().abilities).push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ),
+        );
+        state
+            .objects
+            .get_mut(&triggered)
+            .unwrap()
+            .trigger_definitions
+            .push(TriggerDefinition::new(TriggerMode::ChangesZone));
+        state
+            .objects
+            .get_mut(&replacement)
+            .unwrap()
+            .replacement_definitions
+            .push(ReplacementDefinition::new(ReplacementEvent::ChangeZone));
+        state
+            .objects
+            .get_mut(&static_ability)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::Continuous));
+
+        let filter = TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::HasNoAbilities]),
+        );
+
+        assert!(matches_target_filter(&state, vanilla, &filter, source));
+        assert!(!matches_target_filter(&state, keyworded, &filter, source));
+        assert!(!matches_target_filter(&state, activated, &filter, source));
+        assert!(!matches_target_filter(&state, triggered, &filter, source));
+        assert!(!matches_target_filter(&state, replacement, &filter, source));
+        assert!(!matches_target_filter(
+            &state,
+            static_ability,
+            &filter,
+            source
+        ));
+    }
+
+    #[test]
+    fn exact_mana_cost_filter_does_not_match_same_mana_value() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Source");
+        let zero = create_object(
+            &mut state,
+            CardId(400),
+            PlayerId(0),
+            "Zero Artifact".to_string(),
+            Zone::Battlefield,
+        );
+        let one = create_object(
+            &mut state,
+            CardId(401),
+            PlayerId(0),
+            "One Artifact".to_string(),
+            Zone::Battlefield,
+        );
+        let white = create_object(
+            &mut state,
+            CardId(402),
+            PlayerId(0),
+            "White Artifact".to_string(),
+            Zone::Battlefield,
+        );
+
+        for id in [zero, one, white] {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Artifact);
+        }
+        state.objects.get_mut(&zero).unwrap().mana_cost = ManaCost::zero();
+        state.objects.get_mut(&one).unwrap().mana_cost = ManaCost::generic(1);
+        state.objects.get_mut(&white).unwrap().mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 0,
+        };
+
+        let filter = TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact).properties(vec![
+            FilterProp::ManaCostIn {
+                costs: vec![ManaCost::zero(), ManaCost::generic(1)],
+            },
+        ]));
+
+        assert!(matches_target_filter(&state, zero, &filter, source));
+        assert!(matches_target_filter(&state, one, &filter, source));
+        assert!(!matches_target_filter(&state, white, &filter, source));
     }
 
     #[test]
@@ -4125,6 +4535,84 @@ mod tests {
         assert!(!super::matches_target_filter(&state, strong, &filter, &ctx));
     }
 
+    #[test]
+    fn can_enchant_matches_aura_keyword_against_parent_target() {
+        let mut state = setup();
+        let creature = add_creature(&mut state, PlayerId(0), "Host Creature");
+        let aura = create_object(
+            &mut state,
+            CardId(200),
+            PlayerId(0),
+            "Creature Aura".to_string(),
+            Zone::Library,
+        );
+        {
+            let aura_obj = state.objects.get_mut(&aura).unwrap();
+            aura_obj.card_types.core_types.push(CoreType::Enchantment);
+            aura_obj.card_types.subtypes.push("Aura".to_string());
+            aura_obj.keywords.push(Keyword::Enchant(TargetFilter::Typed(
+                TypedFilter::creature(),
+            )));
+        }
+        let ability = ResolvedAbility::new(
+            Effect::Unimplemented {
+                name: String::new(),
+                description: None,
+            },
+            vec![TargetRef::Object(creature)],
+            ObjectId(999),
+            PlayerId(0),
+        );
+        let filter =
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Enchantment).properties(vec![
+                FilterProp::CanEnchant {
+                    target: Box::new(TargetFilter::ParentTarget),
+                },
+            ]));
+        let ctx = FilterContext::from_ability(&ability);
+
+        assert!(super::matches_target_filter(&state, aura, &filter, &ctx));
+    }
+
+    #[test]
+    fn can_enchant_rejects_aura_that_cannot_enchant_parent_target() {
+        let mut state = setup();
+        let creature = add_creature(&mut state, PlayerId(0), "Host Creature");
+        let aura = create_object(
+            &mut state,
+            CardId(201),
+            PlayerId(0),
+            "Land Aura".to_string(),
+            Zone::Library,
+        );
+        {
+            let aura_obj = state.objects.get_mut(&aura).unwrap();
+            aura_obj.card_types.core_types.push(CoreType::Enchantment);
+            aura_obj.card_types.subtypes.push("Aura".to_string());
+            aura_obj
+                .keywords
+                .push(Keyword::Enchant(TargetFilter::Typed(TypedFilter::land())));
+        }
+        let ability = ResolvedAbility::new(
+            Effect::Unimplemented {
+                name: String::new(),
+                description: None,
+            },
+            vec![TargetRef::Object(creature)],
+            ObjectId(999),
+            PlayerId(0),
+        );
+        let filter =
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Enchantment).properties(vec![
+                FilterProp::CanEnchant {
+                    target: Box::new(TargetFilter::ParentTarget),
+                },
+            ]));
+        let ctx = FilterContext::from_ability(&ability);
+
+        assert!(!super::matches_target_filter(&state, aura, &filter, &ctx));
+    }
+
     /// CR 107.2: Bare context (no ability in scope) — `Variable("X")` resolves to 0,
     /// so `CmcLE { Variable("X") }` matches nothing with non-zero CMC.
     #[test]
@@ -5147,8 +5635,6 @@ mod tests {
     /// "whenever a creature token dies" triggers depend on this.
     #[test]
     fn zone_change_record_token_property_matches_snapshot() {
-        use crate::types::game_state::ZoneChangeRecord;
-
         let state = GameState::default();
         let source_ctx = SourceContext {
             id: ObjectId(1),
@@ -5183,6 +5669,43 @@ mod tests {
             &FilterProp::Token,
             &state,
             &nontoken_record,
+            &source_ctx,
+        ));
+
+        let enchanted_record = ZoneChangeRecord {
+            core_types: vec![CoreType::Creature],
+            attachments: vec![AttachmentSnapshot {
+                object_id: ObjectId(100),
+                controller: PlayerId(0),
+                kind: AttachmentKind::Aura,
+            }],
+            ..ZoneChangeRecord::test_minimal(ObjectId(44), Some(Zone::Battlefield), Zone::Graveyard)
+        };
+        assert!(zone_change_record_matches_property(
+            &FilterProp::HasAnyAttachmentOf {
+                kinds: vec![AttachmentKind::Aura, AttachmentKind::Equipment],
+                controller: None,
+            },
+            &state,
+            &enchanted_record,
+            &source_ctx,
+        ));
+        assert!(zone_change_record_matches_property(
+            &FilterProp::HasAttachment {
+                kind: AttachmentKind::Aura,
+                controller: Some(ControllerRef::You),
+            },
+            &state,
+            &enchanted_record,
+            &source_ctx,
+        ));
+        assert!(!zone_change_record_matches_property(
+            &FilterProp::HasAttachment {
+                kind: AttachmentKind::Equipment,
+                controller: None,
+            },
+            &state,
+            &enchanted_record,
             &source_ctx,
         ));
     }

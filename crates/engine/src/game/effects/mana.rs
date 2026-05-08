@@ -212,7 +212,7 @@ pub(crate) fn resolve_restrictions(
                 .get(&source_id)
                 .and_then(|obj| obj.chosen_creature_type())
                 .map(|ct| ManaRestriction::OnlyForCreatureType(ct.to_string())),
-            // CR 106.12: Combined spell type + ability activation restriction.
+            // CR 106.6: Combined spell type + ability activation restriction.
             ManaSpendRestriction::SpellTypeOrAbilityActivation(t) => {
                 Some(ManaRestriction::OnlyForTypeSpellsOrAbilities(t.clone()))
             }
@@ -265,7 +265,7 @@ fn resolve_mana_types_with_ability(
 
 /// CR 117.1 + CR 202.3: Public-crate wrapper for `resolve_mana_types_with_ability`.
 /// Used by the inline mana-ability resolver in `mana_abilities.rs` to thread a
-/// `ResolvedAbility` carrying `cost_paid_object_mana_value` (Food Chain class)
+/// `ResolvedAbility` carrying `cost_paid_object` (Food Chain class)
 /// and `chosen_x` into the production-count resolution.
 pub(crate) fn resolve_mana_types_for_ability(
     produced: &ManaProduction,
@@ -538,7 +538,7 @@ pub(crate) fn exiled_color_options(
     options
 }
 
-fn chosen_color_for_mana(
+pub(crate) fn chosen_color_for_mana(
     state: &GameState,
     source_id: crate::types::identifiers::ObjectId,
 ) -> Option<ManaColor> {

@@ -11,6 +11,7 @@ import {
 } from "../../services/gameStateExport";
 import { useGameStore } from "../../stores/gameStore";
 import { useUiStore } from "../../stores/uiStore";
+import { DebugActions } from "./DebugActions";
 
 const SCROLL_THRESHOLD = 40; // px from bottom to count as "at bottom"
 
@@ -114,6 +115,7 @@ export function DebugPanel() {
   const [showJumpToBottom, setShowJumpToBottom] = useState(false);
   const prevSnapshotLenRef = useRef(0);
 
+  const [activeTab, setActiveTab] = useState<"console" | "actions">("console");
   const canRestoreCheckpoints = gameMode === "ai" || gameMode === "local";
 
   const handleRestore = useCallback(async (state: GameState) => {
@@ -309,7 +311,30 @@ export function DebugPanel() {
         </button>
       </div>
 
+      <div className="flex border-b border-gray-700">
+        {(["console", "actions"] as const).map((tab) => (
+          <button
+            key={tab}
+            onClick={() => setActiveTab(tab)}
+            className={
+              "flex-1 py-1.5 font-mono text-xs uppercase tracking-wider transition-colors " +
+              (activeTab === tab
+                ? "border-b-2 border-blue-500 text-blue-400"
+                : "text-gray-500 hover:text-gray-300")
+            }
+          >
+            {tab}
+          </button>
+        ))}
+      </div>
+
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+        {activeTab === "actions" ? (
+          <section className="flex-1 overflow-y-auto px-3 py-2">
+            <DebugActions />
+          </section>
+        ) : (
+        <>
         {/* Checkpoints */}
         <section className="border-b border-gray-800 px-3 py-2">
           <h3 className="mb-1 font-mono text-xs font-bold uppercase tracking-wider text-gray-500">
@@ -512,6 +537,8 @@ export function DebugPanel() {
           >
             {status.message}
           </div>
+        )}
+        </>
         )}
       </div>
     </div>

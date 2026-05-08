@@ -1,5 +1,6 @@
 import type { Feed, FeedDeck, FeedSubscription } from "../types/feed";
 import { repairParsedDeck, type ParsedDeck } from "./deckParser";
+import { normalizeCardName } from "./scryfall";
 import { FEED_REGISTRY } from "../data/feedRegistry";
 import {
   ACTIVE_DECK_KEY,
@@ -59,6 +60,16 @@ const FEED_STALE_AFTER_MS = 24 * 60 * 60 * 1000;
 
 // --- Internal helpers ---
 
+function normalizeFeedDeckEntries(deck: FeedDeck): FeedDeck {
+  return {
+    ...deck,
+    main: deck.main.map((entry) => ({ ...entry, name: normalizeCardName(entry.name) })),
+    sideboard: deck.sideboard.map((entry) => ({ ...entry, name: normalizeCardName(entry.name) })),
+    commander: deck.commander?.map(normalizeCardName),
+    companion: deck.companion ? normalizeCardName(deck.companion) : undefined,
+  };
+}
+
 async function fetchFeed(url: string): Promise<Feed> {
   const response = await fetch(url);
   if (!response.ok) {
@@ -79,10 +90,11 @@ async function fetchFeed(url: string): Promise<Feed> {
  * empty commander array and rejects the deck as commander-illegal.
  */
 function normalizeFeed(feed: Feed): Feed {
-  if (feed.format !== "commander") return feed;
+  const normalizedDecks = feed.decks.map(normalizeFeedDeckEntries);
+  if (feed.format !== "commander") return { ...feed, decks: normalizedDecks };
   return {
     ...feed,
-    decks: feed.decks.map((deck) => {
+    decks: normalizedDecks.map((deck) => {
       if (!deck.main.some((entry) => entry.name === deck.name)) return deck;
       const parsed = repairParsedDeck({
         main: deck.main,
@@ -96,11 +108,16 @@ function normalizeFeed(feed: Feed): Feed {
 }
 
 export function feedDeckToParsedDeck(deck: FeedDeck): ParsedDeck {
+  const normalized = normalizeFeedDeckEntries(deck);
   return repairParsedDeck({
-    main: deck.main,
-    sideboard: deck.sideboard,
-    commander: deck.commander ?? undefined,
-    companion: deck.companion,
+    main: normalized.main,
+    sideboard: normalized.sideboard,
+    commander: normalized.commander?.length
+      ? normalized.commander
+      : normalized.main.some((entry) => entry.name === normalized.name)
+        ? [normalized.name]
+        : undefined,
+    companion: normalized.companion,
   });
 }
 

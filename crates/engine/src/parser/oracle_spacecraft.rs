@@ -19,15 +19,16 @@
 //! separate modules preserves the clarity of each pattern; extracting a
 //! shared helper would obscure more than it saves.
 
+use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::tag;
 use nom::combinator::value;
 use nom::Parser;
-use nom_language::error::VerboseError;
 
 use super::oracle::{find_activated_colon, has_unimplemented, strip_activated_constraints};
 use super::oracle_cost::parse_oracle_cost;
 use super::oracle_effect::parse_effect_chain;
+use super::oracle_ir::context::ParseContext;
 use super::oracle_keyword::parse_keyword_from_oracle;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_special::normalize_self_refs_for_static;
@@ -126,6 +127,7 @@ pub(crate) fn parse_spacecraft_threshold_lines(
                 body,
                 card_name,
                 Some(base_trigger_index + triggers.len()),
+                &mut ParseContext::default(),
             );
             for trig in &mut parsed {
                 trig.condition = Some(trigger_cond.clone());
@@ -200,7 +202,7 @@ pub(crate) fn parse_spacecraft_threshold_lines(
 pub(crate) fn parse_threshold_header(line: &str) -> Option<(u32, &str)> {
     let (rest, n) = nom_primitives::parse_number(line).ok()?;
     let (rest, _) = alt((
-        value((), tag::<_, _, VerboseError<&str>>("+ | ")),
+        value((), tag::<_, _, OracleError<'_>>("+ | ")),
         value((), tag("+| ")),
         value((), tag("+ |")),
         value((), tag("+|")),
@@ -246,8 +248,8 @@ fn parse_keyword_only_body(body: &str) -> Option<Vec<ContinuousModification>> {
 /// nom `tag` combinators — never substring matching.
 fn has_trigger_prefix(body: &str) -> bool {
     let lower = body.to_lowercase();
-    let result: Result<(&str, ()), nom::Err<VerboseError<&str>>> = alt((
-        value((), tag::<_, _, VerboseError<&str>>("whenever ")),
+    let result: Result<(&str, ()), nom::Err<OracleError<'_>>> = alt((
+        value((), tag::<_, _, OracleError<'_>>("whenever ")),
         value((), tag("when ")),
         value((), tag("at the beginning")),
     ))

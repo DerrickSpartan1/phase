@@ -3,10 +3,12 @@ import type { CSSProperties } from "react";
 import { motion } from "framer-motion";
 
 import { useCardImage } from "../../hooks/useCardImage.ts";
+import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useLongPress } from "../../hooks/useLongPress.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useSeatColor } from "../../hooks/useSeatColor.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
+import { cardImageLookup } from "../../services/cardImageLookup.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { renderDescription } from "../../utils/description.ts";
@@ -37,6 +39,7 @@ interface StackEntryProps {
 }
 
 export function StackEntry({ entry, index, isTop, isPending, cardSize, style, onHoverChange, pacingMultiplier = 1, groupCount = 1 }: StackEntryProps) {
+  const isMobile = useIsMobile();
   const playerId = usePlayerId();
   const objects = useGameStore((s) => s.gameState?.objects);
   const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
@@ -50,8 +53,16 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
 
   const sourceObj = objects?.[entry.source_id];
   const sourceName = sourceObj?.name ?? "Unknown";
+  const imageLookup = sourceObj
+    ? cardImageLookup(sourceObj)
+    : { name: "", faceIndex: 0, oracleId: undefined, faceName: undefined };
 
-  const { src, isLoading } = useCardImage(sourceName, { size: "normal" });
+  const { src, isLoading } = useCardImage(imageLookup.name, {
+    size: "normal",
+    faceIndex: imageLookup.faceIndex,
+    oracleId: imageLookup.oracleId,
+    faceName: imageLookup.faceName,
+  });
 
   const isSpell = entry.kind.type === "Spell";
   const abilityLabel =
@@ -105,11 +116,11 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
       data-card-hover
       className="relative cursor-pointer"
       onClick={handleClick}
-      onMouseEnter={() => {
+      onMouseEnter={isMobile ? undefined : () => {
         inspectObject(entry.source_id);
         onHoverChange?.(true);
       }}
-      onMouseLeave={() => {
+      onMouseLeave={isMobile ? undefined : () => {
         inspectObject(null);
         onHoverChange?.(false);
       }}

@@ -38,6 +38,8 @@ interface UiStoreState {
   pendingAbilityChoice: { objectId: ObjectId; actions: GameAction[] } | null;
   mobileHandOpen: boolean;
   debugPanelOpen: boolean;
+  debugInteractionMode: boolean;
+  debugContextMenu: { objectId: ObjectId; x: number; y: number } | null;
   logPanelOpen: boolean;
 }
 
@@ -68,6 +70,9 @@ interface UiStoreActions {
   setPendingAbilityChoice: (choice: { objectId: ObjectId; actions: GameAction[] } | null) => void;
   setMobileHandOpen: (open: boolean) => void;
   toggleDebugPanel: () => void;
+  toggleDebugInteractionMode: () => void;
+  openDebugContextMenu: (menu: { objectId: ObjectId; x: number; y: number }) => void;
+  closeDebugContextMenu: () => void;
   setLogPanelOpen: (open: boolean) => void;
   toggleLogPanel: () => void;
 }
@@ -96,6 +101,8 @@ export const useUiStore = create<UiStore>()((set) => ({
   pendingAbilityChoice: null,
   mobileHandOpen: false,
   debugPanelOpen: false,
+  debugInteractionMode: false,
+  debugContextMenu: null,
   logPanelOpen: false,
 
   selectObject: (id) => set({ selectedObjectId: id }),
@@ -232,6 +239,12 @@ export const useUiStore = create<UiStore>()((set) => ({
   setPendingAbilityChoice: (choice) => set({ pendingAbilityChoice: choice }),
   setMobileHandOpen: (open) => set({ mobileHandOpen: open }),
   toggleDebugPanel: () => set((state) => ({ debugPanelOpen: !state.debugPanelOpen })),
+  toggleDebugInteractionMode: () => set((state) => ({
+    debugInteractionMode: !state.debugInteractionMode,
+    debugContextMenu: null,
+  })),
+  openDebugContextMenu: (menu) => set({ debugContextMenu: menu, selectedObjectId: menu.objectId }),
+  closeDebugContextMenu: () => set({ debugContextMenu: null }),
   setLogPanelOpen: (open) => set({ logPanelOpen: open }),
   toggleLogPanel: () => set((state) => ({ logPanelOpen: !state.logPanelOpen })),
 }));

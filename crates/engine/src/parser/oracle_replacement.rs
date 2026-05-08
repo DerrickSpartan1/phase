@@ -1,15 +1,19 @@
 use std::str::FromStr;
 
+use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::char;
 use nom::combinator::{opt, peek, value};
 use nom::sequence::{pair, preceded};
 use nom::Parser;
-use nom_language::error::VerboseError;
 
-use super::oracle_effect::become_copy_except::{parse_except_clause, ExceptClauseContext};
-use super::oracle_effect::{parse_effect_chain, try_parse_named_choice};
+use super::oracle_effect::become_copy_except::parse_except_clause;
+use super::oracle_effect::{
+    parse_effect_chain, parse_effect_chain_with_context, try_parse_named_choice,
+};
+use super::oracle_ir::context::ParseContext;
+use super::oracle_ir::replacement::ReplacementIr;
 use super::oracle_nom::bridge::{nom_on_lower, split_once_on_lower};
 use super::oracle_nom::condition::parse_inner_condition;
 use super::oracle_nom::duration::parse_duration;
@@ -24,8 +28,8 @@ use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ChoiceType, CombatDamageScope, Comparator,
     ContinuousModification, ControllerRef, CopyManaValueLimit, DamageModification,
     DamageTargetFilter, DamageTargetPlayerScope, Duration, Effect, FilterProp, ManaModification,
-    PreventionAmount, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
-    ReplacementMode, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
+    ManaReplacementScope, PreventionAmount, QuantityExpr, QuantityRef, ReplacementCondition,
+    ReplacementDefinition, ReplacementMode, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::mana::{ManaColor, ManaCost, ManaType};
 use crate::types::replacements::ReplacementEvent;
@@ -40,6 +44,29 @@ use crate::types::zones::Zone;
 /// text is already normalized and the internal call is an idempotent no-op.
 #[tracing::instrument(level = "debug", skip(card_name))]
 pub fn parse_replacement_line(text: &str, card_name: &str) -> Option<ReplacementDefinition> {
+    let ir = parse_replacement_line_ir(text, card_name)?;
+    Some(lower_replacement_ir(&ir))
+}
+
+/// IR production: parse a replacement line into `ReplacementIr` (pre-lowering).
+pub(crate) fn parse_replacement_line_ir(text: &str, card_name: &str) -> Option<ReplacementIr> {
+    let definition = parse_replacement_line_inner(text, card_name)?;
+    Some(ReplacementIr {
+        definition,
+        source_text: text.to_string(),
+        execute_ir: None,
+    })
+}
+
+/// Lowering: produce the final `ReplacementDefinition` from IR.
+///
+/// Currently identity — replacement definitions are fully assembled during parsing.
+pub(crate) fn lower_replacement_ir(ir: &ReplacementIr) -> ReplacementDefinition {
+    ir.definition.clone()
+}
+
+/// Internal dispatch body for replacement line parsing.
+fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<ReplacementDefinition> {
     let text = strip_reminder_text(text);
     let lower = text.to_lowercase();
     let normalized = replace_self_refs(&text, card_name);
@@ -119,6 +146,13 @@ pub fn parse_replacement_line(text: &str, card_name: &str) -> Option<Replacement
         return Some(def);
     }
 
+    // --- "If an opponent causes you to discard this card, put it onto the battlefield instead" ---
+    if let Some(def) =
+        parse_discard_self_to_battlefield_replacement(&norm_lower, &normalized, &text)
+    {
+        return Some(def);
+    }
+
     // --- "If ~ would die, {effect}" ---
     if nom_primitives::scan_contains(&norm_lower, "~ would die")
         || nom_primitives::scan_contains(&norm_lower, "~ would be destroyed")
@@ -157,6 +191,12 @@ pub fn parse_replacement_line(text: &str, card_name: &str) -> Option<Replacement
     }
 
     // --- "Prevent all/the next N damage" patterns (CR 615) ---
+    if let Some(def) = parse_damage_to_player_instead_followup(&norm_lower, &text) {
+        return Some(def);
+    }
+    if let Some(def) = parse_damage_to_self_instead_followup(&norm_lower, &normalized, &text) {
+        return Some(def);
+    }
     if let Some(def) = parse_damage_prevention_replacement(&norm_lower, &text) {
         return Some(def);
     }
@@ -327,6 +367,39 @@ pub fn parse_replacement_line(text: &str, card_name: &str) -> Option<Replacement
     None
 }
 
+fn parse_discard_self_to_battlefield_replacement(
+    norm_lower: &str,
+    normalized: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    let ((), after_prefix) = nom_on_lower(normalized, norm_lower, |i| {
+        value(
+            (),
+            tag("if a spell or ability an opponent controls causes you to discard this card, "),
+        )
+        .parse(i)
+    })?;
+    let after_prefix_lower = after_prefix.to_lowercase();
+    let (effect_text, tail) = split_once_on_lower(
+        after_prefix,
+        &after_prefix_lower,
+        " instead of putting it into your graveyard",
+    )?;
+    if !tail.trim_end_matches('.').trim().is_empty() {
+        return None;
+    }
+    let execute = parse_effect_chain(effect_text, AbilityKind::Spell);
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::Discard)
+            .execute(execute)
+            .valid_card(TargetFilter::SelfRef)
+            .condition(ReplacementCondition::EventSourceControlledBy {
+                controller: ControllerRef::Opponent,
+            })
+            .description(original_text.to_string()),
+    )
+}
+
 /// Case-insensitive replacement of card name and self-referencing phrases with "~".
 fn replace_self_refs(text: &str, card_name: &str) -> String {
     normalize_card_name_refs(text, card_name)
@@ -375,7 +448,7 @@ fn parse_reveal_land(
     let ((), after_filter) = nom_on_lower(after_reveal, &after_reveal_lower, |i| {
         value(
             (),
-            take_until::<_, _, VerboseError<&str>>(" card from your hand"),
+            take_until::<_, _, OracleError<'_>>(" card from your hand"),
         )
         .parse(i)
     })?;
@@ -505,7 +578,7 @@ fn parse_reveal_land_tail(
     let ((), after_first_filter) = nom_on_lower(after_unless, &after_unless_lower, |i| {
         value(
             (),
-            take_until::<_, _, VerboseError<&str>>(" card this way or you control "),
+            take_until::<_, _, OracleError<'_>>(" card this way or you control "),
         )
         .parse(i)
     })?;
@@ -661,7 +734,7 @@ fn parse_as_enters_choose(norm_lower: &str, original_text: &str) -> Option<Repla
 
     // Extract the "choose a ..." clause — scan_split_at_phrase returns (prefix, rest_starting_at_match)
     let (_, choose_text) = nom_primitives::scan_split_at_phrase(norm_lower, |i| {
-        tag::<_, _, VerboseError<&str>>("choose ").parse(i)
+        tag::<_, _, OracleError<'_>>("choose ").parse(i)
     })?;
     let choice_type = try_parse_named_choice(choose_text)?;
 
@@ -717,14 +790,10 @@ fn parse_clone_replacement(
     // below so `find_copy_targets` can scan the correct zone without branching.
     let (type_text, suffix, source_zone) = split_on_clone_source_zone(after_copy)?;
     // Strip "any " / "a " / "an " article before the type phrase
-    let type_text = alt((
-        tag::<_, _, VerboseError<&str>>("any "),
-        tag("a "),
-        tag("an "),
-    ))
-    .parse(type_text)
-    .map_or(type_text, |(rest, _)| rest)
-    .trim();
+    let type_text = alt((tag::<_, _, OracleError<'_>>("any "), tag("a "), tag("an ")))
+        .parse(type_text)
+        .map_or(type_text, |(rest, _)| rest)
+        .trim();
 
     let (mut filter, leftover) = parse_type_phrase(type_text);
     if !leftover.trim().is_empty() {
@@ -827,7 +896,7 @@ fn find_copy_verb(norm_lower: &str) -> Option<(&str, &str, bool)> {
     let mut best: Option<(usize, usize, bool)> = None;
     for &(phrase, tapped) in candidates {
         if let Some((before, _)) = nom_primitives::scan_split_at_phrase(norm_lower, |i| {
-            tag::<_, _, VerboseError<&str>>(phrase).parse(i)
+            tag::<_, _, OracleError<'_>>(phrase).parse(i)
         }) {
             let pos = before.len();
             if best.is_none_or(|(bp, _, _)| pos < bp) {
@@ -929,7 +998,7 @@ fn parse_when_you_do_reflexive(post_period: &str) -> Option<AbilityDefinition> {
     // without reshaping the guard.
     let lower = trimmed.to_lowercase();
     nom_on_lower(trimmed, &lower, |i| {
-        value((), tag::<_, _, VerboseError<&str>>("when you do")).parse(i)
+        value((), tag::<_, _, OracleError<'_>>("when you do")).parse(i)
     })?;
     let def = super::oracle_effect::parse_effect_chain(trimmed, AbilityKind::Spell);
     // Reject unimplemented fallbacks — the chain parser returns
@@ -981,7 +1050,7 @@ fn parse_clone_suffix<'a>(
     // ability` arms inside an except clause decline gracefully when the
     // context's `current_trigger_index` is `None`.
     let (post_except, modifications) =
-        parse_except_clause(remaining, card_name, ExceptClauseContext::default())
+        parse_except_clause(remaining, card_name, &ParseContext::default())
             .unwrap_or((remaining, Vec::new()));
 
     (mana_value_limit, duration, modifications, post_except)
@@ -1002,14 +1071,14 @@ fn parse_leading_duration(suffix: &str) -> (&str, Option<Duration>) {
 /// CR 614.1c: " with mana value less than or equal to the amount of mana spent to cast {self_ref}".
 /// Matches at the start of `suffix`; returns the remainder (still lowercase) and the typed limit.
 fn parse_mana_value_limit_clause(suffix: &str) -> Option<(&str, Option<CopyManaValueLimit>)> {
-    let (rest, _) = tag::<_, _, VerboseError<&str>>(
+    let (rest, _) = tag::<_, _, OracleError<'_>>(
         "with mana value less than or equal to the amount of mana spent to cast ",
     )
     .parse(suffix)
     .ok()?;
     // Self-reference: the normalizer rewrites the card name to "~" but
     // Oracle text commonly also uses "this creature" verbatim.
-    let (rest, _) = alt((tag::<_, _, VerboseError<&str>>("this creature"), tag("~")))
+    let (rest, _) = alt((tag::<_, _, OracleError<'_>>("this creature"), tag("~")))
         .parse(rest)
         .ok()?;
     Some((rest, Some(CopyManaValueLimit::AmountSpentToCastSource)))
@@ -1096,7 +1165,7 @@ fn parse_fast_condition(norm_lower: &str) -> Option<ReplacementCondition> {
     // Parse "two or fewer other lands." → count=2, remainder="or fewer other lands."
     let (nom_rest, count) = nom_primitives::parse_number.parse(rest).ok()?;
     let after_number = nom_rest.trim_start();
-    let (after_or_fewer, _) = tag::<_, _, VerboseError<&str>>("or fewer ")
+    let (after_or_fewer, _) = tag::<_, _, OracleError<'_>>("or fewer ")
         .parse(after_number.trim_start())
         .ok()?;
     let type_text = after_or_fewer.trim_end_matches('.');
@@ -1191,7 +1260,7 @@ fn parse_opponents_control_condition(norm_lower: &str) -> Option<ReplacementCond
 /// Delegates to `nom_primitives::parse_number` for the count (input already lowercase).
 fn try_parse_quantity_prefix(text: &str) -> Option<(u32, &str)> {
     let (nom_rest, n) = nom_primitives::parse_number.parse(text).ok()?;
-    let (type_text, _) = tag::<_, _, VerboseError<&str>>("or more ")
+    let (type_text, _) = tag::<_, _, OracleError<'_>>("or more ")
         .parse(nom_rest.trim_start())
         .ok()?;
     Some((n, type_text))
@@ -1239,7 +1308,7 @@ fn extract_life_payment(text: &str) -> Option<i32> {
 /// entering object's own `cost_x_paid` field, which is populated by
 /// `finalize_cast` and survives the stack → battlefield move. Walks the
 /// expression tree so `Multiply { factor: 2, inner: Variable("X") }` (Primo)
-/// and `HalfRounded { inner: Variable("X"), .. }` also get the rewrite.
+/// and `DivideRounded { inner: Variable("X"), .. }` also get the rewrite.
 pub(crate) fn rewrite_variable_x_to_cost_x_paid(expr: &mut QuantityExpr) {
     match expr {
         QuantityExpr::Ref { qty } => {
@@ -1248,7 +1317,7 @@ pub(crate) fn rewrite_variable_x_to_cost_x_paid(expr: &mut QuantityExpr) {
             }
         }
         QuantityExpr::Fixed { .. } => {}
-        QuantityExpr::HalfRounded { inner, .. }
+        QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::Offset { inner, .. }
         | QuantityExpr::Multiply { inner, .. } => rewrite_variable_x_to_cost_x_paid(inner),
         QuantityExpr::Sum { exprs } => {
@@ -1274,7 +1343,7 @@ fn parse_enters_with_counters(
 
     // CR 702.138c: "escapes with" is semantically "enters with" gated on escape.
     // Use nom take_until to scan for the "escapes with" phrase at word boundaries.
-    let is_escape = take_until::<_, _, VerboseError<&str>>("escapes with")
+    let is_escape = take_until::<_, _, OracleError<'_>>("escapes with")
         .parse(work_text)
         .is_ok();
 
@@ -1283,7 +1352,7 @@ fn parse_enters_with_counters(
     let after_with = strip_after(work_text, "with ")?;
     // Skip "an additional" if present
     let after_additional = alt((
-        tag::<_, _, VerboseError<&str>>("an additional "),
+        tag::<_, _, OracleError<'_>>("an additional "),
         tag("additional "),
     ))
     .parse(after_with)
@@ -1291,13 +1360,13 @@ fn parse_enters_with_counters(
 
     let counter_entries = parse_enters_counter_entries(after_additional);
     // Detect dynamic count: "a number of [type] counters ... equal to [qty]"
-    let after_prefix = tag::<_, _, VerboseError<&str>>("a number of ")
+    let after_prefix = tag::<_, _, OracleError<'_>>("a number of ")
         .parse(after_additional)
         .map_or(after_additional, |(rest, _)| rest);
     // CR 107.3 + CR 107.3m + CR 107.1a: Parse the counter count as a full
     // `QuantityExpr`, so "N", "X", "twice X", "three times X", and
     // "half X, rounded up/down" all compose through the same typed arithmetic
-    // wrappers (`Multiply`, `HalfRounded`). `parse_count_expr` returns
+    // wrappers (`Multiply`, `DivideRounded`). `parse_count_expr` returns
     // `Variable("X")` for bare X; the ETB-enters context requires the entering
     // object's `cost_x_paid` (runtime `Variable("X")` only reads trigger-event
     // sources, not the entering permanent), so rewrite X → `CostXPaid`
@@ -1337,17 +1406,14 @@ fn parse_enters_with_counters(
     // Determine valid_card filter: self vs other creatures
     // Strip "each other " or "other " prefix, then delegate to parse_type_phrase
     // which handles non-X, controller, "of the chosen type", etc.
-    let subject = alt((
-        tag::<_, _, VerboseError<&str>>("each other "),
-        tag("other "),
-    ))
-    .parse(work_text)
-    .ok()
-    .map(|(rest, _)| rest)
-    .filter(|s| {
-        nom_primitives::scan_contains(s, "creature")
-            || nom_primitives::scan_contains(s, "permanent")
-    });
+    let subject = alt((tag::<_, _, OracleError<'_>>("each other "), tag("other ")))
+        .parse(work_text)
+        .ok()
+        .map(|(rest, _)| rest)
+        .filter(|s| {
+            nom_primitives::scan_contains(s, "creature")
+                || nom_primitives::scan_contains(s, "permanent")
+        });
     let valid_card = if let Some(subject_text) = subject {
         let (filter, _) = parse_type_phrase(subject_text);
         // Inject Another since we stripped "other" above
@@ -1436,10 +1502,10 @@ fn extract_enters_with_only_if_suffix(text: &str) -> Option<ReplacementCondition
 }
 
 fn parse_enters_counter_for_each_suffix(after_counter: &str) -> Option<QuantityExpr> {
-    let (rest, _) = opt(tag::<_, _, VerboseError<&str>>("s"))
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>("s"))
         .parse(after_counter)
         .ok()?;
-    let (rest, _) = tag::<_, _, VerboseError<&str>>(" on it for each ")
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" on it for each ")
         .parse(rest)
         .ok()?;
     if let Ok((rest, qty)) = parse_for_each_convoked_creature_clause(rest) {
@@ -1459,8 +1525,7 @@ fn parse_enters_counter_for_each_suffix(after_counter: &str) -> Option<QuantityE
 fn parse_for_each_convoked_creature_clause(
     input: &str,
 ) -> super::oracle_nom::error::OracleResult<'_, QuantityExpr> {
-    let (rest, _) =
-        pair(tag::<_, _, VerboseError<&str>>("creature"), opt(tag("s"))).parse(input)?;
+    let (rest, _) = pair(tag::<_, _, OracleError<'_>>("creature"), opt(tag("s"))).parse(input)?;
     let (rest, _) = tag(" ").parse(rest)?;
     let (rest, _) = tag("that convoked ").parse(rest)?;
     let (rest, _) = alt((
@@ -1487,7 +1552,7 @@ fn parse_enters_counter_entries(after_with: &str) -> Option<Vec<(String, Quantit
         let (mut count_expr, rest) = parse_count_expr(remaining)?;
         rewrite_variable_x_to_cost_x_paid(&mut count_expr);
 
-        let (at_counter, counter_type_raw) = take_until::<_, _, VerboseError<&str>>(" counter")
+        let (at_counter, counter_type_raw) = take_until::<_, _, OracleError<'_>>(" counter")
             .parse(rest)
             .ok()?;
         if counter_type_raw.trim().is_empty() {
@@ -1495,11 +1560,9 @@ fn parse_enters_counter_entries(after_with: &str) -> Option<Vec<(String, Quantit
         }
         let counter_type =
             crate::parser::oracle_effect::counter::normalize_counter_type(counter_type_raw);
-        let (after_space, _) = tag::<_, _, VerboseError<&str>>(" ")
-            .parse(at_counter)
-            .ok()?;
+        let (after_space, _) = tag::<_, _, OracleError<'_>>(" ").parse(at_counter).ok()?;
         let (after_counter_word, _) =
-            alt((tag::<_, _, VerboseError<&str>>("counters"), tag("counter")))
+            alt((tag::<_, _, OracleError<'_>>("counters"), tag("counter")))
                 .parse(after_space)
                 .ok()?;
 
@@ -1510,7 +1573,7 @@ fn parse_enters_counter_entries(after_with: &str) -> Option<Vec<(String, Quantit
             continue;
         }
 
-        tag::<_, _, VerboseError<&str>>(" on it")
+        tag::<_, _, OracleError<'_>>(" on it")
             .parse(after_counter_word)
             .ok()?;
         break;
@@ -1521,7 +1584,7 @@ fn parse_enters_counter_entries(after_with: &str) -> Option<Vec<(String, Quantit
 
 fn parse_enters_counter_separator(input: &str) -> Option<&str> {
     let (after_sep, _) = alt((
-        tag::<_, _, VerboseError<&str>>(", and "),
+        tag::<_, _, OracleError<'_>>(", and "),
         tag(" and "),
         tag(", "),
     ))
@@ -1529,16 +1592,14 @@ fn parse_enters_counter_separator(input: &str) -> Option<&str> {
     .ok()?;
 
     let (_, rest) = parse_count_expr(after_sep)?;
-    let (at_counter, counter_type_raw) = take_until::<_, _, VerboseError<&str>>(" counter")
+    let (at_counter, counter_type_raw) = take_until::<_, _, OracleError<'_>>(" counter")
         .parse(rest)
         .ok()?;
     if counter_type_raw.trim().is_empty() {
         return None;
     }
-    let (after_space, _) = tag::<_, _, VerboseError<&str>>(" ")
-        .parse(at_counter)
-        .ok()?;
-    alt((tag::<_, _, VerboseError<&str>>("counters"), tag("counter")))
+    let (after_space, _) = tag::<_, _, OracleError<'_>>(" ").parse(at_counter).ok()?;
+    alt((tag::<_, _, OracleError<'_>>("counters"), tag("counter")))
         .parse(after_space)
         .ok()?;
 
@@ -1584,13 +1645,13 @@ fn parse_whenever_you_cast_enters_with(
     original_text: &str,
 ) -> Option<ReplacementDefinition> {
     // Prefix.
-    let (rest, _) = tag::<_, _, VerboseError<&str>>("whenever you cast ")
+    let (rest, _) = tag::<_, _, OracleError<'_>>("whenever you cast ")
         .parse(norm_lower)
         .ok()?;
 
     // Drop the article before the spell filter.
     let (rest, _) = alt((
-        tag::<_, _, VerboseError<&str>>("a "),
+        tag::<_, _, OracleError<'_>>("a "),
         tag("an "),
         tag("another "),
     ))
@@ -1616,13 +1677,13 @@ fn parse_whenever_you_cast_enters_with(
 
     // Subject — "creature", "permanent", or "spell" — and " enters with ".
     let (rest, _subject) = alt((
-        tag::<_, _, VerboseError<&str>>("creature "),
+        tag::<_, _, OracleError<'_>>("creature "),
         tag("permanent "),
         tag("spell "),
     ))
     .parse(after_that_text)
     .ok()?;
-    let (rest, _) = tag::<_, _, VerboseError<&str>>("enters with ")
+    let (rest, _) = tag::<_, _, OracleError<'_>>("enters with ")
         .parse(rest)
         .ok()?;
 
@@ -1630,10 +1691,10 @@ fn parse_whenever_you_cast_enters_with(
     // Mirrors `try_parse_enters_with_additional_counters` — the Wildgrowth
     // family always uses "additional" but the underlying shape matches.
     let (rest, fixed_count) =
-        if let Ok((r, _)) = tag::<_, _, VerboseError<&str>>("an additional ").parse(rest) {
+        if let Ok((r, _)) = tag::<_, _, OracleError<'_>>("an additional ").parse(rest) {
             (r, Some(1u32))
         } else if let Ok((r, _)) = alt((
-            tag::<_, _, VerboseError<&str>>("x additional "),
+            tag::<_, _, OracleError<'_>>("x additional "),
             tag("X additional "),
         ))
         .parse(rest)
@@ -1641,9 +1702,9 @@ fn parse_whenever_you_cast_enters_with(
             // X is dynamic — actual value comes from the trailing "where X is …" clause.
             (r, None)
         } else if let Ok((r, n)) = nom_primitives::parse_number(rest) {
-            let (r, _) = tag::<_, _, VerboseError<&str>>(" additional ")
+            let (r, _) = tag::<_, _, OracleError<'_>>(" additional ")
                 .parse(r)
-                .or_else(|_| tag::<_, _, VerboseError<&str>>(" ").parse(r))
+                .or_else(|_| tag::<_, _, OracleError<'_>>(" ").parse(r))
                 .ok()?;
             (r, Some(n))
         } else {
@@ -1652,7 +1713,7 @@ fn parse_whenever_you_cast_enters_with(
 
     // Counter type.
     let (rest, counter_type) = alt((
-        value("P1P1".to_string(), tag::<_, _, VerboseError<&str>>("+1/+1")),
+        value("P1P1".to_string(), tag::<_, _, OracleError<'_>>("+1/+1")),
         value("M1M1".to_string(), tag("-1/-1")),
     ))
     .parse(rest)
@@ -1660,7 +1721,7 @@ fn parse_whenever_you_cast_enters_with(
 
     // " counter on it" / " counters on it" with optional trailing punctuation.
     let (rest, _) = alt((
-        tag::<_, _, VerboseError<&str>>(" counter on it"),
+        tag::<_, _, OracleError<'_>>(" counter on it"),
         tag(" counters on it"),
     ))
     .parse(rest)
@@ -1672,7 +1733,7 @@ fn parse_whenever_you_cast_enters_with(
         None => {
             // Expect ", where x is " then a quantity ref.
             let (rest, _) = alt((
-                tag::<_, _, VerboseError<&str>>(", where x is "),
+                tag::<_, _, OracleError<'_>>(", where x is "),
                 tag(", where X is "),
             ))
             .parse(rest)
@@ -1710,15 +1771,15 @@ fn parse_whenever_you_cast_enters_with(
 fn extract_kicker_enters_condition(norm_lower: &str) -> (Option<ReplacementCondition>, &str) {
     // CR 702.33d: Parse "if ~ was kicked [with its {cost} kicker], it enters with..."
     // using nom combinators for structured dispatch.
-    let after_if = match tag::<_, _, VerboseError<&str>>("if ").parse(norm_lower) {
+    let after_if = match tag::<_, _, OracleError<'_>>("if ").parse(norm_lower) {
         Ok((rest, _)) => rest,
         Err(_) => return (None, norm_lower),
     };
 
     // Subject can be "~", "it", "this creature", etc. — scan to "was kicked".
-    let after_kicked = match take_until::<_, _, VerboseError<&str>>("was kicked")
+    let after_kicked = match take_until::<_, _, OracleError<'_>>("was kicked")
         .parse(after_if)
-        .and_then(|(rest, _)| tag::<_, _, VerboseError<&str>>("was kicked").parse(rest))
+        .and_then(|(rest, _)| tag::<_, _, OracleError<'_>>("was kicked").parse(rest))
     {
         Ok((rest, _)) => rest,
         Err(_) => return (None, norm_lower),
@@ -1726,12 +1787,12 @@ fn extract_kicker_enters_condition(norm_lower: &str) -> (Option<ReplacementCondi
 
     // Optional "with its {cost} kicker" variant specification
     let (cost_text, after_kicker_clause) =
-        match tag::<_, _, VerboseError<&str>>(" with its ").parse(after_kicked) {
+        match tag::<_, _, OracleError<'_>>(" with its ").parse(after_kicked) {
             Ok((rest, _)) => {
-                match take_until::<_, _, VerboseError<&str>>(" kicker").parse(rest) {
+                match take_until::<_, _, OracleError<'_>>(" kicker").parse(rest) {
                     Ok((rest2, cost_str)) => {
                         // Consume " kicker" tag
-                        match tag::<_, _, VerboseError<&str>>(" kicker").parse(rest2) {
+                        match tag::<_, _, OracleError<'_>>(" kicker").parse(rest2) {
                             Ok((rest3, _)) => (Some(cost_str.trim().to_string()), rest3),
                             Err(_) => (None, after_kicked),
                         }
@@ -1744,7 +1805,7 @@ fn extract_kicker_enters_condition(norm_lower: &str) -> (Option<ReplacementCondi
 
     // Expect ", it enters with" or ", it enters the battlefield with"
     let enters_result = alt((
-        tag::<_, _, VerboseError<&str>>(", it enters with"),
+        tag::<_, _, OracleError<'_>>(", it enters with"),
         tag(", it enters the battlefield with"),
     ))
     .parse(after_kicker_clause);
@@ -1781,21 +1842,21 @@ fn parse_lower_mana_cost(cost_text: &str) -> Option<ManaCost> {
 /// be matched here. We currently parse `your hand`, `your graveyard`,
 /// and `exile` since those are the textually attested forms.
 fn extract_cast_from_zone_suffix(work_text: &str) -> Option<Zone> {
+    use crate::parser::oracle_nom::error::OracleError;
     use nom::bytes::complete::tag;
-    use nom_language::error::VerboseError;
     // Locate the suffix.
-    let (rest, _) = take_until::<_, _, VerboseError<&str>>("if you cast it from ")
+    let (rest, _) = take_until::<_, _, OracleError<'_>>("if you cast it from ")
         .parse(work_text)
         .ok()?;
-    let (rest, _) = tag::<_, _, VerboseError<&str>>("if you cast it from ")
+    let (rest, _) = tag::<_, _, OracleError<'_>>("if you cast it from ")
         .parse(rest)
         .ok()?;
     // Match the zone tail.
-    let zone = if let Ok((_, _)) = tag::<_, _, VerboseError<&str>>("your hand").parse(rest) {
+    let zone = if let Ok((_, _)) = tag::<_, _, OracleError<'_>>("your hand").parse(rest) {
         Zone::Hand
-    } else if let Ok((_, _)) = tag::<_, _, VerboseError<&str>>("your graveyard").parse(rest) {
+    } else if let Ok((_, _)) = tag::<_, _, OracleError<'_>>("your graveyard").parse(rest) {
         Zone::Graveyard
-    } else if let Ok((_, _)) = tag::<_, _, VerboseError<&str>>("exile").parse(rest) {
+    } else if let Ok((_, _)) = tag::<_, _, OracleError<'_>>("exile").parse(rest) {
         Zone::Exile
     } else {
         return None;
@@ -1809,14 +1870,14 @@ fn extract_cast_from_zone_suffix(work_text: &str) -> Option<Zone> {
 /// Corsair, etc.) — "~ enters with a +1/+1 counter on it if you
 /// attacked this turn."
 fn extract_you_attacked_this_turn_suffix(work_text: &str) -> bool {
+    use crate::parser::oracle_nom::error::OracleError;
     use nom::bytes::complete::tag;
-    use nom_language::error::VerboseError;
     let Ok((rest, _)) =
-        take_until::<_, _, VerboseError<&str>>("if you attacked this turn").parse(work_text)
+        take_until::<_, _, OracleError<'_>>("if you attacked this turn").parse(work_text)
     else {
         return false;
     };
-    tag::<_, _, VerboseError<&str>>("if you attacked this turn")
+    tag::<_, _, OracleError<'_>>("if you attacked this turn")
         .parse(rest)
         .is_ok()
 }
@@ -1902,7 +1963,7 @@ fn parse_source_state_external_entry(
     original_text: &str,
 ) -> Option<ReplacementDefinition> {
     let (condition, rest) = nom_on_lower(original_text, norm_lower, |i| {
-        let (i, _) = tag::<_, _, VerboseError<&str>>("as long as ").parse(i)?;
+        let (i, _) = tag::<_, _, OracleError<'_>>("as long as ").parse(i)?;
         let (i, condition) = parse_inner_condition(i)?;
         let (i, _) = tag(", ").parse(i)?;
         Ok((i, condition))
@@ -1958,7 +2019,7 @@ fn parse_creature_die_exile_replacement(
 ) -> Option<ReplacementDefinition> {
     // Must contain "would die" and "instead" (exile-instead pattern).
     let (before_die, _) = nom_primitives::scan_split_at_phrase(norm_lower, |i| {
-        tag::<_, _, VerboseError<&str>>("would die").parse(i)
+        tag::<_, _, OracleError<'_>>("would die").parse(i)
     })?;
     let would_die_pos = before_die.len();
     if !nom_primitives::scan_contains(norm_lower, "instead") {
@@ -1987,7 +2048,7 @@ fn parse_creature_die_exile_replacement(
 
     // CR 120.1: Check for "dealt damage this turn by a source you controlled" condition.
     let replacement_condition = if let Ok((_, _)) =
-        tag::<_, _, VerboseError<&str>>("dealt damage this turn by a source you controlled")
+        tag::<_, _, OracleError<'_>>("dealt damage this turn by a source you controlled")
             .parse(subject_rest.trim())
     {
         Some(
@@ -2005,7 +2066,7 @@ fn parse_creature_die_exile_replacement(
     //   prefix form: "instead exile it [and <continuation>] [.]"  (Darkness Crystal,
     //                Kalitas, Ravenloft Adventurer, Ravenous Slime, Doctor's Tomb)
     let after_would_die = &norm_lower[would_die_pos + "would die".len()..];
-    let (effect_lower, _) = preceded(nom_primitives::ws, tag::<_, _, VerboseError<&str>>(", "))
+    let (effect_lower, _) = preceded(nom_primitives::ws, tag::<_, _, OracleError<'_>>(", "))
         .parse(after_would_die)
         .ok()?;
 
@@ -2121,7 +2182,7 @@ fn parse_exile_anaphor_clause<'a>(input: TextPair<'a>) -> ExileAnaphorMatch<'a> 
     let lower = input.lower;
     let exile_anaphor = || {
         alt((
-            tag::<_, _, VerboseError<&str>>("exile it"),
+            tag::<_, _, OracleError<'_>>("exile it"),
             tag("exile that card"),
             tag("exile that creature"),
         ))
@@ -2134,7 +2195,7 @@ fn parse_exile_anaphor_clause<'a>(input: TextPair<'a>) -> ExileAnaphorMatch<'a> 
     // input starting with the count.
     let with_counters = || {
         preceded(
-            tag::<_, _, VerboseError<&str>>(" with "),
+            tag::<_, _, OracleError<'_>>(" with "),
             crate::parser::oracle_effect::parse_counter_suffix_body_combinator,
         )
     };
@@ -2143,7 +2204,7 @@ fn parse_exile_anaphor_clause<'a>(input: TextPair<'a>) -> ExileAnaphorMatch<'a> 
     // Then suffix form:    "exile <anaphor> [with N counters on it] instead".
     // The body shape is unified: the `with-counters` slot is optional in both
     // word orders.
-    let parsed: nom::IResult<&str, Option<(String, QuantityExpr)>, VerboseError<&str>> = alt((
+    let parsed: nom::IResult<&str, Option<(String, QuantityExpr)>, OracleError<'_>> = alt((
         // Prefix: "instead exile <anaphor> [with N counter(s) on it]"
         preceded(
             tag("instead "),
@@ -2277,11 +2338,11 @@ fn parse_graveyard_exile_replacement(
 
     let ((scope, outcome), _rest) = nom_on_lower(original_text, norm_lower, |i| {
         // Prefix: "if <subject> would be put into <scope> graveyard[ from anywhere], "
-        let (i, _) = tag::<_, _, VerboseError<&str>>("if ").parse(i)?;
+        let (i, _) = tag::<_, _, OracleError<'_>>("if ").parse(i)?;
         // Subject: accept any phrase up to " would be put into " — covers
         // "a card", "a nontoken creature", "~", "a creature an opponent controls", …
-        let (i, _) = take_until::<_, _, VerboseError<&str>>(" would be put into ").parse(i)?;
-        let (i, _) = tag::<_, _, VerboseError<&str>>(" would be put into ").parse(i)?;
+        let (i, _) = take_until::<_, _, OracleError<'_>>(" would be put into ").parse(i)?;
+        let (i, _) = tag::<_, _, OracleError<'_>>(" would be put into ").parse(i)?;
         let (i, scope) = alt((
             value(Scope::Opponent, tag("an opponent's graveyard")),
             value(Scope::Opponent, tag("an opponents graveyard")),
@@ -2467,8 +2528,7 @@ fn parse_damage_source_filter(norm_lower: &str) -> Option<TargetFilter> {
             let qualifier = if prefix == "another" {
                 props.push(FilterProp::Another);
                 ""
-            } else if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("another ").parse(prefix)
-            {
+            } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("another ").parse(prefix) {
                 props.push(FilterProp::Another);
                 rest.trim()
             } else {
@@ -2480,16 +2540,41 @@ fn parse_damage_source_filter(norm_lower: &str) -> Option<TargetFilter> {
                 props.push(FilterProp::HasColor { color });
             }
             // CR 205.4b: "noncreature" qualifier — negation via TypeFilter::Non
-            else if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("non").parse(qualifier) {
-                let inner = match rest {
-                    "creature" => TypeFilter::Creature,
-                    "land" => TypeFilter::Land,
-                    "artifact" => TypeFilter::Artifact,
-                    "enchantment" => TypeFilter::Enchantment,
-                    "planeswalker" => TypeFilter::Planeswalker,
-                    other => TypeFilter::Subtype(capitalize_first(other)),
-                };
-                filter = filter.with_type(TypeFilter::Non(Box::new(inner)));
+            else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("non").parse(qualifier) {
+                if tag::<_, _, OracleError<'_>>("token")
+                    .parse(rest)
+                    .is_ok_and(|(after, _)| after.is_empty())
+                {
+                    props.push(FilterProp::NonToken);
+                } else {
+                    let inner = alt((
+                        value(
+                            TypeFilter::Creature,
+                            tag::<_, _, OracleError<'_>>("creature"),
+                        ),
+                        value(TypeFilter::Land, tag::<_, _, OracleError<'_>>("land")),
+                        value(
+                            TypeFilter::Artifact,
+                            tag::<_, _, OracleError<'_>>("artifact"),
+                        ),
+                        value(
+                            TypeFilter::Enchantment,
+                            tag::<_, _, OracleError<'_>>("enchantment"),
+                        ),
+                        value(
+                            TypeFilter::Planeswalker,
+                            tag::<_, _, OracleError<'_>>("planeswalker"),
+                        ),
+                    ))
+                    .parse(rest)
+                    .ok()
+                    .filter(|(after, _)| after.is_empty())
+                    .map_or_else(
+                        || TypeFilter::Subtype(capitalize_first(rest)),
+                        |(_, filter)| filter,
+                    );
+                    filter = filter.with_type(TypeFilter::Non(Box::new(inner)));
+                }
             }
             // Check for creature type qualifier (e.g. "giant")
             else if !qualifier.is_empty() {
@@ -2566,7 +2651,7 @@ fn damage_target_opponent_or_permanents() -> DamageTargetFilter {
 /// Nom combinator for damage target phrases. Most specific tags first.
 fn parse_damage_target_phrase(
     input: &str,
-) -> nom::IResult<&str, DamageTargetFilter, VerboseError<&str>> {
+) -> nom::IResult<&str, DamageTargetFilter, OracleError<'_>> {
     alt((
         value(
             damage_target_opponent_or_permanents(),
@@ -2611,7 +2696,7 @@ fn scan_damage_modification(text: &str) -> Option<DamageModification> {
 /// Nom combinator for damage modification phrases.
 fn parse_damage_modification_phrase(
     input: &str,
-) -> nom::IResult<&str, DamageModification, VerboseError<&str>> {
+) -> nom::IResult<&str, DamageModification, OracleError<'_>> {
     alt((
         value(
             DamageModification::Double,
@@ -2639,7 +2724,7 @@ fn scan_combat_scope(text: &str) -> Option<CombatDamageScope> {
         alt((
             value(
                 CombatDamageScope::NoncombatOnly,
-                tag::<_, _, VerboseError<&str>>("noncombat damage"),
+                tag::<_, _, OracleError<'_>>("noncombat damage"),
             ),
             value(CombatDamageScope::CombatOnly, tag("combat damage")),
         ))
@@ -2745,7 +2830,7 @@ fn parse_conditional_draw_replacement(text: &str, lower: &str) -> Option<Replace
 /// the exception phrase appears mid-sentence after the "you would draw a card"
 /// prefix.
 pub(super) fn has_except_first_draw_in_draw_step_clause(lower: &str) -> bool {
-    fn parse_clause(input: &str) -> nom::IResult<&str, (), VerboseError<&str>> {
+    fn parse_clause(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
         let (input, _) = tag("except the first one ").parse(input)?;
         let (input, _) = alt((tag("you "), tag("they "))).parse(input)?;
         let (input, _) = tag("draw in each of ").parse(input)?;
@@ -2810,7 +2895,7 @@ enum TokenReplacementShape {
 fn parse_token_replacement_shape(lower: &str) -> Option<TokenReplacementShape> {
     // "twice that many" → Doubling Season pattern.
     if nom_on_lower(lower, lower, |i| {
-        let (i, _) = take_until::<_, _, VerboseError<&str>>("twice that many").parse(i)?;
+        let (i, _) = take_until::<_, _, OracleError<'_>>("twice that many").parse(i)?;
         let (i, _) = tag("twice that many").parse(i)?;
         Ok((i, ()))
     })
@@ -2823,12 +2908,12 @@ fn parse_token_replacement_shape(lower: &str) -> Option<TokenReplacementShape> {
     // Extract the spec descriptor between "those tokens plus " and the trailing
     // "are/is created instead" clause using nom combinators.
     let ((descriptor_start, descriptor_len), _rest) = nom_on_lower(lower, lower, |i| {
-        let (i, pre) = take_until::<_, _, VerboseError<&str>>("those tokens plus ").parse(i)?;
+        let (i, pre) = take_until::<_, _, OracleError<'_>>("those tokens plus ").parse(i)?;
         let start_offset = pre.len() + "those tokens plus ".len();
         let (i, _) = tag("those tokens plus ").parse(i)?;
         let (_, descriptor) = alt((
-            take_until::<_, _, VerboseError<&str>>(" are created instead"),
-            take_until::<_, _, VerboseError<&str>>(" is created instead"),
+            take_until::<_, _, OracleError<'_>>(" are created instead"),
+            take_until::<_, _, OracleError<'_>>(" is created instead"),
         ))
         .parse(i)?;
         Ok((i, (start_offset, descriptor.len())))
@@ -2866,11 +2951,10 @@ fn parse_xorn_subtype_token_replacement(
     // Extract the subtype after "would create one or more ".
     // Stops at " tokens," — the comma separator before "instead create".
     let ((subtype_start, subtype_len), _) = nom_on_lower(lower, lower, |i| {
-        let (i, pre) =
-            take_until::<_, _, VerboseError<&str>>("would create one or more ").parse(i)?;
+        let (i, pre) = take_until::<_, _, OracleError<'_>>("would create one or more ").parse(i)?;
         let start_offset = pre.len() + "would create one or more ".len();
         let (i, _) = tag("would create one or more ").parse(i)?;
-        let (_, subtype) = take_until::<_, _, VerboseError<&str>>(" tokens,").parse(i)?;
+        let (_, subtype) = take_until::<_, _, OracleError<'_>>(" tokens,").parse(i)?;
         Ok((i, (start_offset, subtype.len())))
     })?;
 
@@ -2890,7 +2974,7 @@ fn parse_xorn_subtype_token_replacement(
     let total_len = lower.len();
     let ((desc_start, desc_len, needs_article), _) = nom_on_lower(lower, lower, |i| {
         let (i, _) =
-            take_until::<_, _, VerboseError<&str>>("instead create those tokens plus ").parse(i)?;
+            take_until::<_, _, OracleError<'_>>("instead create those tokens plus ").parse(i)?;
         let (i, _) = tag("instead create those tokens plus ").parse(i)?;
         // Strip the "additional " modifier (with its optional leading article)
         // so parse_token_description sees the canonical token tail. Factor as
@@ -2902,14 +2986,11 @@ fn parse_xorn_subtype_token_replacement(
         ))
         .parse(i)?;
         let start_offset = total_len - i.len();
-        let (i, article) = peek(opt(alt((
-            tag::<_, _, VerboseError<&str>>("a "),
-            tag("an "),
-        ))))
-        .parse(i)?;
+        let (i, article) =
+            peek(opt(alt((tag::<_, _, OracleError<'_>>("a "), tag("an "))))).parse(i)?;
         let needs_article = article.is_none();
         let (i, descriptor) = alt((
-            take_until::<_, _, VerboseError<&str>>("."),
+            take_until::<_, _, OracleError<'_>>("."),
             nom::combinator::rest,
         ))
         .parse(i)?;
@@ -2984,10 +3065,10 @@ fn parse_manufactor_ensure_all_token_replacement(
     // " token," terminator that precedes "instead create one of each".
     let total_len = lower.len();
     let ((list_start, list_len), _) = nom_on_lower(lower, lower, |i| {
-        let (i, _) = take_until::<_, _, VerboseError<&str>>("would create a ").parse(i)?;
+        let (i, _) = take_until::<_, _, OracleError<'_>>("would create a ").parse(i)?;
         let (i, _) = tag("would create a ").parse(i)?;
         let start_offset = total_len - i.len();
-        let (i, list) = take_until::<_, _, VerboseError<&str>>(" token,").parse(i)?;
+        let (i, list) = take_until::<_, _, OracleError<'_>>(" token,").parse(i)?;
         Ok((i, (start_offset, list.len())))
     })?;
 
@@ -3037,7 +3118,7 @@ fn split_subtype_list(s: &str) -> Vec<String> {
     use nom::multi::separated_list1;
     use nom::IResult;
 
-    fn entry(i: &str) -> IResult<&str, &str, VerboseError<&str>> {
+    fn entry(i: &str) -> IResult<&str, &str, OracleError<'_>> {
         let (i, _) = opt(tag("or ")).parse(i)?;
         take_while1(|c: char| c.is_alphanumeric() || c == '-' || c == '\'').parse(i)
     }
@@ -3056,7 +3137,7 @@ fn split_subtype_list(s: &str) -> Vec<String> {
 /// uses the parser's `PtValue::Fixed` directly; variable P/T in an appended
 /// spec is not a pattern any known card uses.
 fn token_description_to_spec(
-    token: &super::oracle_effect::TokenDescription,
+    token: &crate::parser::oracle_ir::ast::TokenDescription,
 ) -> Option<crate::types::proposed_event::TokenSpec> {
     use crate::types::ability::PtValue;
     use crate::types::card_type::{CoreType, Supertype};
@@ -3209,6 +3290,74 @@ fn parse_damage_redirection_replacement(
     None
 }
 
+fn parse_damage_to_self_instead_followup(
+    norm_lower: &str,
+    normalized: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    let total_len = norm_lower.len();
+    let ((effect_start, effect_len), rest) = nom_on_lower(normalized, norm_lower, |i| {
+        let (i, _) = tag("if damage would be dealt to ").parse(i)?;
+        let (i, _) = alt((tag("~"), tag("you"))).parse(i)?;
+        let (i, _) = tag(", ").parse(i)?;
+        let effect_start = total_len - i.len();
+        let (i, effect) = take_until::<_, _, OracleError<'_>>(" instead").parse(i)?;
+        let (i, _) = tag(" instead").parse(i)?;
+        let (i, _) = opt(char('.')).parse(i)?;
+        Ok((i, (effect_start, effect.len())))
+    })?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    let effect_text = normalized.get(effect_start..effect_start + effect_len)?;
+    let mut ctx = ParseContext {
+        subject: Some(TargetFilter::SelfRef),
+        in_replacement: true,
+        ..ParseContext::default()
+    };
+    let followup = parse_effect_chain_with_context(effect_text, AbilityKind::Spell, &mut ctx);
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::DealtDamage)
+            .prevention_shield(PreventionAmount::All)
+            .execute(followup)
+            .description(original_text.to_string()),
+    )
+}
+
+fn parse_damage_to_player_instead_followup(
+    norm_lower: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    let total_len = norm_lower.len();
+    let ((effect_start, effect_len), rest) = nom_on_lower(original_text, norm_lower, |i| {
+        let (i, _) = tag("if damage would be dealt to a player, ").parse(i)?;
+        let effect_start = total_len - i.len();
+        let (i, _) = alt((tag("that player "), tag("the player "))).parse(i)?;
+        let (i, _) = take_until::<_, _, OracleError<'_>>(" instead").parse(i)?;
+        let effect_end = total_len - i.len();
+        let (i, _) = tag(" instead").parse(i)?;
+        let (i, _) = opt(char('.')).parse(i)?;
+        Ok((i, (effect_start, effect_end - effect_start)))
+    })?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    let effect_text = original_text.get(effect_start..effect_start + effect_len)?;
+    let mut followup = parse_effect_chain(effect_text, AbilityKind::Spell);
+    rewrite_damage_recipient_to_post_replacement_target(&mut followup);
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::DamageDone)
+            .prevention_shield(PreventionAmount::All)
+            .damage_target_filter(damage_target_any_player())
+            .execute(followup)
+            .description(original_text.to_string()),
+    )
+}
+
 /// CR 615: Parse damage prevention replacement effects.
 /// Handles:
 /// - "prevent all combat damage that would be dealt [this turn]" (Fog, Moments Peace)
@@ -3357,6 +3506,25 @@ fn rewrite_parent_target_controller_to_post_replacement_source(def: &mut Ability
     }
 }
 
+/// CR 615.5: In a prevention follow-up attached to "damage would be dealt to a
+/// player", the surface subject "that player" refers to the prevented event's
+/// damage recipient. The ordinary effect parser has no active trigger event in
+/// this replacement context, so it lowers standalone "that player" subjects to
+/// `TargetFilter::Player`; rewrite that anaphoric recipient at the call site.
+fn rewrite_damage_recipient_to_post_replacement_target(def: &mut AbilityDefinition) {
+    super::oracle_effect::each_target_filter_mut(&mut def.effect, &mut |f| {
+        if matches!(f, TargetFilter::Player | TargetFilter::TriggeringPlayer) {
+            *f = TargetFilter::PostReplacementDamageTarget;
+        }
+    });
+    if let Some(sub) = def.sub_ability.as_mut() {
+        rewrite_damage_recipient_to_post_replacement_target(sub);
+    }
+    if let Some(else_branch) = def.else_ability.as_mut() {
+        rewrite_damage_recipient_to_post_replacement_target(else_branch);
+    }
+}
+
 /// CR 615.5: Extract the trailing additional-effect sentence from a prevention
 /// replacement's Oracle text. Returns the slice after `"prevent that damage. "`,
 /// trimmed and ready for `parse_effect_chain`. Returns `None` when there is no
@@ -3397,10 +3565,10 @@ fn extract_prevention_followup(original_text: &str) -> Option<String> {
             (),
             preceded(
                 alt((
-                    tag::<_, _, VerboseError<&str>>("when "),
-                    tag::<_, _, VerboseError<&str>>("if "),
+                    tag::<_, _, OracleError<'_>>("when "),
+                    tag::<_, _, OracleError<'_>>("if "),
                 )),
-                tag::<_, _, VerboseError<&str>>("damage is prevented this way, "),
+                tag::<_, _, OracleError<'_>>("damage is prevented this way, "),
             ),
         )
         .parse(i)
@@ -3469,12 +3637,30 @@ fn parse_event_substitution_replacement(
 fn parse_mana_replacement(norm_lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
     if !nom_primitives::scan_contains(norm_lower, "would produce mana")
         && !nom_primitives::scan_contains(norm_lower, "tapped for mana")
+        && !nom_primitives::scan_contains(norm_lower, "tap a permanent for mana")
+        && !nom_primitives::scan_contains(norm_lower, "tap a land for mana")
     {
         return None;
     }
 
     let def = ReplacementDefinition::new(ReplacementEvent::ProduceMana)
         .description(original_text.to_string());
+
+    if let Ok((rest, (filter, factor))) = parse_mana_multiplier_replacement(norm_lower) {
+        if rest.trim().is_empty() {
+            return Some(
+                def.mana_modification(ManaModification::Multiply { factor })
+                    .mana_replacement_scope(ManaReplacementScope::TappedForMana)
+                    .valid_card(filter),
+            );
+        }
+    }
+
+    let scope = if nom_primitives::scan_contains(norm_lower, "tapped for mana") {
+        ManaReplacementScope::TappedForMana
+    } else {
+        ManaReplacementScope::Any
+    };
 
     match scan_produces_replacement(norm_lower) {
         // CR 106.3: The mana source must be a land — scope the replacement so it
@@ -3484,10 +3670,38 @@ fn parse_mana_replacement(norm_lower: &str, original_text: &str) -> Option<Repla
         // parse-only behavior.
         Some(mana_type) => Some(
             def.mana_modification(ManaModification::ReplaceWith { mana_type })
+                .mana_replacement_scope(scope)
                 .valid_card(TargetFilter::Typed(TypedFilter::land())),
         ),
-        None => Some(def),
+        None => Some(def.mana_replacement_scope(scope)),
     }
+}
+
+fn parse_mana_multiplier_replacement(
+    input: &str,
+) -> super::oracle_nom::error::OracleResult<'_, (TargetFilter, u32)> {
+    let (input, _) = tag::<_, _, OracleError<'_>>("if you tap ").parse(input)?;
+    let (input, filter) = alt((
+        value(
+            TargetFilter::Typed(TypedFilter::permanent().controller(ControllerRef::You)),
+            tag("a permanent"),
+        ),
+        value(
+            TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::You)),
+            tag("a land"),
+        ),
+    ))
+    .parse(input)?;
+    let (input, _) = tag(" for mana, it produces ").parse(input)?;
+    let (input, factor) = alt((
+        value(2, tag("twice as much")),
+        value(2, tag("two times as much")),
+        value(3, tag("three times as much")),
+    ))
+    .parse(input)?;
+    let (input, _) = tag(" of that mana instead").parse(input)?;
+    let (input, _) = opt(char('.')).parse(input)?;
+    Ok((input, (filter, factor)))
 }
 
 /// Walk `text` forward, trying `parse_produces_replacement` at each word boundary.
@@ -3513,7 +3727,7 @@ fn scan_produces_replacement(text: &str) -> Option<ManaType> {
 /// returning the target `ManaType`. Handles `{W}`/`{U}`/`{B}`/`{R}`/`{G}` for
 /// colored replacements and `colorless mana` for colorless replacements.
 fn parse_produces_replacement(input: &str) -> super::oracle_nom::error::OracleResult<'_, ManaType> {
-    let (rest, _) = tag::<_, _, VerboseError<&str>>("produces ").parse(input)?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("produces ").parse(input)?;
     alt((parse_braced_mana_type, parse_colorless_mana)).parse(rest)
 }
 
@@ -3521,7 +3735,7 @@ fn parse_produces_replacement(input: &str) -> super::oracle_nom::error::OracleRe
 fn parse_braced_mana_type(input: &str) -> super::oracle_nom::error::OracleResult<'_, ManaType> {
     use nom::sequence::delimited;
     delimited(
-        char::<_, VerboseError<&str>>('{'),
+        char::<_, OracleError<'_>>('{'),
         alt((
             value(ManaType::White, tag("w")),
             value(ManaType::Blue, tag("u")),
@@ -3539,7 +3753,7 @@ fn parse_braced_mana_type(input: &str) -> super::oracle_nom::error::OracleResult
 fn parse_colorless_mana(input: &str) -> super::oracle_nom::error::OracleResult<'_, ManaType> {
     value(
         ManaType::Colorless,
-        tag::<_, _, VerboseError<&str>>("colorless mana"),
+        tag::<_, _, OracleError<'_>>("colorless mana"),
     )
     .parse(input)
 }
@@ -3554,7 +3768,7 @@ fn parse_player_life_condition(norm_lower: &str) -> Option<ReplacementCondition>
     let (nom_rest, amount) = nom_primitives::parse_number.parse(rest).ok()?;
     let remainder = nom_rest.trim_start();
     if alt((
-        tag::<_, _, VerboseError<&str>>("or less life"),
+        tag::<_, _, OracleError<'_>>("or less life"),
         tag("or fewer life"),
     ))
     .parse(remainder.trim())
@@ -3601,7 +3815,7 @@ fn parse_turn_of_game_condition(norm_lower: &str) -> Option<ReplacementCondition
         // parse_ordinal trims leading space, so after parsing "first" from
         // "first or second", remaining is "or second" (no leading space).
         remaining = alt((
-            tag::<_, _, VerboseError<&str>>(", or "),
+            tag::<_, _, OracleError<'_>>(", or "),
             tag(", "),
             tag(" or "),
             tag("or "),
@@ -3619,9 +3833,7 @@ fn parse_turn_of_game_condition(norm_lower: &str) -> Option<ReplacementCondition
         return None;
     }
     // Expect "turn" (optionally followed by "of the game")
-    tag::<_, _, VerboseError<&str>>("turn")
-        .parse(remaining)
-        .ok()?;
+    tag::<_, _, OracleError<'_>>("turn").parse(remaining).ok()?;
     Some(ReplacementCondition::UnlessQuantity {
         lhs: QuantityExpr::Ref {
             qty: QuantityRef::TurnsTaken,
@@ -3782,6 +3994,159 @@ mod tests {
             .as_deref(),
             Some("You gain life equal to the damage prevented this way.")
         );
+    }
+
+    #[test]
+    fn discard_self_to_battlefield_replacement() {
+        let def = parse_replacement_line(
+            "If a spell or ability an opponent controls causes you to discard this card, put it onto the battlefield instead of putting it into your graveyard.",
+            "Loxodon Smiter",
+        )
+        .expect("discard self replacement should parse");
+        assert_eq!(def.event, ReplacementEvent::Discard);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(
+            def.condition,
+            Some(ReplacementCondition::EventSourceControlledBy {
+                controller: ControllerRef::Opponent
+            })
+        );
+        let execute = def.execute.as_ref().expect("execute present");
+        assert!(matches!(
+            *execute.effect,
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn discard_self_to_battlefield_replacement_preserves_counters() {
+        let def = parse_replacement_line(
+            "If a spell or ability an opponent controls causes you to discard this card, put it onto the battlefield with two +1/+1 counters on it instead of putting it into your graveyard.",
+            "Dodecapod",
+        )
+        .expect("discard self replacement should parse");
+        let execute = def.execute.as_ref().expect("execute present");
+        match &*execute.effect {
+            Effect::ChangeZone {
+                destination,
+                enter_with_counters,
+                ..
+            } => {
+                assert_eq!(*destination, Zone::Battlefield);
+                assert_eq!(
+                    enter_with_counters,
+                    &vec![("P1P1".to_string(), QuantityExpr::Fixed { value: 2 })]
+                );
+            }
+            other => panic!("expected ChangeZone, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn damage_to_self_puts_that_many_counters_instead() {
+        let def = parse_replacement_line(
+            "If damage would be dealt to this creature, put that many +1/+1 counters on it instead.",
+            "Phytohydra",
+        )
+        .expect("damage-to-self counter replacement should parse");
+
+        assert_eq!(def.event, ReplacementEvent::DealtDamage);
+        assert_eq!(
+            def.shield_kind,
+            ShieldKind::Prevention {
+                amount: PreventionAmount::All
+            }
+        );
+        let execute = def.execute.as_ref().expect("execute present");
+        assert!(matches!(
+            *execute.effect,
+            Effect::PutCounter {
+                ref counter_type,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount
+                },
+                target: TargetFilter::SelfRef,
+            } if counter_type == "P1P1"
+        ));
+    }
+
+    #[test]
+    fn damage_to_you_puts_that_many_counters_on_source_instead() {
+        let def = parse_replacement_line(
+            "If damage would be dealt to you, put that many delay counters on this enchantment instead.",
+            "Delaying Shield",
+        )
+        .expect("damage-to-controller counter replacement should parse");
+
+        assert_eq!(def.event, ReplacementEvent::DealtDamage);
+        let execute = def.execute.as_ref().expect("execute present");
+        assert!(matches!(
+            *execute.effect,
+            Effect::PutCounter {
+                ref counter_type,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount
+                },
+                target: TargetFilter::SelfRef,
+            } if counter_type == "delay"
+        ));
+    }
+
+    #[test]
+    fn damage_to_player_exiles_that_many_cards_from_that_players_library_instead() {
+        let def = parse_replacement_line(
+            "If damage would be dealt to a player, that player exiles that many cards from the top of their library instead.",
+            "Crumbling Sanctuary",
+        )
+        .expect("damage-to-player exile-top replacement should parse");
+
+        assert_eq!(def.event, ReplacementEvent::DamageDone);
+        assert_eq!(
+            def.shield_kind,
+            ShieldKind::Prevention {
+                amount: PreventionAmount::All
+            }
+        );
+        assert_eq!(def.damage_target_filter, Some(damage_target_any_player()));
+        let execute = def.execute.as_ref().expect("execute present");
+        assert!(
+            matches!(
+                *execute.effect,
+                Effect::ExileTop {
+                    player: TargetFilter::PostReplacementDamageTarget,
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount
+                    },
+                }
+            ),
+            "expected ExileTop against prevented damage recipient, got {:?}",
+            execute.effect
+        );
+    }
+
+    #[test]
+    fn damage_to_player_followup_rewrites_that_player_draw_target() {
+        let def = parse_replacement_line(
+            "If damage would be dealt to a player, that player draws that many cards instead.",
+            "Damage Followup Test",
+        )
+        .expect("damage-to-player draw replacement should parse");
+
+        assert_eq!(def.event, ReplacementEvent::DamageDone);
+        assert_eq!(def.damage_target_filter, Some(damage_target_any_player()));
+        let execute = def.execute.as_ref().expect("execute present");
+        assert!(matches!(
+            *execute.effect,
+            Effect::Draw {
+                target: TargetFilter::PostReplacementDamageTarget,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount
+                },
+            }
+        ));
     }
 
     #[test]
@@ -4813,7 +5178,7 @@ mod tests {
     #[test]
     fn enters_with_half_x_rounded_up_counters() {
         // CR 107.1a + CR 107.3m: Hypothetical half-X fixture — "half X, rounded up"
-        // composes `HalfRounded { inner: CostXPaid, rounding: Up }`.
+        // composes `DivideRounded { inner: CostXPaid, rounding: Up }`.
         let def = parse_replacement_line(
             "~ enters with half X, rounded up +1/+1 counters on it.",
             "Hypothetical Half-X Creature",
@@ -4827,7 +5192,12 @@ mod tests {
             } => {
                 assert_eq!(counter_type, "P1P1");
                 match count {
-                    QuantityExpr::HalfRounded { inner, rounding } => {
+                    QuantityExpr::DivideRounded {
+                        inner,
+                        divisor,
+                        rounding,
+                    } => {
+                        assert_eq!(*divisor, 2);
                         assert!(matches!(
                             inner.as_ref(),
                             QuantityExpr::Ref {
@@ -4836,7 +5206,7 @@ mod tests {
                         ));
                         assert!(matches!(rounding, crate::types::ability::RoundingMode::Up));
                     }
-                    other => panic!("expected HalfRounded, got {other:?}"),
+                    other => panic!("expected DivideRounded, got {other:?}"),
                 }
             }
             other => panic!("Expected PutCounter, got {other:?}"),
@@ -6464,6 +6834,36 @@ mod tests {
         )
         .unwrap();
         assert_eq!(def.event, ReplacementEvent::ProduceMana);
+        assert_eq!(
+            def.mana_replacement_scope,
+            ManaReplacementScope::TappedForMana
+        );
+    }
+
+    #[test]
+    fn mana_replacement_multiplies_tapped_permanent_mana() {
+        // CR 106.12b + CR 614.1a: Nyxbloom Ancient multiplies the mana
+        // production event for permanents you tap for mana.
+        let def = parse_replacement_line(
+            "If you tap a permanent for mana, it produces three times as much of that mana instead.",
+            "Nyxbloom Ancient",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::ProduceMana);
+        assert_eq!(
+            def.mana_modification,
+            Some(ManaModification::Multiply { factor: 3 })
+        );
+        assert_eq!(
+            def.mana_replacement_scope,
+            ManaReplacementScope::TappedForMana
+        );
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::permanent().controller(ControllerRef::You)
+            ))
+        );
     }
 
     #[test]
@@ -6975,5 +7375,45 @@ mod tests {
         assert!(!super::has_except_first_draw_in_draw_step_clause(
             "except the first one you draw in each of your upkeeps"
         ));
+    }
+}
+
+/// Snapshot tests locking current replacement parser output before/after the IR split.
+/// These verify behavioral parity: identical snapshots before and after the
+/// `parse_replacement_line_ir` / `lower_replacement_ir` refactor.
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn replacement_enters_tapped() {
+        let def = parse_replacement_line("~ enters the battlefield tapped.", "Test Card").unwrap();
+        insta::assert_json_snapshot!(def);
+    }
+
+    #[test]
+    fn replacement_prevent_all_combat_damage() {
+        let def = parse_replacement_line(
+            "Prevent all combat damage that would be dealt to you.",
+            "Test Card",
+        )
+        .unwrap();
+        insta::assert_json_snapshot!(def);
+    }
+
+    #[test]
+    fn replacement_would_die_exile() {
+        let def = parse_replacement_line("If ~ would die, exile it instead.", "Test Card").unwrap();
+        insta::assert_json_snapshot!(def);
+    }
+
+    #[test]
+    fn replacement_enters_with_counters() {
+        let def = parse_replacement_line(
+            "~ enters the battlefield with two +1/+1 counters on it.",
+            "Test Card",
+        )
+        .unwrap();
+        insta::assert_json_snapshot!(def);
     }
 }

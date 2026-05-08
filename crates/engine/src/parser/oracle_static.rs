@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::str::FromStr;
 
+use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, tag_no_case, take_until};
 use nom::character::complete::{alpha1, space1};
@@ -8,10 +9,10 @@ use nom::combinator::{opt, rest, value};
 use nom::multi::many0;
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
-use nom_language::error::VerboseError;
 
 use super::oracle_cost::parse_oracle_cost;
 use super::oracle_effect::parse_effect_chain;
+use super::oracle_ir::static_ir::StaticIr;
 use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::condition as nom_condition;
 use super::oracle_nom::error::OracleResult;
@@ -20,18 +21,19 @@ use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::target as nom_target;
 use super::oracle_quantity::{parse_cda_quantity, parse_quantity_ref};
 use super::oracle_target::{
-    parse_combat_status_prefix, parse_counter_suffix, parse_mana_value_suffix, parse_type_phrase,
+    parse_combat_status_prefix, parse_counter_suffix, parse_mana_value_suffix, parse_target,
+    parse_that_clause_suffix, parse_type_phrase,
 };
 use super::oracle_util::{
     has_unconsumed_conditional, infer_core_type_for_subtype, parse_comparator_prefix,
     parse_mana_symbols, parse_number, parse_subtype, strip_after, strip_reminder_text, TextPair,
     SELF_REF_PARSE_ONLY_PHRASES, SELF_REF_TYPE_PHRASES,
 };
-use crate::parser::oracle_warnings::push_warning;
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, AttachmentKind, BasicLandType, CardPlayMode, ChosenSubtypeKind,
-    Comparator, ContinuousModification, ControllerRef, FilterProp, ObjectScope, QuantityExpr,
-    QuantityRef, StaticCondition, StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
+    Comparator, ContinuousModification, ControllerRef, CountScope, FilterProp, ObjectScope,
+    QuantityExpr, QuantityRef, StaticCondition, StaticDefinition, TargetFilter, TypeFilter,
+    TypedFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::{parse_counter_type, CounterMatch};
@@ -48,7 +50,7 @@ use crate::types::zones::Zone;
 /// text on success. This bridges nom's exact-match combinators with the TextPair dual-string
 /// pattern used throughout the parser.
 fn nom_tag_lower<'a>(text: &'a str, lower: &str, prefix: &str) -> Option<&'a str> {
-    tag::<_, _, nom_language::error::VerboseError<&str>>(prefix)
+    tag::<_, _, OracleError<'_>>(prefix)
         .parse(lower)
         .ok()
         .map(|(_, matched)| &text[matched.len()..])
@@ -57,13 +59,28 @@ fn nom_tag_lower<'a>(text: &'a str, lower: &str, prefix: &str) -> Option<&'a str
 /// Like `nom_tag_lower`, but operates on a `TextPair` and returns a new `TextPair`
 /// with both original and lowercase remainders advanced past the matched prefix.
 fn nom_tag_tp<'a>(tp: &TextPair<'a>, prefix: &str) -> Option<TextPair<'a>> {
-    tag::<_, _, nom_language::error::VerboseError<&str>>(prefix)
+    tag::<_, _, OracleError<'_>>(prefix)
         .parse(tp.lower)
         .ok()
         .map(|(rest_lower, matched)| {
             let rest_original = &tp.original[matched.len()..];
             TextPair::new(rest_original, rest_lower)
         })
+}
+
+fn parse_activated_cost_reduction_minimum_mana(lower: &str) -> Option<u32> {
+    preceded(
+        take_until::<_, _, OracleError<'_>>(
+            "this effect can't reduce the mana in that cost to less than ",
+        ),
+        preceded(
+            tag("this effect can't reduce the mana in that cost to less than "),
+            alt((value(1, tag("one mana")), nom_primitives::parse_number)),
+        ),
+    )
+    .parse(lower)
+    .ok()
+    .map(|(_, minimum)| minimum)
 }
 
 /// Recognizes the first token/phrase of an effect clause that follows the
@@ -363,9 +380,28 @@ enum InvertedAsLongAs {
 /// "Creatures you control get +N/+M", etc.
 #[tracing::instrument(level = "debug")]
 pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
-    let mut def = parse_static_line_inner(text, InvertedAsLongAs::Allow)?;
+    let ir = parse_static_line_ir(text)?;
+    Some(lower_static_ir(&ir))
+}
+
+/// IR production: parse a static line into `StaticIr` (pre-lowering).
+///
+/// The definition is parsed but `populate_active_zones_from_condition` is NOT
+/// applied — that is a lowering step performed by `lower_static_ir`.
+pub(crate) fn parse_static_line_ir(text: &str) -> Option<StaticIr> {
+    let definition = parse_static_line_inner(text, InvertedAsLongAs::Allow)?;
+    Some(StaticIr {
+        definition,
+        source_text: text.to_string(),
+        body_ir: None,
+    })
+}
+
+/// Lowering: apply post-parse transforms to produce the final `StaticDefinition`.
+pub(crate) fn lower_static_ir(ir: &StaticIr) -> StaticDefinition {
+    let mut def = ir.definition.clone();
     populate_active_zones_from_condition(&mut def);
-    Some(def)
+    def
 }
 
 /// CR 113.6 + CR 113.6b: When a static ability's condition asserts the source
@@ -487,15 +523,14 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
     // string-equality checks.
     {
         let lower_trim = tp.lower.trim_end_matches('.').trim();
-        let res: nom::IResult<&str, (), nom_language::error::VerboseError<&str>> =
-            nom::combinator::value(
-                (),
-                nom::branch::alt((
-                    nom::bytes::complete::tag("while voting, you may vote an additional time"),
-                    nom::bytes::complete::tag("while voting you may vote an additional time"),
-                )),
-            )
-            .parse(lower_trim);
+        let res: nom::IResult<&str, (), OracleError<'_>> = nom::combinator::value(
+            (),
+            nom::branch::alt((
+                nom::bytes::complete::tag("while voting, you may vote an additional time"),
+                nom::bytes::complete::tag("while voting you may vote an additional time"),
+            )),
+        )
+        .parse(lower_trim);
         if res.is_ok() {
             return Some(
                 StaticDefinition::new(StaticMode::GrantsExtraVote)
@@ -648,6 +683,13 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
         }
     }
 
+    // CR 613.1d + CR 205.1a: "Enchanted [permanent-type] is a [type] [with base P/T N/N]
+    // [in addition to its other types]" — type-changing aura effects.
+    // Must come before the basic-land-type handler which is a subset of this pattern.
+    if let Some(def) = parse_enchanted_is_type(&tp, &text) {
+        return Some(def);
+    }
+
     // --- "Enchanted creature gets +N/+M" or "has {keyword}" ---
     if let Some(rest) = nom_tag_tp(&tp, "enchanted creature ") {
         let filter =
@@ -664,13 +706,6 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
         if let Some(def) = parse_enchanted_equipped_predicate(rest.original, filter, &text) {
             return Some(def);
         }
-    }
-
-    // CR 613.1d + CR 205.1a: "Enchanted [permanent-type] is a [type] [with base P/T N/N]
-    // [in addition to its other types]" — type-changing aura effects.
-    // Must come before the basic-land-type handler which is a subset of this pattern.
-    if let Some(def) = parse_enchanted_is_type(&tp, &text) {
-        return Some(def);
     }
 
     // CR 305.7: "Enchanted land is a [type]" — must be before general "enchanted land" handler.
@@ -840,7 +875,11 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
                 )
             // CR 613.1: "Creatures you control that are [property] get/have ..."
             } else if let Some(that_rest_tp) = nom_tag_tp(&rest_tp, "that are ") {
-                if let Some((prop, prop_rest_original)) = nom_on_lower(
+                if let Some((filter, predicate_text)) =
+                    parse_creatures_you_control_that_clause(after_prefix, rest_tp.lower, false)
+                {
+                    (filter, predicate_text)
+                } else if let Some((prop, prop_rest_original)) = nom_on_lower(
                     that_rest_tp.original,
                     that_rest_tp.lower,
                     nom_filter::parse_property_filter,
@@ -900,7 +939,11 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
             )
         // CR 613.1: "Other creatures you control that are [property] get/have ..."
         } else if let Some(that_rest_tp) = nom_tag_tp(&rest_tp, "that are ") {
-            if let Some((prop, prop_rest_original)) = nom_on_lower(
+            if let Some((filter, predicate_text)) =
+                parse_creatures_you_control_that_clause(after_prefix, rest_tp.lower, true)
+            {
+                (filter, predicate_text)
+            } else if let Some((prop, prop_rest_original)) = nom_on_lower(
                 that_rest_tp.original,
                 that_rest_tp.lower,
                 nom_filter::parse_property_filter,
@@ -1203,9 +1246,7 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
                 .trim_end_matches('.');
 
             // CR 509.1b: "can't be blocked by <filter>" — extract blocker restriction filter.
-            if let Ok((by_rest, _)) =
-                tag::<_, _, nom_language::error::VerboseError<&str>>("by ").parse(after_blocked)
-            {
+            if let Ok((by_rest, _)) = tag::<_, _, OracleError<'_>>("by ").parse(after_blocked) {
                 let (filter, remainder) = parse_type_phrase(by_rest);
                 if !matches!(filter, TargetFilter::Any) {
                     let mut def = StaticDefinition::new(StaticMode::CantBeBlockedBy { filter })
@@ -1533,10 +1574,6 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
     if nom_primitives::scan_contains(tp.lower, "can't cast spells from") {
         let zones = parse_zone_names_from_tp(&tp);
         let affected = if zones.is_empty() {
-            push_warning(
-                "target-fallback: no zones parsed for casting prohibition, defaulting to Any"
-                    .to_string(),
-            );
             TargetFilter::Any
         } else {
             TargetFilter::Typed(TypedFilter {
@@ -1630,6 +1667,7 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
                 StaticDefinition::new(StaticMode::ReduceAbilityCost {
                     keyword: keyword.trim().to_string(),
                     amount,
+                    minimum_mana: parse_activated_cost_reduction_minimum_mana(tp.lower),
                 })
                 .affected(TargetFilter::Typed(
                     TypedFilter::card().controller(ControllerRef::You),
@@ -1659,6 +1697,7 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
                     StaticDefinition::new(StaticMode::ReduceAbilityCost {
                         keyword: "activated".to_string(),
                         amount,
+                        minimum_mana: parse_activated_cost_reduction_minimum_mana(tp.lower),
                     })
                     .affected(affected)
                     .description(text.to_string()),
@@ -1855,11 +1894,23 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
 /// (one `MustAttack`, one `MustBlock`). Callers that push into a `Vec`
 /// should prefer this over `parse_static_line` to avoid silently dropping modes.
 pub fn parse_static_line_multi(text: &str) -> Vec<StaticDefinition> {
-    let mut defs = parse_static_line_multi_inner(text);
-    for def in defs.iter_mut() {
-        populate_active_zones_from_condition(def);
-    }
-    defs
+    parse_static_line_multi_ir(text)
+        .into_iter()
+        .map(|ir| lower_static_ir(&ir))
+        .collect()
+}
+
+/// IR production: like `parse_static_line_ir` but returns all `StaticIr`s
+/// produced by a compound line.
+pub(crate) fn parse_static_line_multi_ir(text: &str) -> Vec<StaticIr> {
+    let defs = parse_static_line_multi_inner(text);
+    defs.into_iter()
+        .map(|definition| StaticIr {
+            definition,
+            source_text: text.to_string(),
+            body_ir: None,
+        })
+        .collect()
 }
 
 fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition> {
@@ -1976,7 +2027,7 @@ fn parse_compound_subject_rule_static(text: &str, lower: &str) -> Option<Vec<Sta
     ))
     .parse(after_first)
     .ok()?;
-    let (rest, _) = opt(tag::<_, _, VerboseError<&str>>(".")).parse(rest).ok()?;
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(rest).ok()?;
     if !rest.trim().is_empty() {
         return None;
     }
@@ -1998,7 +2049,7 @@ fn parse_rule_static_separator_nom(input: &str) -> OracleResult<'_, ()> {
     value(
         (),
         alt((
-            tag::<_, _, VerboseError<&str>>(", and "),
+            tag::<_, _, OracleError<'_>>(", and "),
             tag(", "),
             tag(" and "),
         )),
@@ -2019,7 +2070,7 @@ fn parse_rule_static_separator_nom(input: &str) -> OracleResult<'_, ()> {
 /// description, matching the convention used by other compound handlers
 /// (e.g., `CantBeEquipped` + `CantBeEnchanted`).
 fn try_split_and_can_attack_despite_defender(text: &str) -> Option<Vec<StaticDefinition>> {
-    type VE<'a> = nom_language::error::VerboseError<&'a str>;
+    type VE<'a> = OracleError<'a>;
     let lower = text.to_lowercase();
 
     // `scan_preceded` advances past each space so `remaining` always starts on
@@ -2070,7 +2121,7 @@ fn try_split_and_can_attack_despite_defender(text: &str) -> Option<Vec<StaticDef
 }
 
 fn try_split_and_must_attack_block(text: &str) -> Option<Vec<StaticDefinition>> {
-    type VE<'a> = nom_language::error::VerboseError<&'a str>;
+    type VE<'a> = OracleError<'a>;
     let lower = text.to_lowercase();
 
     let (before, modes, rest) = nom_primitives::scan_preceded(&lower, |i: &str| {
@@ -2563,7 +2614,7 @@ fn parse_attached_assigns_damage_from_toughness(
     tp: &TextPair<'_>,
     text: &str,
 ) -> Option<StaticDefinition> {
-    type VE<'a> = nom_language::error::VerboseError<&'a str>;
+    type VE<'a> = OracleError<'a>;
 
     #[derive(Clone, Copy)]
     enum AttachedSubject {
@@ -2621,7 +2672,7 @@ fn parse_attached_assigns_damage_from_toughness(
 /// CR 510.1c: Parse "you may have this creature assign its combat damage as though it
 /// weren't blocked" self-referential static.
 fn parse_assign_damage_as_though_unblocked(lower: &str, text: &str) -> Option<StaticDefinition> {
-    type VE<'a> = nom_language::error::VerboseError<&'a str>;
+    type VE<'a> = OracleError<'a>;
 
     let clean = lower.trim_end_matches('.');
     let result = preceded(
@@ -2653,7 +2704,7 @@ fn parse_attached_creature_assign_damage_as_though_unblocked(
     tp: &TextPair<'_>,
     text: &str,
 ) -> Option<StaticDefinition> {
-    type VE<'a> = nom_language::error::VerboseError<&'a str>;
+    type VE<'a> = OracleError<'a>;
 
     let clean = TextPair::new(
         tp.original.trim_end_matches('.'),
@@ -2764,7 +2815,7 @@ fn parse_subject_continuous_static(text: &str) -> Option<StaticDefinition> {
 /// other types"`) go through the main path instead and reach the same
 /// extractor via `parse_continuous_modifications`.
 fn parse_subject_additive_type_static(text: &str) -> Option<StaticDefinition> {
-    type VE<'a> = nom_language::error::VerboseError<&'a str>;
+    type VE<'a> = OracleError<'a>;
     let lower = text.to_lowercase();
     let (subject_lower, predicate_lower) = nom_primitives::scan_split_at_phrase(&lower, |i| {
         alt((tag::<_, _, VE>("are "), tag::<_, _, VE>("is "))).parse(i)
@@ -2794,8 +2845,10 @@ fn parse_subject_additive_type_static(text: &str) -> Option<StaticDefinition> {
 ///   extractor (`every basic land type`, `the chosen type`), or
 /// * no valid type or subtype was recognized (unknown words are dropped —
 ///   the curated `SUBTYPES` list is authoritative).
-fn parse_additive_type_clause_modifications(text: &str) -> Option<Vec<ContinuousModification>> {
-    type VE<'a> = nom_language::error::VerboseError<&'a str>;
+pub(crate) fn parse_additive_type_clause_modifications(
+    text: &str,
+) -> Option<Vec<ContinuousModification>> {
+    type VE<'a> = OracleError<'a>;
 
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower)
@@ -2899,15 +2952,13 @@ fn core_type_from_additive_word(word: &str) -> Option<CoreType> {
 /// `ContinuousModification` list for type/subtype/P-T/keyword changes.
 fn parse_compound_turn_counter_animation(lower: &str, text: &str) -> Option<StaticDefinition> {
     // Strip "during your turn, " prefix via nom tag
-    let (rest, _) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("during your turn, ")(lower).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("during your turn, ")(lower).ok()?;
 
     // Strip "as long as " prefix from the remainder
-    let (rest, _) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("as long as ")(rest).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("as long as ")(rest).ok()?;
 
     // Parse "~ has one or more [type] counters on [pronoun], "
-    let (rest, _) = tag::<_, _, nom_language::error::VerboseError<&str>>("~ has ")(rest).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("~ has ")(rest).ok()?;
 
     // Parse the counter count requirement: "one or more" / "N or more" / "a"
     let (minimum, rest) = parse_counter_minimum(rest)?;
@@ -3227,7 +3278,7 @@ fn parse_subject_combat_rule_static(text: &str) -> Option<StaticDefinition> {
     let lower = text.to_lowercase();
     let (subject_lower, predicate, rest) =
         nom_primitives::scan_preceded(&lower, parse_combat_rule_static_predicate_nom)?;
-    let (rest, _) = opt(tag::<_, _, VerboseError<&str>>(".")).parse(rest).ok()?;
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(rest).ok()?;
     if !rest.trim().is_empty() {
         return None;
     }
@@ -3269,8 +3320,8 @@ enum CombatTaxSubject {
 ///   suffix    := " for each of those creatures" dynamic_x?
 ///   dynamic_x := ", where x is the number of " <filter-phrase>
 fn parse_combat_tax_body(input: &str) -> OracleResult<'_, CombatTaxParse> {
+    use crate::parser::oracle_nom::error::OracleError;
     use crate::types::ability::UnlessPayScaling;
-    use nom_language::error::VerboseError;
 
     // Subject: either "Creatures " (opponents' creatures — the prison family),
     // "Enchanted creature " (aura form — Brainwash), or "Each creature with one
@@ -3284,45 +3335,37 @@ fn parse_combat_tax_body(input: &str) -> OracleResult<'_, CombatTaxParse> {
     let (input, subject) = alt((
         value(
             CombatTaxSubject::EachCreatureWithCounters,
-            tag_no_case::<_, _, VerboseError<&str>>(
-                "each creature with one or more counters on it ",
-            ),
+            tag_no_case::<_, _, OracleError<'_>>("each creature with one or more counters on it "),
         ),
         value(
             CombatTaxSubject::Creatures,
-            tag_no_case::<_, _, VerboseError<&str>>("creatures "),
+            tag_no_case::<_, _, OracleError<'_>>("creatures "),
         ),
         value(
             CombatTaxSubject::EnchantedCreature,
-            tag_no_case::<_, _, VerboseError<&str>>("enchanted creature "),
+            tag_no_case::<_, _, OracleError<'_>>("enchanted creature "),
         ),
     ))
     .parse(input)?;
 
     let (input, is_attack) = alt((
-        value(
-            true,
-            tag_no_case::<_, _, VerboseError<&str>>("can't attack"),
-        ),
-        value(
-            false,
-            tag_no_case::<_, _, VerboseError<&str>>("can't block"),
-        ),
+        value(true, tag_no_case::<_, _, OracleError<'_>>("can't attack")),
+        value(false, tag_no_case::<_, _, OracleError<'_>>("can't block")),
     ))
     .parse(input)?;
 
     // Optional attack scope: " you" or " you or planeswalkers you control".
     // For the block side the scope is implicit ("can't block" has no "you").
     let (input, _scope) = opt(alt((
-        tag_no_case::<_, _, VerboseError<&str>>(" you or planeswalkers you control"),
-        tag_no_case::<_, _, VerboseError<&str>>(" you"),
+        tag_no_case::<_, _, OracleError<'_>>(" you or planeswalkers you control"),
+        tag_no_case::<_, _, OracleError<'_>>(" you"),
     )))
     .parse(input)?;
 
-    let (input, _) = tag_no_case::<_, _, VerboseError<&str>>(" unless ").parse(input)?;
+    let (input, _) = tag_no_case::<_, _, OracleError<'_>>(" unless ").parse(input)?;
     let (input, _) = alt((
-        tag_no_case::<_, _, VerboseError<&str>>("their controller pays "),
-        tag_no_case::<_, _, VerboseError<&str>>("its controller pays "),
+        tag_no_case::<_, _, OracleError<'_>>("their controller pays "),
+        tag_no_case::<_, _, OracleError<'_>>("its controller pays "),
     ))
     .parse(input)?;
 
@@ -3336,14 +3379,14 @@ fn parse_combat_tax_body(input: &str) -> OracleResult<'_, CombatTaxParse> {
     //     tax to "attacking-you" creatures — already implicit in the affected
     //     filter for the attack side.
     let (input, per_affected) = opt(alt((
-        tag_no_case::<_, _, VerboseError<&str>>(" for each of those creatures"),
-        tag_no_case::<_, _, VerboseError<&str>>(
+        tag_no_case::<_, _, OracleError<'_>>(" for each of those creatures"),
+        tag_no_case::<_, _, OracleError<'_>>(
             " for each creature they control that's attacking you or a planeswalker you control",
         ),
-        tag_no_case::<_, _, VerboseError<&str>>(
+        tag_no_case::<_, _, OracleError<'_>>(
             " for each creature they control that's attacking you",
         ),
-        tag_no_case::<_, _, VerboseError<&str>>(" for each attacking creature they control"),
+        tag_no_case::<_, _, OracleError<'_>>(" for each attacking creature they control"),
     )))
     .parse(input)?;
 
@@ -3431,16 +3474,16 @@ fn parse_combat_tax_body(input: &str) -> OracleResult<'_, CombatTaxParse> {
 /// counter-type prefix; Nils, Discipline Enforcer's text omits the counter type,
 /// so the dedicated branch is tried first.
 fn parse_dynamic_x_clause(input: &str) -> OracleResult<'_, QuantityRef> {
-    use nom_language::error::VerboseError;
+    use crate::parser::oracle_nom::error::OracleError;
 
-    let (input, _) = tag_no_case::<_, _, VerboseError<&str>>(", where x is ").parse(input)?;
+    let (input, _) = tag_no_case::<_, _, OracleError<'_>>(", where x is ").parse(input)?;
 
     // CR 122.1: Untyped counter anaphor — consume the rest of the clause and
     // emit `AnyCountersOnTarget`. Accepted variants mirror the counter-on-target
     // anaphor family (no type prefix).
     if let Ok((_, _)) = alt((
-        tag_no_case::<_, _, VerboseError<&str>>("the number of counters on that creature"),
-        tag_no_case::<_, _, VerboseError<&str>>("the number of counters on that permanent"),
+        tag_no_case::<_, _, OracleError<'_>>("the number of counters on that creature"),
+        tag_no_case::<_, _, OracleError<'_>>("the number of counters on that permanent"),
     ))
     .parse(input)
     {
@@ -3460,12 +3503,7 @@ fn parse_dynamic_x_clause(input: &str) -> OracleResult<'_, QuantityRef> {
     let (_, quantity) =
         super::oracle_nom::quantity::parse_quantity_ref(&lowered).map_err(|e| match e {
             nom::Err::Error(_) | nom::Err::Failure(_) => {
-                nom::Err::Error(nom_language::error::VerboseError {
-                    errors: vec![(
-                        input,
-                        nom_language::error::VerboseErrorKind::Nom(nom::error::ErrorKind::Tag),
-                    )],
-                })
+                nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Fail))
             }
             nom::Err::Incomplete(n) => nom::Err::Incomplete(n),
         })?;
@@ -3560,7 +3598,7 @@ fn find_continuous_predicate_start(lower: &str) -> Option<usize> {
 }
 
 fn parse_keyword_with_where_x(input: &str) -> Option<(Keyword, Option<QuantityRef>)> {
-    type VE<'a> = nom_language::error::VerboseError<&'a str>;
+    type VE<'a> = OracleError<'a>;
 
     let input = input.trim().trim_end_matches('.');
     let (rest, keyword_text) = nom::bytes::complete::take_till::<_, _, VE<'_>>(|c| c == ',')
@@ -3605,7 +3643,7 @@ fn bind_where_x_in_quantity_expr(
 /// CR 702.51a: Grants a keyword (typically convoke) to spells matching a filter during casting.
 /// Also handles "Creature cards you own that aren't on the battlefield have flash."
 fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option<StaticDefinition> {
-    type VE<'a> = nom_language::error::VerboseError<&'a str>;
+    type VE<'a> = OracleError<'a>;
 
     let scoped_tp = nom_tag_tp(tp, "during your turn, ");
     let condition = scoped_tp.as_ref().map(|_| StaticCondition::DuringYourTurn);
@@ -3735,7 +3773,7 @@ fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option<StaticDefi
 /// CR 105.4: "of the chosen color" → `FilterProp::IsChosenColor`
 /// CR 205.3m: "of the chosen type" → `FilterProp::IsChosenCreatureType`
 fn parse_chosen_qualifier_subject(tp: &TextPair<'_>) -> Option<TargetFilter> {
-    type VE<'a> = nom_language::error::VerboseError<&'a str>;
+    type VE<'a> = OracleError<'a>;
 
     // Must start with "creature" or "creatures"
     let rest = if let Ok((r, _)) = tag::<_, _, VE<'_>>("creatures ")(tp.lower) {
@@ -3874,7 +3912,7 @@ fn parse_continuous_subject_filter(subject: &str) -> Option<TargetFilter> {
 /// suffix) via `parse_type_phrase`, then parses a comma/or/and-separated subtype list
 /// and composes with `TargetFilter::And`.
 fn parse_thats_a_subject_filter(text: &str, lower: &str) -> Option<TargetFilter> {
-    type VE<'a> = nom_language::error::VerboseError<&'a str>;
+    type VE<'a> = OracleError<'a>;
 
     let (before, subtype_lower, _) = nom_primitives::scan_preceded(lower, |i| {
         preceded(
@@ -3903,25 +3941,19 @@ fn parse_thats_a_subject_filter(text: &str, lower: &str) -> Option<TargetFilter>
 /// "Cleric, Rogue, Warrior, and/or Wizard", "Cat, Elemental, Nightmare, Dinosaur, or Beast".
 /// Returns `TargetFilter::Or` for multiple subtypes, single `TargetFilter::Typed` for one.
 fn parse_subtype_or_list(input: &str) -> Option<TargetFilter> {
-    fn parse_subtype_word(
-        input: &str,
-    ) -> nom::IResult<&str, &str, nom_language::error::VerboseError<&str>> {
+    fn parse_subtype_word(input: &str) -> nom::IResult<&str, &str, OracleError<'_>> {
         use nom::bytes::complete::take_while1;
         let (rest, word) = take_while1(|c: char| c.is_alphabetic() || c == '-').parse(input)?;
         if !word.chars().next().is_some_and(|c| c.is_uppercase()) {
-            return Err(nom::Err::Error(VerboseError {
-                errors: vec![(
-                    input,
-                    nom_language::error::VerboseErrorKind::Context("expected capitalized subtype"),
-                )],
-            }));
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Fail,
+            )));
         }
         Ok((rest, word))
     }
 
-    fn parse_list_separator(
-        input: &str,
-    ) -> nom::IResult<&str, &str, nom_language::error::VerboseError<&str>> {
+    fn parse_list_separator(input: &str) -> nom::IResult<&str, &str, OracleError<'_>> {
         alt((
             tag(", and/or a "),
             tag(", and/or "),
@@ -4050,6 +4082,25 @@ fn parse_modified_creature_subject_filter(subject: &str) -> Option<TargetFilter>
     None
 }
 
+fn parse_creatures_you_control_that_clause<'a>(
+    original: &'a str,
+    lower: &str,
+    is_other: bool,
+) -> Option<(TargetFilter, &'a str)> {
+    let (mut properties, consumed) = parse_that_clause_suffix(lower)?;
+    if is_other {
+        properties.push(FilterProp::Another);
+    }
+    Some((
+        TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(properties),
+        ),
+        original[consumed..].trim_start(),
+    ))
+}
+
 fn parse_attachment_creatures_you_control_descriptor(descriptor: &str) -> Option<TargetFilter> {
     // CR 303.4b + CR 301.5a: plural/global "enchanted/equipped creatures you
     // control" is not source-relative. It means creatures with a qualifying
@@ -4090,7 +4141,7 @@ fn attachment_creatures_you_control_filter(kind: AttachmentKind) -> TargetFilter
 /// you control"), and analogous "[other] commander(s) [you control | your
 /// opponents control]" subject phrases.
 fn parse_commander_subject_filter(subject: &str) -> Option<TargetFilter> {
-    type VE<'a> = nom_language::error::VerboseError<&'a str>;
+    type VE<'a> = OracleError<'a>;
     let lower = subject.trim().to_lowercase();
     let i = lower.as_str();
 
@@ -4629,48 +4680,10 @@ fn parse_cant_be_countered_subject(tp: &TextPair) -> TargetFilter {
         if subject.is_empty() || subject == "~" || subject.ends_with(" ~") {
             return TargetFilter::SelfRef;
         }
-        // "X spells you control" — parse color + type filter
-        if let Some(before_yc) = subject.strip_suffix(" you control") {
-            if let Some(before_spells) = before_yc
-                .strip_suffix(" spells")
-                .or_else(|| before_yc.strip_suffix(" spell"))
-            {
-                let mut properties = Vec::new();
-                let mut card_types = Vec::new();
-
-                // Split on " and " to handle compound types: "creature and enchantment"
-                for part in before_spells.split(" and ") {
-                    for raw_word in part.split_whitespace() {
-                        let word = raw_word.trim_end_matches(',');
-                        if let Some(color) = parse_named_color(word) {
-                            properties.push(FilterProp::HasColor { color });
-                        } else {
-                            // Try as card type: "creature", "instant", "sorcery", etc.
-                            match word {
-                                "creature" => card_types.push(TypeFilter::Creature),
-                                "instant" => card_types.push(TypeFilter::Instant),
-                                "sorcery" => card_types.push(TypeFilter::Sorcery),
-                                "enchantment" => card_types.push(TypeFilter::Enchantment),
-                                "artifact" => card_types.push(TypeFilter::Artifact),
-                                _ => {}
-                            }
-                        }
-                    }
-                }
-
-                // CR 608.2b: Single type → direct filter; multiple types → AnyOf wrapper
-                let type_filters = if card_types.len() > 1 {
-                    vec![TypeFilter::AnyOf(card_types)]
-                } else {
-                    card_types
-                };
-
-                return TargetFilter::Typed(TypedFilter {
-                    type_filters,
-                    controller: Some(ControllerRef::You),
-                    properties,
-                });
-            }
+        let normalized = format!("all {subject}");
+        let (filter, rest) = parse_target(&normalized);
+        if rest.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
+            return filter;
         }
     }
     TargetFilter::SelfRef
@@ -4744,13 +4757,12 @@ fn parse_filter_scoped_cant_be_activated(
     // exemption combinator handles the optional suffix.
     if let Ok((after_source, source_filter)) = (value(
         TargetFilter::HasChosenName,
-        tag::<_, _, nom_language::error::VerboseError<&str>>("sources with the chosen name"),
+        tag::<_, _, OracleError<'_>>("sources with the chosen name"),
     ))
     .parse(rest_tp.lower)
     {
         if let Ok((after_predicate, _)) =
-            tag::<_, _, nom_language::error::VerboseError<&str>>(" can't be activated")
-                .parse(after_source)
+            tag::<_, _, OracleError<'_>>(" can't be activated").parse(after_source)
         {
             // Optional "unless they're..." suffix, then the trailing period (or end-of-input).
             if let Ok((tail, exemption)) = parse_activation_exemption_suffix(after_predicate) {
@@ -5365,7 +5377,7 @@ fn parse_per_turn_draw_limit(tp: &str, text: &str) -> Option<StaticDefinition> {
 /// E.g., Omen Machine: "Players can't draw cards."
 /// E.g., Maralen of the Mornsong: "Players can't draw cards."
 fn parse_cant_draw_cards(tp: &str, text: &str) -> Option<StaticDefinition> {
-    type VE<'a> = nom_language::error::VerboseError<&'a str>;
+    type VE<'a> = OracleError<'a>;
 
     let (who, predicate) = strip_casting_prohibition_subject(tp)?;
     let rest = nom_tag_lower(predicate, predicate, "can't draw ")
@@ -5459,7 +5471,7 @@ fn parse_enchanted_is_type(tp: &TextPair, description: &str) -> Option<StaticDef
 
     // Must have " is a " or " is an " or " loses all abilities and is a "
     let mut modifications = Vec::new();
-    type VE<'a> = nom_language::error::VerboseError<&'a str>;
+    type VE<'a> = OracleError<'a>;
 
     let is_rest_lower = if let Ok((r, _)) = alt((
         tag::<_, _, VE>("loses all abilities and is a "),
@@ -5640,8 +5652,8 @@ fn parse_enchanted_is_type(tp: &TextPair, description: &str) -> Option<StaticDef
 
 /// CR 614.1b: Parse a step name from Oracle text using nom combinators.
 fn parse_step_name(input: &str) -> Option<Phase> {
-    use nom_language::error::VerboseError;
-    let result: Result<(&str, Phase), nom::Err<VerboseError<&str>>> = alt((
+    use crate::parser::oracle_nom::error::OracleError;
+    let result: Result<(&str, Phase), nom::Err<OracleError<'_>>> = alt((
         value(Phase::Draw, tag("draw step")),
         value(Phase::Untap, tag("untap step")),
         value(Phase::Upkeep, tag("upkeep step")),
@@ -5706,25 +5718,19 @@ fn is_capitalized_words(s: &str) -> bool {
 fn try_parse_thats_a_subtype_list(input: &str) -> Option<(TargetFilter, &str)> {
     use nom::multi::separated_list1;
 
-    fn parse_subtype_word(
-        input: &str,
-    ) -> nom::IResult<&str, &str, nom_language::error::VerboseError<&str>> {
+    fn parse_subtype_word(input: &str) -> nom::IResult<&str, &str, OracleError<'_>> {
         use nom::bytes::complete::take_while1;
         let (rest, word) = take_while1(|c: char| c.is_alphabetic() || c == '-').parse(input)?;
         if !word.chars().next().is_some_and(|c| c.is_uppercase()) {
-            return Err(nom::Err::Error(nom_language::error::VerboseError {
-                errors: vec![(
-                    input,
-                    nom_language::error::VerboseErrorKind::Context("expected capitalized subtype"),
-                )],
-            }));
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Fail,
+            )));
         }
         Ok((rest, word))
     }
 
-    fn parse_conjunction(
-        input: &str,
-    ) -> nom::IResult<&str, &str, nom_language::error::VerboseError<&str>> {
+    fn parse_conjunction(input: &str) -> nom::IResult<&str, &str, OracleError<'_>> {
         alt((tag(" or a "), tag(" and a "), tag(" or "), tag(" and "))).parse(input)
     }
 
@@ -5776,13 +5782,13 @@ fn parse_can_attack_despite_defender(
     };
 
     let (subject_prefix, _) = nom_primitives::scan_split_at_phrase(body_tp.lower, |i| {
-        tag::<_, _, nom_language::error::VerboseError<&str>>("can attack as though").parse(i)
+        tag::<_, _, OracleError<'_>>("can attack as though").parse(i)
     })?;
 
     // Verify the rest of the phrase: " it didn't have defender" or
     // " they didn't have defender". Guards against "can attack as though
     // it had haste" reaching subject dispatch.
-    type VE<'a> = nom_language::error::VerboseError<&'a str>;
+    type VE<'a> = OracleError<'a>;
     let after_phrase = &body_tp.lower[subject_prefix.len() + "can attack as though".len()..];
     let tail_ok = alt((
         tag::<_, _, VE>(" it didn't have defender"),
@@ -5855,7 +5861,7 @@ fn parse_enchanted_equipped_predicate(
     // CanAttackWithDefender. Accepts both pronoun forms so plural subjects
     // ("Creatures you control …they didn't…") routed through the
     // creatures-you-control prefix handler (line ~620) land here.
-    type VE<'a> = nom_language::error::VerboseError<&'a str>;
+    type VE<'a> = OracleError<'a>;
     if alt((
         tag::<_, _, VE>("can attack as though it didn't have defender"),
         tag::<_, _, VE>("can attack as though they didn't have defender"),
@@ -6043,10 +6049,10 @@ fn scale_pt_quantity(amount: i32, quantity: &QuantityExpr) -> QuantityExpr {
 
 fn parse_dynamic_for_each_pt_modifications(text: &str) -> Option<Vec<ContinuousModification>> {
     let lower = text.to_lowercase();
-    let (for_each_with_marker, pt_text) = take_until::<_, _, VerboseError<&str>>("for each ")
+    let (for_each_with_marker, pt_text) = take_until::<_, _, OracleError<'_>>("for each ")
         .parse(lower.as_str())
         .ok()?;
-    let (for_each_clause, _) = tag::<_, _, VerboseError<&str>>("for each ")
+    let (for_each_clause, _) = tag::<_, _, OracleError<'_>>("for each ")
         .parse(for_each_with_marker)
         .ok()?;
     let pt_text = pt_text.trim();
@@ -6078,7 +6084,11 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
     let lower = tp.lower;
     let mut modifications = Vec::new();
 
-    if nom_primitives::scan_contains(tp.lower, "lose all abilities") {
+    if nom_primitives::scan_contains(tp.lower, "lose all abilities")
+        || nom_primitives::scan_contains(tp.lower, "loses all abilities")
+        || nom_primitives::scan_contains(tp.lower, "lose all other abilities")
+        || nom_primitives::scan_contains(tp.lower, "loses all other abilities")
+    {
         modifications.push(ContinuousModification::RemoveAllAbilities);
     }
 
@@ -6169,7 +6179,7 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
             // CR 702: Check for dynamic "keyword X" with "where X is [qty]"
             if let Some(ref where_expr) = where_x_expression {
                 if let Ok((_, kw_name)) = terminated(
-                    alpha1::<_, nom_language::error::VerboseError<&str>>,
+                    alpha1::<_, OracleError<'_>>,
                     preceded(space1, tag_no_case("x")),
                 )
                 .parse(part_lower.as_str())
@@ -6221,7 +6231,7 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
 /// Returns (power_sign, power_is_x, toughness_sign, toughness_is_x) and remaining text.
 fn parse_variable_pt_pattern(
     input: &str,
-) -> nom::IResult<&str, (i32, bool, i32, bool), nom_language::error::VerboseError<&str>> {
+) -> nom::IResult<&str, (i32, bool, i32, bool), OracleError<'_>> {
     let (rest, p_sign) = alt((value(-1i32, tag("-")), value(1i32, tag("+")))).parse(input)?;
     let (rest, p_is_x) = alt((value(true, tag("x")), value(false, tag("0")))).parse(rest)?;
     let (rest, _) = tag("/").parse(rest)?;
@@ -6288,7 +6298,7 @@ fn parse_dynamic_pt_in_text(
 /// one `AddSubtype` per CR 205.3 subtype are emitted; CR 205.4 supertypes are
 /// recognized-and-discarded (animations don't grant supertypes).
 fn parse_becomes_type_addition_modifications(tp: &TextPair<'_>) -> Vec<ContinuousModification> {
-    type VE<'a> = nom_language::error::VerboseError<&'a str>;
+    type VE<'a> = OracleError<'a>;
 
     // Scan for the "becomes a"/"becomes an" phrase anywhere in the lowered
     // text, then locate the terminating "in addition to its other types"
@@ -6341,12 +6351,10 @@ enum BasePtSide {
     Fixed { value: i32 },
 }
 
-fn parse_base_pt_side(
-    input: &str,
-) -> nom::IResult<&str, BasePtSide, nom_language::error::VerboseError<&str>> {
+fn parse_base_pt_side(input: &str) -> nom::IResult<&str, BasePtSide, OracleError<'_>> {
     let (rest, sign) = opt(alt((value(-1i32, tag("-")), value(1i32, tag("+"))))).parse(input)?;
     let sign = sign.unwrap_or(1);
-    if let Ok((rest2, _)) = tag::<_, _, nom_language::error::VerboseError<&str>>("x")(rest) {
+    if let Ok((rest2, _)) = tag::<_, _, OracleError<'_>>("x")(rest) {
         return Ok((rest2, BasePtSide::Dynamic { sign }));
     }
     let (rest, n) = nom_primitives::parse_number.parse(rest)?;
@@ -6599,7 +6607,7 @@ fn find_cost_separator(text: &str) -> Option<usize> {
 /// "Sacrifice this token", "Discard a card", "Pay 2 life", "Tap an untapped creature",
 /// "Exile ~ from your graveyard", "Remove a counter from ~", etc.
 fn is_text_based_cost_prefix(lower_prefix: &str) -> bool {
-    type E<'a> = nom_language::error::VerboseError<&'a str>;
+    type E<'a> = OracleError<'a>;
 
     alt((
         value((), tag::<_, _, E>("sacrifice ")),
@@ -6863,7 +6871,7 @@ fn parse_cda_pt_equality(lower: &str, text: &str) -> Option<StaticDefinition> {
 /// - "The chosen player's maximum hand size is [N]." → SetTo(N), chosen player scope
 /// - "Your maximum hand size is equal to [quantity]." → EqualTo(quantity)
 fn try_parse_max_hand_size(tp: &TextPair<'_>, text: &str) -> Option<StaticDefinition> {
-    type NomErr<'a> = nom_language::error::VerboseError<&'a str>;
+    type NomErr<'a> = OracleError<'a>;
 
     let lower_trimmed = tp.lower.trim_end_matches('.');
 
@@ -7131,7 +7139,7 @@ fn parse_top_of_library_alt_cost_rider(
         // `take_until + alt` keeps this on the combinator path. Both
         // anchors map to the same underlying rider parser.
         let lower = input.to_lowercase();
-        type E<'a> = nom_language::error::VerboseError<&'a str>;
+        type E<'a> = OracleError<'a>;
         let mut anchor = nom::branch::alt((
             nom::bytes::complete::take_until::<_, _, E>("if you cast a spell this way"),
             nom::bytes::complete::take_until::<_, _, E>("if you cast it this way"),
@@ -7258,18 +7266,12 @@ fn try_parse_cast_free_permission(text: &str, lower: &str) -> Option<StaticDefin
     };
 
     let (filter, remainder) = parse_type_phrase(&cleaned);
-    if !remainder.trim().is_empty() {
-        if !zone_qualified {
-            // Unqualified branch is strict: an unconsumed remainder signals a
-            // complex filter we don't yet model (e.g. Fires of Invention's
-            // dynamic mana-value bound). Decline rather than emit a partial
-            // `Any` filter that would be wrong in a different way.
-            return None;
-        }
-        push_warning(format!(
-            "ignored-remainder: '{}' after type parse in cast-free-permission",
-            remainder.trim()
-        ));
+    if !remainder.trim().is_empty() && !zone_qualified {
+        // Unqualified branch is strict: an unconsumed remainder signals a
+        // complex filter we don't yet model (e.g. Fires of Invention's
+        // dynamic mana-value bound). Decline rather than emit a partial
+        // `Any` filter that would be wrong in a different way.
+        return None;
     }
 
     Some(
@@ -7302,6 +7304,7 @@ fn first_qualified_spell_condition(filter: &TargetFilter) -> StaticCondition {
             StaticCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
                     qty: QuantityRef::SpellsCastThisTurn {
+                        scope: CountScope::Controller,
                         filter: Some(filter.clone()),
                     },
                 },
@@ -7328,7 +7331,7 @@ fn parse_self_spell_cost_subject(lower: &str) -> Option<()> {
 
 fn parse_self_spell_target_cost_filter(lower: &str) -> Option<TargetFilter> {
     let (_, target_text) = preceded(
-        take_until::<_, _, VerboseError<&str>>(" if "),
+        take_until::<_, _, OracleError<'_>>(" if "),
         preceded(
             alt((tag(" if it targets "), tag(" if this spell targets "))),
             preceded(opt(alt((tag("a "), tag("an "), tag("one or more ")))), rest),
@@ -7348,6 +7351,80 @@ fn parse_self_spell_target_cost_filter(lower: &str) -> Option<TargetFilter> {
             filter: Box::new(target_filter),
         },
     ])))
+}
+
+fn parse_cost_modifier_target_filter(lower: &str) -> Option<TargetFilter> {
+    type VE<'a> = OracleError<'a>;
+
+    let (input, _) = take_until::<_, _, VE>(" that target").parse(lower).ok()?;
+    let (input, _) = tag::<_, _, VE>(" that target").parse(input).ok()?;
+    let (input, _) = opt(tag::<_, _, VE>("s")).parse(input).ok()?;
+    let (input, _) = tag::<_, _, VE>(" ").parse(input).ok()?;
+    let (input, _) = opt(alt((
+        tag::<_, _, VE>("one or more "),
+        tag("a "),
+        tag("an "),
+    )))
+    .parse(input)
+    .ok()?;
+    let (_, target_text) = take_until::<_, _, VE>(" cost").parse(input).ok()?;
+
+    let target_text = target_text.trim();
+    let target_filter = parse_commander_subject_filter(target_text).or_else(|| {
+        let (filter, remainder) = parse_type_phrase(target_text);
+        if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
+            Some(filter)
+        } else {
+            None
+        }
+    })?;
+
+    Some(TargetFilter::Typed(TypedFilter::card().properties(vec![
+        FilterProp::Targets {
+            filter: Box::new(target_filter),
+        },
+    ])))
+}
+
+fn strip_cost_modifier_target_clause(prefix: &str) -> &str {
+    take_until::<_, _, OracleError<'_>>(" that target")
+        .parse(prefix)
+        .map_or(prefix, |(_, before)| before)
+}
+
+fn merge_cost_modifier_target_filter(
+    spell_filter: Option<TargetFilter>,
+    target_filter: Option<TargetFilter>,
+) -> Option<TargetFilter> {
+    let Some(target_filter) = target_filter else {
+        return spell_filter;
+    };
+
+    let TargetFilter::Typed(target_typed) = target_filter else {
+        return match spell_filter {
+            Some(spell_filter) => Some(TargetFilter::And {
+                filters: vec![spell_filter, target_filter],
+            }),
+            None => Some(target_filter),
+        };
+    };
+
+    let target_props = target_typed.properties;
+    match spell_filter {
+        Some(TargetFilter::Typed(mut tf)) => {
+            tf.properties.extend(target_props);
+            Some(TargetFilter::Typed(tf))
+        }
+        Some(spell_filter) => Some(TargetFilter::And {
+            filters: vec![
+                spell_filter,
+                TargetFilter::Typed(TypedFilter::card().properties(target_props)),
+            ],
+        }),
+        None => Some(TargetFilter::Typed(
+            TypedFilter::card().properties(target_props),
+        )),
+    }
 }
 
 /// CR 601.2f: Parse cost modification statics from Oracle text.
@@ -7404,6 +7481,7 @@ fn try_parse_cost_modification(text: &str, lower: &str) -> Option<StaticDefiniti
     };
 
     let first_qualified_spell_filter = parse_first_qualified_spell_filter(lower);
+    let target_cost_filter = parse_cost_modifier_target_filter(lower);
 
     // Extract "from [zone(s)]" clause between player scope and "cost".
     // E.g., "cast from graveyards or from exile" → [Graveyard, Exile]
@@ -7446,6 +7524,7 @@ fn try_parse_cost_modification(text: &str, lower: &str) -> Option<StaticDefiniti
         Some(filter)
     } else if let Some(cost_idx) = lower.find(" cost") {
         let prefix = &lower[..cost_idx];
+        let prefix = strip_cost_modifier_target_clause(prefix);
         // Strip "from [zones]" clause (only if zones were detected), player scope, then "spells"
         let without_from = if !cast_from_zones.is_empty() {
             if let Some(from_idx) = prefix.find(" from ") {
@@ -7491,6 +7570,8 @@ fn try_parse_cost_modification(text: &str, lower: &str) -> Option<StaticDefiniti
     } else {
         None
     };
+
+    let spell_filter = merge_cost_modifier_target_filter(spell_filter, target_cost_filter);
 
     // Merge cast-from-zone restriction into the spell filter.
     // If zones were extracted, add InZone/InAnyZone to ensure the cost modification
@@ -7608,6 +7689,7 @@ fn try_parse_cost_modification(text: &str, lower: &str) -> Option<StaticDefiniti
             // CR 109.4: TargetPlayer has no defined semantics here (cost-modification
             // static scoping). Fall back to an untyped filter; the parser should not
             // emit this variant for cost statics.
+            Some(ControllerRef::ScopedPlayer) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::TargetPlayer) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::DefendingPlayer) => TargetFilter::Typed(TypedFilter::card()),
             None => TargetFilter::Typed(TypedFilter::card()),
@@ -7666,6 +7748,7 @@ fn parse_cost_modifier_condition(cond_text: &str) -> Option<StaticCondition> {
     Some(StaticCondition::QuantityComparison {
         lhs: QuantityExpr::Ref {
             qty: QuantityRef::SpellsCastThisTurn {
+                scope: CountScope::Controller,
                 filter: if filter == TargetFilter::Any {
                     None
                 } else {
@@ -7680,18 +7763,16 @@ fn parse_cost_modifier_condition(cond_text: &str) -> Option<StaticCondition> {
 
 fn parse_cost_modifier_another_spell_condition(input: &str) -> OracleResult<'_, TargetFilter> {
     let (rest, _) = alt((tag("you've cast another "), tag("you cast another "))).parse(input)?;
-    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("spell this turn").parse(rest) {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("spell this turn").parse(rest) {
         return Ok((rest, TargetFilter::Any));
     }
     let (rest, type_text) = take_until(" spell this turn").parse(rest)?;
     let (rest, _) = tag(" spell this turn").parse(rest)?;
     let Some(filter) = nom_condition::parse_spell_history_filter(type_text) else {
-        return Err(nom::Err::Error(VerboseError {
-            errors: vec![(
-                input,
-                nom_language::error::VerboseErrorKind::Nom(nom::error::ErrorKind::Tag),
-            )],
-        }));
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
     };
     Ok((rest, filter))
 }
@@ -8380,6 +8461,25 @@ mod tests {
     }
 
     #[test]
+    fn static_this_spell_cost_less_for_each_creature_you_attacked_with_this_turn() {
+        let def = parse_static_line(
+            "This spell costs {1} less to cast for each creature you attacked with this turn.",
+        )
+        .unwrap();
+
+        assert!(matches!(
+            def.mode,
+            StaticMode::ReduceCost {
+                amount: ManaCost::Cost { generic: 1, .. },
+                dynamic_count: Some(QuantityRef::AttackedThisTurn),
+                ..
+            }
+        ));
+        assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
+        assert_eq!(def.active_zones, vec![Zone::Hand, Zone::Stack]);
+    }
+
+    #[test]
     fn self_cost_reduction_another_filtered_spell_requires_prior_matching_spell() {
         let def = parse_static_line(
             "This spell costs {2} less to cast if you've cast another instant or sorcery spell this turn.",
@@ -8391,6 +8491,7 @@ mod tests {
                 QuantityExpr::Ref {
                     qty:
                         QuantityRef::SpellsCastThisTurn {
+                            scope: CountScope::Controller,
                             filter: Some(TargetFilter::Or { filters }),
                         },
                 },
@@ -8523,6 +8624,94 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn static_opponent_spells_targeting_commanders_cost_more() {
+        let def = parse_static_line(
+            "Spells your opponents cast that target one or more commanders you control cost {3} more to cast.",
+        )
+        .unwrap();
+
+        assert!(matches!(
+            def.mode,
+            StaticMode::RaiseCost {
+                amount: ManaCost::Cost { generic: 3, .. },
+                ..
+            }
+        ));
+        assert!(matches!(
+            def.affected,
+            Some(TargetFilter::Typed(TypedFilter {
+                controller: Some(ControllerRef::Opponent),
+                ..
+            }))
+        ));
+        let StaticMode::RaiseCost {
+            ref spell_filter, ..
+        } = def.mode
+        else {
+            panic!("expected RaiseCost");
+        };
+        let TargetFilter::Typed(tf) = spell_filter
+            .as_ref()
+            .expect("expected target-gated spell filter")
+        else {
+            panic!("expected typed spell filter");
+        };
+        let commander_filter = tf
+            .properties
+            .iter()
+            .find_map(|prop| match prop {
+                FilterProp::Targets { filter } => Some(filter),
+                _ => None,
+            })
+            .expect("expected Targets property");
+        let TargetFilter::Typed(commander_tf) = commander_filter.as_ref() else {
+            panic!("expected typed commander filter");
+        };
+        assert_eq!(commander_tf.controller, Some(ControllerRef::You));
+        assert!(commander_tf.type_filters.contains(&TypeFilter::Permanent));
+        assert!(commander_tf.properties.contains(&FilterProp::IsCommander));
+    }
+
+    #[test]
+    fn static_spells_targeting_creature_cost_less() {
+        let def =
+            parse_static_line("Spells you cast that target a creature cost {2} less to cast.")
+                .unwrap();
+
+        assert!(matches!(
+            def.mode,
+            StaticMode::ReduceCost {
+                amount: ManaCost::Cost { generic: 2, .. },
+                ..
+            }
+        ));
+        let StaticMode::ReduceCost {
+            ref spell_filter, ..
+        } = def.mode
+        else {
+            panic!("expected ReduceCost");
+        };
+        let TargetFilter::Typed(tf) = spell_filter
+            .as_ref()
+            .expect("expected target-gated spell filter")
+        else {
+            panic!("expected typed spell filter");
+        };
+        let target_filter = tf
+            .properties
+            .iter()
+            .find_map(|prop| match prop {
+                FilterProp::Targets { filter } => Some(filter),
+                _ => None,
+            })
+            .expect("expected Targets property");
+        let TargetFilter::Typed(target_tf) = target_filter.as_ref() else {
+            panic!("expected typed target filter");
+        };
+        assert!(target_tf.type_filters.contains(&TypeFilter::Creature));
     }
 
     #[test]
@@ -8771,7 +8960,7 @@ mod tests {
             condition,
             StaticCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::SpellsCastThisTurn { filter: Some(inner) },
+                    qty: QuantityRef::SpellsCastThisTurn { scope: CountScope::Controller, filter: Some(inner) },
                 },
                 comparator: Comparator::EQ,
                 rhs: QuantityExpr::Fixed { value: 0 },
@@ -11112,6 +11301,7 @@ mod tests {
                 StaticMode::ReduceAbilityCost {
                     ref keyword,
                     amount: 1,
+                    minimum_mana: None,
                 } if keyword == "ninjutsu"
             ),
             "Expected ReduceAbilityCost {{ keyword: ninjutsu, amount: 1 }}, got {:?}",
@@ -11130,6 +11320,7 @@ mod tests {
             StaticMode::ReduceAbilityCost {
                 keyword: "equip".to_string(),
                 amount: 1,
+                minimum_mana: None,
             }
         );
     }
@@ -12577,10 +12768,45 @@ mod tests {
             Some(TargetFilter::Typed(tf)) => {
                 assert!(tf.type_filters.contains(&TypeFilter::Creature));
                 assert_eq!(tf.controller, Some(ControllerRef::You));
-                assert!(tf.properties.contains(&FilterProp::EnchantedBy));
+                assert!(matches!(
+                    tf.properties.as_slice(),
+                    [FilterProp::HasAttachment {
+                        kind: AttachmentKind::Aura,
+                        controller: None
+                    }]
+                ));
             }
             _ => panic!("expected Typed filter with enchanted property"),
         }
+    }
+
+    #[test]
+    fn creatures_you_control_that_are_enchanted_or_equipped_have_keyword() {
+        let def = parse_static_line(
+            "Creatures you control that are enchanted or equipped have double strike.",
+        )
+        .unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        match &def.affected {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(tf.type_filters.contains(&TypeFilter::Creature));
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(matches!(
+                    tf.properties.as_slice(),
+                    [FilterProp::HasAnyAttachmentOf { kinds, controller }]
+                        if controller.is_none()
+                            && kinds.len() == 2
+                            && kinds.contains(&AttachmentKind::Aura)
+                            && kinds.contains(&AttachmentKind::Equipment)
+                ));
+            }
+            _ => panic!("expected Typed filter with attachment disjunction"),
+        }
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::DoubleStrike,
+            }));
     }
 
     #[test]
@@ -13905,6 +14131,23 @@ mod tests {
             StaticMode::ReduceAbilityCost {
                 keyword: "activated".to_string(),
                 amount: 2,
+                minimum_mana: None,
+            }
+        );
+    }
+
+    #[test]
+    fn static_reduce_activated_ability_cost_generic_with_minimum() {
+        let def = parse_static_line(
+            "Activated abilities of creatures you control cost {2} less to activate. This effect can't reduce the mana in that cost to less than one mana.",
+        )
+        .unwrap();
+        assert_eq!(
+            def.mode,
+            StaticMode::ReduceAbilityCost {
+                keyword: "activated".to_string(),
+                amount: 2,
+                minimum_mana: Some(1),
             }
         );
     }
@@ -15487,5 +15730,39 @@ mod tests {
         .expect("should parse Lovisa Coldeyes line");
         assert!(matches!(def.mode, StaticMode::Continuous));
         assert_eq!(def.modifications.len(), 3);
+    }
+}
+
+/// Snapshot tests locking current static parser output before/after the IR split.
+/// These verify behavioral parity: identical snapshots before and after the
+/// `parse_static_line_ir` / `lower_static_ir` refactor.
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn static_continuous_buff() {
+        let def = parse_static_line("Creatures you control get +1/+1.").unwrap();
+        insta::assert_json_snapshot!(def);
+    }
+
+    #[test]
+    fn static_cda_power_hand_size() {
+        let def =
+            parse_static_line("~'s power is equal to the number of cards in your hand.").unwrap();
+        insta::assert_json_snapshot!(def);
+    }
+
+    #[test]
+    fn static_conditional_as_long_as() {
+        let def =
+            parse_static_line("~ gets +2/+2 as long as you control another creature.").unwrap();
+        insta::assert_json_snapshot!(def);
+    }
+
+    #[test]
+    fn static_granted_keyword() {
+        let def = parse_static_line("Creatures you control have flying.").unwrap();
+        insta::assert_json_snapshot!(def);
     }
 }

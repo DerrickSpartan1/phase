@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { GameFormat, MatchType } from "../../adapter/types";
 import type { FeedDeck } from "../../types/feed";
@@ -10,7 +10,6 @@ import {
   listSubscriptions,
   refreshAllFeeds,
   adoptFeedDeck,
-  feedDeckToParsedDeck,
 } from "../../services/feedService";
 import {
   useCachedFeed,
@@ -18,26 +17,33 @@ import {
 } from "../../services/feedPersistence";
 import { FeedManagerModal } from "./FeedManagerModal";
 import { useCardImage } from "../../hooks/useCardImage";
-import type { ParsedDeck } from "../../services/deckParser";
 import {
   evaluateDeckCompatibilityBatch,
   type DeckCompatibilityResult,
 } from "../../services/deckCompatibility";
+import {
+  buildDeckCatalog,
+  type DeckCatalogCandidate,
+} from "../../services/deckCatalog";
 import { ImportDeckModal } from "./ImportDeckModal";
 import { PreconDeckModal } from "./PreconDeckModal";
+import { savePreconDeck } from "../../services/preconDecks";
+import type { DeckEntry as PreconDeckEntry } from "../../hooks/useDecks";
 import { MenuPanel } from "./MenuShell";
 import { menuButtonClass } from "./buttonStyles";
+import { useSetSymbol } from "../../hooks/useSetSymbols";
 import {
   COLOR_DOT_CLASS,
   getDeckCardCount,
   getDeckColorIdentity,
   getRepresentativeCard,
   isBundledDeck,
-  loadDeck,
 } from "./deckHelpers";
-
-const BASIC_LANDS = new Set(["Plains", "Island", "Swamp", "Mountain", "Forest"]);
+import { BASIC_LAND_NAMES } from "../../constants/game";
 const PRECON_PREFIX = "[Pre-built] ";
+const PRECON_PAGE_SIZE = 12;
+const DECK_SCAN_BATCH_SIZE = 1;
+const COVERAGE_SCAN_BATCH_SIZE = 6;
 
 /** Tags that represent a format/archetype — shown with active (green) styling. */
 const FORMAT_TAGS = new Set([
@@ -49,9 +55,56 @@ const FORMAT_TAGS = new Set([
   "metagame",
 ]);
 const DECK_FORMATS = FORMAT_REGISTRY.filter((m) => m.group !== "Multiplayer");
+const BASIC_LAND_COLORS: Record<string, string> = {
+  Plains: "W",
+  Island: "U",
+  Swamp: "B",
+  Mountain: "R",
+  Forest: "G",
+  "Snow-Covered Plains": "W",
+  "Snow-Covered Island": "U",
+  "Snow-Covered Swamp": "B",
+  "Snow-Covered Mountain": "R",
+  "Snow-Covered Forest": "G",
+};
+const COLOR_ORDER = ["W", "U", "B", "R", "G"];
 
 type DeckFilter = "all" | GameFormat;
 type DeckSort = "alpha" | "recent" | "format";
+
+function coverageFromPct(coveragePct: number | null | undefined): DeckCompatibilityResult["coverage"] {
+  if (coveragePct == null) return null;
+  return {
+    total_unique: 100,
+    supported_unique: Math.max(0, Math.min(100, Math.round(coveragePct))),
+    unsupported_cards: [],
+  };
+}
+
+function getPreconColorIdentity(deck: PreconDeckEntry | undefined): string[] {
+  if (!deck) return [];
+  const colors = new Set<string>();
+  for (const entry of deck.mainBoard) {
+    const color = BASIC_LAND_COLORS[entry.name];
+    if (color) colors.add(color);
+  }
+  return COLOR_ORDER.filter((color) => colors.has(color));
+}
+
+function preconCandidateToDeckEntry(candidate: DeckCatalogCandidate): PreconDeckEntry {
+  if (candidate.source.type !== "precon") {
+    throw new Error("Expected precon deck candidate");
+  }
+  return {
+    code: candidate.source.code,
+    name: candidate.name.replace(/\s+\([^()]+\)$/, ""),
+    type: candidate.preconDeck?.type ?? "Commander Deck",
+    coveragePct: candidate.coveragePct ?? 100,
+    mainBoard: candidate.deck.main.map((entry) => ({ name: entry.name, count: entry.count })),
+    sideBoard: candidate.deck.sideboard.map((entry) => ({ name: entry.name, count: entry.count })),
+    commander: candidate.deck.commander?.map((name) => ({ name, count: 1 })),
+  };
+}
 
 /** Ordered list of format filters shown in the filter bar. */
 const FORMAT_FILTERS: Array<{ key: DeckFilter; label: string; aetherhubUrl?: string }> = [
@@ -102,9 +155,11 @@ interface DeckTileProps {
   hideFeedBadge?: boolean;
   /** Provide feed deck data directly so the tile doesn't depend on localStorage. */
   feedDeckOverride?: FeedDeck;
+  /** Provide precon data directly for virtual precon tiles not yet saved locally. */
+  preconDeckOverride?: PreconDeckEntry;
 }
 
-function DeckTile({ deckName, isActive, compatibility, onClick, onEdit, onDelete, onAdopt, hideFeedBadge, feedDeckOverride }: DeckTileProps) {
+const DeckTile = memo(function DeckTile({ deckName, isActive, compatibility, onClick, onEdit, onDelete, onAdopt, hideFeedBadge, feedDeckOverride, preconDeckOverride }: DeckTileProps) {
   const [coverageHovered, setCoverageHovered] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
 
@@ -113,20 +168,29 @@ function DeckTile({ deckName, isActive, compatibility, onClick, onEdit, onDelete
     const timer = setTimeout(() => setConfirmingDelete(false), 3000);
     return () => clearTimeout(timer);
   }, [confirmingDelete]);
-  const colors = compatibility?.color_identity
-    ?? feedDeckOverride?.colors
-    ?? getDeckColorIdentity(deckName);
+  const colors = compatibility?.color_identity?.length
+    ? compatibility.color_identity
+    : feedDeckOverride?.colors?.length
+      ? feedDeckOverride.colors
+      : preconDeckOverride
+        ? getPreconColorIdentity(preconDeckOverride)
+        : getDeckColorIdentity(deckName);
   const count = feedDeckOverride
     ? feedDeckOverride.main.reduce((sum, e) => sum + e.count, 0)
+    : preconDeckOverride
+      ? preconDeckOverride.mainBoard.reduce((sum, e) => sum + e.count, 0)
     : getDeckCardCount(deckName);
   const representativeCard = feedDeckOverride
-    ? (feedDeckOverride.commander?.[0] ?? feedDeckOverride.main.find((e) => !BASIC_LANDS.has(e.name))?.name ?? null)
+    ? (feedDeckOverride.commander?.[0] ?? feedDeckOverride.main.find((e) => !BASIC_LAND_NAMES.has(e.name))?.name ?? null)
+    : preconDeckOverride
+      ? (preconDeckOverride.commander?.[0]?.name ?? preconDeckOverride.mainBoard.find((e) => !BASIC_LAND_NAMES.has(e.name))?.name ?? null)
     : getRepresentativeCard(deckName);
   const feedOrigin = getDeckFeedOrigin(deckName);
   const feedForBadge = useCachedFeed(feedOrigin ?? "");
   const feedBadge = !hideFeedBadge && feedOrigin ? (feedForBadge?.name ?? "Feed") : null;
   const isPrecon = deckName.startsWith(PRECON_PREFIX);
   const displayName = isPrecon ? deckName.slice(PRECON_PREFIX.length) : deckName;
+  const coverage = compatibility?.coverage ?? coverageFromPct(preconDeckOverride?.coveragePct);
 
   return (
     <div
@@ -202,6 +266,11 @@ function DeckTile({ deckName, isActive, compatibility, onClick, onEdit, onDelete
       )}
 
       <div className="relative z-10 bg-gradient-to-t from-black/95 via-black/70 to-transparent px-3 pb-3 pt-8">
+        {preconDeckOverride?.code && (
+          <div className="mb-1 flex justify-center">
+            <PreconSetBadge deck={preconDeckOverride} />
+          </div>
+        )}
         <p className="truncate text-sm font-semibold text-white">{displayName}</p>
         <div className="mt-1 flex items-center gap-2">
           <div className="flex gap-1">
@@ -222,12 +291,12 @@ function DeckTile({ deckName, isActive, compatibility, onClick, onEdit, onDelete
           {feedDeckOverride?.tags?.map((tag) => (
             <StatusBadge key={tag} label={tag} active={FORMAT_TAGS.has(tag)} />
           ))}
-          {isPrecon && !feedDeckOverride?.tags?.length && (
+          {isPrecon && !preconDeckOverride && !feedDeckOverride?.tags?.length && (
             <StatusBadge label="precon" active />
           )}
           {/* Engine compatibility badges */}
           {compatibility?.standard.compatible && <StatusBadge label="STD" active />}
-          {compatibility?.commander.compatible && <StatusBadge label="CMD" active />}
+          {!preconDeckOverride && compatibility?.commander.compatible && <StatusBadge label="CMD" active />}
           {compatibility?.bo3_ready && <StatusBadge label="BO3" active />}
           {compatibility && compatibility.unknown_cards.length > 0 && (
             <span
@@ -237,9 +306,8 @@ function DeckTile({ deckName, isActive, compatibility, onClick, onEdit, onDelete
               Unknown {compatibility.unknown_cards.length}
             </span>
           )}
-          {compatibility?.coverage && (() => {
-            const { supported_unique, total_unique, unsupported_cards } = compatibility.coverage;
-            if (supported_unique === total_unique) return null;
+          {coverage && (() => {
+            const { supported_unique, total_unique, unsupported_cards } = coverage;
             const pct = total_unique > 0 ? (supported_unique / total_unique) * 100 : 0;
             const barColor =
               pct >= 75 ? "bg-lime-500"
@@ -268,6 +336,107 @@ function DeckTile({ deckName, isActive, compatibility, onClick, onEdit, onDelete
         </div>
       </div>
     </div>
+  );
+});
+
+interface SavedDeckTileProps {
+  deckName: string;
+  isActive: boolean;
+  compatibility: DeckCompatibilityResult | undefined;
+  mode: "manage" | "select";
+  onTileClick: (deckName: string) => void;
+  onEditDeck?: (deckName: string) => void;
+  onDeleteDeck: (deckName: string) => void;
+  preconCandidate?: DeckCatalogCandidate;
+}
+
+const SavedDeckTile = memo(function SavedDeckTile({
+  deckName,
+  isActive,
+  compatibility,
+  mode,
+  onTileClick,
+  onEditDeck,
+  onDeleteDeck,
+  preconCandidate,
+}: SavedDeckTileProps) {
+  const handleClick = useCallback(() => onTileClick(deckName), [deckName, onTileClick]);
+  const handleEdit = useMemo(
+    () => onEditDeck ? () => onEditDeck(deckName) : undefined,
+    [deckName, onEditDeck],
+  );
+  const handleDelete = useMemo(
+    () => mode === "manage" ? () => onDeleteDeck(deckName) : undefined,
+    [deckName, mode, onDeleteDeck],
+  );
+  const preconDeckOverride = useMemo(
+    () => preconCandidate ? preconCandidateToDeckEntry(preconCandidate) : undefined,
+    [preconCandidate],
+  );
+
+  return (
+    <DeckTile
+      deckName={deckName}
+      isActive={isActive}
+      compatibility={compatibility}
+      preconDeckOverride={preconDeckOverride}
+      onClick={handleClick}
+      onEdit={handleEdit}
+      onDelete={handleDelete}
+    />
+  );
+});
+
+interface FeedDeckTileProps {
+  deck: FeedDeck;
+  isActive: boolean;
+  compatibility: DeckCompatibilityResult | undefined;
+  onTileClick: (deckName: string) => void;
+  onAdopt: (deckName: string) => void;
+}
+
+const FeedDeckTile = memo(function FeedDeckTile({
+  deck,
+  isActive,
+  compatibility,
+  onTileClick,
+  onAdopt,
+}: FeedDeckTileProps) {
+  const handleClick = useCallback(() => onTileClick(deck.name), [deck.name, onTileClick]);
+  const handleAdopt = useCallback(() => onAdopt(deck.name), [deck.name, onAdopt]);
+
+  return (
+    <DeckTile
+      deckName={deck.name}
+      isActive={isActive}
+      compatibility={compatibility}
+      onClick={handleClick}
+      onAdopt={handleAdopt}
+      hideFeedBadge
+      feedDeckOverride={deck}
+    />
+  );
+});
+
+function PreconSetBadge({ deck }: { deck: PreconDeckEntry | undefined }) {
+  const setIcon = useSetSymbol(deck?.code);
+  if (!deck?.code) return null;
+
+  return (
+    <span
+      className="flex h-7 min-w-7 items-center justify-center rounded-full bg-black/65 px-1.5 text-[10px] font-bold uppercase tracking-wide text-white/80 ring-1 ring-white/15 backdrop-blur-sm"
+      title={deck.code}
+    >
+      {setIcon ? (
+        <img
+          src={setIcon}
+          alt={`${deck.code} set icon`}
+          className="h-[18px] w-[18px] invert"
+        />
+      ) : (
+        deck.code
+      )}
+    </span>
   );
 }
 
@@ -312,7 +481,18 @@ export function MyDecks({
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [compatibilities, setCompatibilities] = useState<Record<string, DeckCompatibilityResult>>({});
   const [isEvaluating, setIsEvaluating] = useState(false);
+  const [compatibilityStatus, setCompatibilityStatus] = useState<string | null>(null);
   const [compatibilityError, setCompatibilityError] = useState<string | null>(null);
+  const pendingCompatibility = useRef(new Set<string>());
+  const pendingCoverage = useRef(new Set<string>());
+  const completedCoverage = useRef(new Set<string>());
+  const coverageInFlight = useRef(false);
+  const compatibilityGeneration = useRef(0);
+  const [deckScanIndex, setDeckScanIndex] = useState(0);
+  const [coverageStatus, setCoverageStatus] = useState<{ deckName: string; remaining: number } | null>(null);
+  const [coverageQueueVersion, setCoverageQueueVersion] = useState(0);
+  const [catalogCandidates, setCatalogCandidates] = useState<DeckCatalogCandidate[]>([]);
+  const [preconDisplayCount, setPreconDisplayCount] = useState(PRECON_PAGE_SIZE);
   const feedCache = useFeedCacheSnapshot();
 
   const contextualFilter = useMemo<DeckFilter | null>(() => {
@@ -323,6 +503,7 @@ export function MyDecks({
   const [activeFilter, setActiveFilter] = useState<DeckFilter>(contextualFilter ?? "all");
   const selectedFormatForCompatibility = selectedFormat ?? (activeFilter === "all" ? null : activeFilter);
   const activeFilterOption = FORMAT_FILTERS.find((option) => option.key === activeFilter);
+  const requiresCompatibilityFilter = activeFilter !== "all";
   const [activeSort, setActiveSort] = useState<DeckSort>(
     mode === "select" ? (selectedFormat ? "format" : "recent") : "alpha",
   );
@@ -338,6 +519,22 @@ export function MyDecks({
   }, [selectedFormat]);
 
   useEffect(() => {
+    setPreconDisplayCount(PRECON_PAGE_SIZE);
+  }, [selectedFormatForCompatibility, searchQuery]);
+
+  useEffect(() => {
+    let cancelled = false;
+    buildDeckCatalog({ savedDeckNames: deckNames, feedCache }).then((candidates) => {
+      if (cancelled) return;
+      setCatalogCandidates(candidates);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [deckNames, feedCache]);
+
+  useEffect(() => {
     if (mode !== "select") return;
     if (!onSelectDeck) return;
     if (activeDeckName != null) return;
@@ -346,84 +543,144 @@ export function MyDecks({
     onSelectDeck(stored);
   }, [mode, activeDeckName, deckNames, onSelectDeck]);
 
+  const deckCandidatesByName = useMemo(() => {
+    const decks = new Map<string, DeckCatalogCandidate>();
+    for (const candidate of catalogCandidates) decks.set(candidate.name, candidate);
+    return decks;
+  }, [catalogCandidates]);
+  const deckNamesKey = deckNames.join("\0");
+
   useEffect(() => {
+    compatibilityGeneration.current += 1;
+    pendingCompatibility.current.clear();
+    pendingCoverage.current.clear();
+    completedCoverage.current.clear();
+    coverageInFlight.current = false;
+    setCompatibilities({});
+    setCompatibilityError(null);
+    setIsEvaluating(false);
+    setCompatibilityStatus(null);
+    setDeckScanIndex(0);
+    setCoverageStatus(null);
+  }, [deckNamesKey, selectedFormatForCompatibility, selectedMatchType]);
+
+  useEffect(() => {
+    onCompatibilityUpdate?.(compatibilities);
+  }, [compatibilities, onCompatibilityUpdate]);
+
+  const searchedDeckNames = useMemo(() => {
+    if (!searchQuery) return deckNames;
+    const q = searchQuery.toLowerCase();
+    return deckNames.filter((name) => name.toLowerCase().includes(q));
+  }, [deckNames, searchQuery]);
+
+  const unknownFormatDeckNames = useMemo(() => {
+    if (!requiresCompatibilityFilter || !selectedFormatForCompatibility) return [];
+    if (!activeDeckName || !searchedDeckNames.includes(activeDeckName)) return [];
+    const candidate = deckCandidatesByName.get(activeDeckName);
+    return candidate && candidate.knownFormat == null ? [activeDeckName] : [];
+  }, [
+    activeDeckName,
+    deckCandidatesByName,
+    requiresCompatibilityFilter,
+    searchedDeckNames,
+    selectedFormatForCompatibility,
+  ]);
+  const unknownFormatDeckNamesKey = unknownFormatDeckNames.join("\0");
+
+  useEffect(() => {
+    setDeckScanIndex(0);
+  }, [unknownFormatDeckNamesKey, requiresCompatibilityFilter, selectedFormatForCompatibility, selectedMatchType]);
+
+  useEffect(() => {
+    if (!requiresCompatibilityFilter || !selectedFormatForCompatibility) return;
+    if (deckScanIndex >= unknownFormatDeckNames.length) return;
+
     let cancelled = false;
-    async function evaluateCompat(): Promise<void> {
-      // Collect localStorage decks
-      const loadedDecks: Array<{ name: string; deck: ParsedDeck }> = [];
-      const seen = new Set<string>();
-      for (const name of deckNames) {
-        const deck = loadDeck(name);
-        if (deck) {
-          loadedDecks.push({ name, deck });
-          seen.add(name);
-        }
-      }
-
-      // Collect feed decks not already in localStorage
-      for (const sub of listSubscriptions()) {
-        const feed = feedCache[sub.sourceId];
-        if (!feed) continue;
-        for (const feedDeck of feed.decks) {
-          if (!seen.has(feedDeck.name)) {
-            loadedDecks.push({ name: feedDeck.name, deck: feedDeckToParsedDeck(feedDeck) });
-            seen.add(feedDeck.name);
-          }
-        }
-      }
-
-      if (loadedDecks.length === 0) {
-        if (!cancelled) {
-          setCompatibilities({});
-          setCompatibilityError(null);
-          setIsEvaluating(false);
-        }
-        return;
-      }
-
-      try {
-        setIsEvaluating(true);
-        setCompatibilities({});
-        const results = await evaluateDeckCompatibilityBatch(loadedDecks, {
-          selectedFormat: selectedFormatForCompatibility,
-          selectedMatchType,
-        });
-        if (!cancelled) {
-          setCompatibilities(results);
-          setCompatibilityError(null);
-          onCompatibilityUpdate?.(results);
-        }
-      } catch (error) {
-        if (!cancelled) {
-          setCompatibilityError(error instanceof Error ? error.message : String(error));
-          setCompatibilities({});
-        }
-      } finally {
-        if (!cancelled) {
-          setIsEvaluating(false);
-        }
-      }
+    const generation = compatibilityGeneration.current;
+    const batchNames = unknownFormatDeckNames.slice(deckScanIndex, deckScanIndex + DECK_SCAN_BATCH_SIZE);
+    const batch = batchNames.flatMap((name) => {
+      const candidate = deckCandidatesByName.get(name);
+      return candidate
+        && compatibilities[name]?.selected_format_compatible == null
+        && !pendingCompatibility.current.has(name)
+        ? [{ name, deck: candidate.deck }]
+        : [];
+    });
+    if (batch.length === 0) {
+      setDeckScanIndex((index) => index + batchNames.length);
+      return;
     }
 
-    evaluateCompat();
+    setIsEvaluating(true);
+    const deckName = batch[0]?.name ?? "user deck";
+    for (const { name } of batch) {
+      pendingCompatibility.current.add(name);
+    }
+    setCompatibilityStatus(`Checking ${deckName}…`);
+
+    evaluateDeckCompatibilityBatch(batch, {
+      selectedFormat: selectedFormatForCompatibility,
+      selectedMatchType,
+      summaryOnly: true,
+      onStatus: (status) => {
+        if (cancelled || generation !== compatibilityGeneration.current) return;
+        if (status === "starting-worker") setCompatibilityStatus("Starting compatibility worker…");
+        if (status === "loading-card-database") setCompatibilityStatus("Loading compatibility database…");
+        if (status === "checking-deck") setCompatibilityStatus(`Checking ${deckName}…`);
+      },
+      onResult: (name, result) => {
+        if (cancelled || generation !== compatibilityGeneration.current) return;
+        setCompatibilityStatus(`Checked ${name}`);
+        setCompatibilities((current) => {
+          const next = { ...current, [name]: result };
+          return next;
+        });
+      },
+    }).then((results) => {
+      if (cancelled || generation !== compatibilityGeneration.current) return;
+      setCompatibilities((current) => {
+        const next = { ...current, ...results };
+        return next;
+      });
+      setCompatibilityError(null);
+      setDeckScanIndex((index) => index + batchNames.length);
+    }).catch((error) => {
+      if (cancelled || generation !== compatibilityGeneration.current) return;
+      setCompatibilityError(error instanceof Error ? error.message : String(error));
+      setDeckScanIndex((index) => index + batchNames.length);
+    }).finally(() => {
+      if (cancelled || generation !== compatibilityGeneration.current) return;
+      for (const { name } of batch) {
+        pendingCompatibility.current.delete(name);
+      }
+      setCompatibilityStatus(null);
+      setIsEvaluating(pendingCompatibility.current.size > 0);
+    });
+
     return () => {
       cancelled = true;
     };
-  }, [deckNames, selectedFormatForCompatibility, selectedMatchType, onCompatibilityUpdate, feedCache]);
+  }, [
+    compatibilities,
+    deckCandidatesByName,
+    deckScanIndex,
+    requiresCompatibilityFilter,
+    selectedFormatForCompatibility,
+    selectedMatchType,
+    unknownFormatDeckNames,
+  ]);
 
   const filteredDeckNames = useMemo(() => {
-    return deckNames.filter((deckName) => {
+    return searchedDeckNames.filter((deckName) => {
       const compatibility = compatibilities[deckName];
-      if (!compatibility) return true;
+      const knownFormat = deckCandidatesByName.get(deckName)?.knownFormat;
+      if (requiresCompatibilityFilter && knownFormat === selectedFormatForCompatibility) return true;
+      if (requiresCompatibilityFilter && !compatibility && getDeckFeedOrigin(deckName) == null) return true;
+      if (!compatibility) return !requiresCompatibilityFilter;
 
       const selectedFormatCompatible = compatibility.selected_format_compatible;
       if (contextualFilter && activeFilter === contextualFilter && selectedFormatCompatible != null) {
-        return selectedFormatCompatible;
-      }
-
-      // Formats without a contextual filter mapping (e.g. FreeForAll, TwoHeadedGiant):
-      // use the engine's selected_format_compatible when activeFilter is "all".
-      if (selectedFormat && !contextualFilter && activeFilter === "all" && selectedFormatCompatible != null) {
         return selectedFormatCompatible;
       }
 
@@ -432,13 +689,57 @@ export function MyDecks({
       }
       return true;
     });
-  }, [deckNames, compatibilities, activeFilter, contextualFilter, selectedFormat]);
+  }, [
+    searchedDeckNames,
+    compatibilities,
+    activeFilter,
+    contextualFilter,
+    deckCandidatesByName,
+    requiresCompatibilityFilter,
+    selectedFormatForCompatibility,
+  ]);
 
   const searchFiltered = useMemo(() => {
-    if (!searchQuery) return filteredDeckNames;
+    return filteredDeckNames;
+  }, [filteredDeckNames]);
+
+  const filteredPreconCandidates = useMemo(() => {
+    const saved = new Set(deckNames);
     const q = searchQuery.toLowerCase();
-    return filteredDeckNames.filter((name) => name.toLowerCase().includes(q));
-  }, [filteredDeckNames, searchQuery]);
+    return catalogCandidates
+      .filter((candidate) => candidate.source.type === "precon")
+      .filter((candidate) => {
+        const prefixed = PRECON_PREFIX + candidate.name;
+        if (saved.has(prefixed) || saved.has(candidate.name)) return false;
+        return !q || prefixed.toLowerCase().includes(q);
+      })
+      .sort((a, b) => {
+        const dateCompare = (b.source.type === "precon" ? b.source.releaseDate ?? "" : "")
+          .localeCompare(a.source.type === "precon" ? a.source.releaseDate ?? "" : "");
+        return dateCompare || a.name.localeCompare(b.name);
+      });
+  }, [catalogCandidates, deckNames, searchQuery]);
+
+  const legalPreconCandidates = useMemo(() => {
+    return selectedFormatForCompatibility === "Commander" ? filteredPreconCandidates : [];
+  }, [filteredPreconCandidates, selectedFormatForCompatibility]);
+
+  const legalPreconByName = useMemo(() => {
+    const entries = legalPreconCandidates.map((candidate) => [
+      PRECON_PREFIX + candidate.name,
+      candidate,
+    ] as const);
+    return new Map(entries);
+  }, [legalPreconCandidates]);
+
+  const preconDeckNames = useMemo(() => {
+    return Array.from(legalPreconByName.keys());
+  }, [legalPreconByName]);
+
+  const displayedPreconDeckNames = useMemo(
+    () => preconDeckNames.slice(0, preconDisplayCount),
+    [preconDeckNames, preconDisplayCount],
+  );
 
   const { userDecks, bundledDecks } = useMemo(() => {
     const dir = sortAsc ? 1 : -1;
@@ -472,23 +773,167 @@ export function MyDecks({
         user.push(name);
       }
     }
-    return { userDecks: sortNames(user), bundledDecks: sortNames(bundled) };
+    return {
+      userDecks: sortNames(user),
+      bundledDecks: sortNames(bundled),
+    };
   }, [searchFiltered, activeSort, sortAsc, compatibilities]);
 
   const noDeckSelected = mode === "select"
-    ? !activeDeckName || !searchFiltered.includes(activeDeckName)
+    ? !activeDeckName || (!searchFiltered.includes(activeDeckName) && !preconDeckNames.includes(activeDeckName))
     : false;
-  const selectedDeckLabel = mode === "select" && activeDeckName && searchFiltered.includes(activeDeckName)
+  const selectedDeckLabel = mode === "select"
+    && activeDeckName
+    && (searchFiltered.includes(activeDeckName) || preconDeckNames.includes(activeDeckName))
     ? activeDeckName
     : null;
+  const visibleDeckCount = searchFiltered.length + preconDeckNames.length;
+  const userDeckScanTotal = requiresCompatibilityFilter ? unknownFormatDeckNames.length : 0;
+  const userDeckScanCompleted = Math.min(deckScanIndex, userDeckScanTotal);
+  const isScanningUserDecks = userDeckScanCompleted < userDeckScanTotal;
+  const subscriptionVisibleDeckNames = useMemo(() => {
+    if (activeTab !== "subscriptions" || mode !== "manage") return [];
+    return listSubscriptions().flatMap((sub) =>
+      [...(feedCache[sub.sourceId]?.decks ?? [])]
+        .sort((a, b) => a.name.localeCompare(b.name))
+        .map((deck) => deck.name),
+    );
+  }, [activeTab, feedCache, mode]);
+  const visibleCoverageDeckNames = useMemo(() => {
+    const mainGridDecks = activeTab === "subscriptions" && mode === "manage"
+      ? subscriptionVisibleDeckNames
+      : [...userDecks, ...bundledDecks, ...displayedPreconDeckNames];
+    return mainGridDecks.filter((deckName) => {
+      const existing = compatibilities[deckName];
+      if (existing?.coverage) return false;
+      if (pendingCoverage.current.has(deckName)) return false;
+      if (completedCoverage.current.has(deckName)) return false;
+      return deckCandidatesByName.has(deckName)
+        || legalPreconByName.has(deckName);
+    });
+  }, [
+    activeTab,
+    bundledDecks,
+    compatibilities,
+    deckCandidatesByName,
+    displayedPreconDeckNames,
+    legalPreconByName,
+    mode,
+    subscriptionVisibleDeckNames,
+    userDecks,
+  ]);
 
-  const handleTileClick = (deckName: string) => {
+  useEffect(() => {
+    if (isScanningUserDecks) return;
+    if (coverageInFlight.current) return;
+    if (visibleCoverageDeckNames.length === 0) return;
+
+    const batchNames = visibleCoverageDeckNames.slice(0, COVERAGE_SCAN_BATCH_SIZE);
+    const syntheticResults: Record<string, DeckCompatibilityResult> = {};
+    const batch = batchNames.flatMap((name) => {
+      const candidate = deckCandidatesByName.get(name) ?? legalPreconByName.get(name);
+      if (!candidate || pendingCoverage.current.has(name)) return [];
+
+      if (candidate.coveragePct != null) {
+        completedCoverage.current.add(name);
+        syntheticResults[name] = {
+          standard: { compatible: candidate.knownFormat === "Standard", reasons: [] },
+          commander: { compatible: candidate.knownFormat === "Commander", reasons: [] },
+          bo3_ready: candidate.deck.sideboard.length > 0,
+          unknown_cards: [],
+          selected_format_compatible: selectedFormatForCompatibility
+            ? candidate.knownFormat === selectedFormatForCompatibility
+            : null,
+          selected_format_reasons: [],
+          color_identity: getPreconColorIdentity(candidate.preconDeck),
+          coverage: coverageFromPct(candidate.coveragePct),
+        };
+        return [];
+      }
+
+      pendingCoverage.current.add(name);
+      return [{ name, deck: candidate.deck }];
+    });
+
+    if (Object.keys(syntheticResults).length > 0) {
+      setCompatibilities((current) => ({ ...current, ...syntheticResults }));
+    }
+    if (batch.length === 0) {
+      setCoverageQueueVersion((version) => version + 1);
+      return;
+    }
+
+    const generation = compatibilityGeneration.current;
+    coverageInFlight.current = true;
+    setIsEvaluating(true);
+    const firstName = batch[0]?.name ?? "visible deck";
+    setCoverageStatus({ deckName: firstName, remaining: visibleCoverageDeckNames.length });
+    setCompatibilityStatus(`Loading coverage for ${firstName}…`);
+
+    evaluateDeckCompatibilityBatch(batch, {
+      selectedFormat: selectedFormatForCompatibility,
+      selectedMatchType,
+      onStatus: (status, statusDeckName) => {
+        if (generation !== compatibilityGeneration.current) return;
+        const currentDeckName = statusDeckName ?? firstName;
+        if (status === "starting-worker") setCompatibilityStatus("Starting compatibility worker…");
+        if (status === "loading-card-database") setCompatibilityStatus("Loading compatibility database…");
+        if (status === "checking-deck") setCompatibilityStatus(`Loading coverage for ${currentDeckName}…`);
+      },
+      onResult: (name, result) => {
+        if (generation !== compatibilityGeneration.current) return;
+        completedCoverage.current.add(name);
+        setCompatibilities((current) => ({ ...current, [name]: result }));
+      },
+    }).then((results) => {
+      if (generation !== compatibilityGeneration.current) return;
+      for (const name of Object.keys(results)) {
+        completedCoverage.current.add(name);
+      }
+      setCompatibilityError(null);
+    }).catch((error) => {
+      if (generation !== compatibilityGeneration.current) return;
+      setCompatibilityError(error instanceof Error ? error.message : String(error));
+    }).finally(() => {
+      for (const { name } of batch) pendingCoverage.current.delete(name);
+      coverageInFlight.current = false;
+      if (generation !== compatibilityGeneration.current) return;
+      setCompatibilityStatus(null);
+      setCoverageStatus(null);
+      setIsEvaluating(pendingCompatibility.current.size > 0 || pendingCoverage.current.size > 0);
+      setCoverageQueueVersion((version) => version + 1);
+    });
+  }, [
+    coverageQueueVersion,
+    deckCandidatesByName,
+    isScanningUserDecks,
+    legalPreconByName,
+    selectedFormatForCompatibility,
+    selectedMatchType,
+    visibleCoverageDeckNames,
+  ]);
+
+  const coverageScanTotal = coverageStatus?.remaining ?? visibleCoverageDeckNames.length;
+  const isScanningCoverage = coverageScanTotal > 0 || pendingCoverage.current.size > 0;
+  const showEvaluationStatus = mode === "manage"
+    && (isScanningUserDecks || isScanningCoverage || (isEvaluating && !requiresCompatibilityFilter));
+
+  const materializePreconDeck = useCallback((deckName: string): boolean => {
+    const candidate = legalPreconByName.get(deckName);
+    if (!candidate || candidate.source.type !== "precon") return false;
+    savePreconDeck(deckName, preconCandidateToDeckEntry(candidate));
+    setDeckNames(listSavedDeckNames());
+    return true;
+  }, [legalPreconByName]);
+
+  const handleTileClick = useCallback((deckName: string) => {
     if (mode === "manage") {
       onEditDeck?.(deckName);
       return;
     }
+    materializePreconDeck(deckName);
     onSelectDeck?.(deckName);
-  };
+  }, [materializePreconDeck, mode, onEditDeck, onSelectDeck]);
 
   const handleImported = (name: string, names: string[]) => {
     setDeckNames(names);
@@ -507,17 +952,17 @@ export function MyDecks({
     }
   };
 
-  const handleAdoptDeck = (deckName: string) => {
+  const handleAdoptDeck = useCallback((deckName: string) => {
     const newName = prompt("Save as:", deckName);
     if (!newName) return;
     adoptFeedDeck(deckName, newName);
     setDeckNames(listSavedDeckNames());
-  };
+  }, []);
 
-  const handleDeleteDeck = (deckName: string) => {
+  const handleDeleteDeck = useCallback((deckName: string) => {
     deleteDeck(deckName);
     setDeckNames(listSavedDeckNames());
-  };
+  }, []);
 
   const handleFeedManagerClose = () => {
     setShowFeedManager(false);
@@ -693,7 +1138,7 @@ export function MyDecks({
                 : <>Showing decks legal in <span className="font-semibold">{selectedFormat}</span></>}
             </span>
             <span className="text-xs text-indigo-300/70">
-              · {searchFiltered.length} of {deckNames.length}
+              · {visibleDeckCount} of {deckNames.length + preconDeckNames.length}
             </span>
           </div>
           <button
@@ -705,10 +1150,29 @@ export function MyDecks({
         </div>
       )}
 
-      {isEvaluating && (
-        <div className="flex w-full items-center justify-center gap-2.5 rounded-xl border border-indigo-400/20 bg-indigo-500/10 px-4 py-3">
+      {showEvaluationStatus && (
+        <div className="flex w-full items-center justify-between gap-3 rounded-xl border border-indigo-400/20 bg-indigo-500/10 px-4 py-3">
+          <div className="flex items-center gap-2.5">
           <span className="inline-block h-2.5 w-2.5 animate-pulse rounded-full bg-indigo-400" />
-          <span className="text-sm font-medium text-indigo-200">Evaluating deck compatibility…</span>
+            <span className="text-sm font-medium text-indigo-200">
+              {compatibilityStatus
+                ?? (isScanningUserDecks
+                ? "Checking selected deck compatibility…"
+                : coverageStatus
+                  ? `Loading coverage for ${coverageStatus.deckName}…`
+                  : "Evaluating visible decks…")}
+            </span>
+          </div>
+          {isScanningUserDecks && (
+            <span className="text-xs tabular-nums text-indigo-300/75">
+              {userDeckScanCompleted}/{userDeckScanTotal}
+            </span>
+          )}
+          {!isScanningUserDecks && isScanningCoverage && (
+            <span className="text-xs tabular-nums text-indigo-300/75">
+              {coverageScanTotal} remaining
+            </span>
+          )}
         </div>
       )}
 
@@ -718,7 +1182,7 @@ export function MyDecks({
         </div>
       )}
 
-      {searchFiltered.length === 0 ? (
+      {visibleDeckCount === 0 ? (
         <div className="flex w-full flex-col items-center justify-center gap-4 rounded-[20px] border border-dashed border-white/10 bg-black/12 px-6 py-12 text-center">
           <div className="text-lg font-medium text-white">No decks match this filter.</div>
           <div className="max-w-md text-sm leading-6 text-slate-400">
@@ -762,14 +1226,16 @@ export function MyDecks({
               />
 
               {userDecks.map((deckName) => (
-                <DeckTile
+                <SavedDeckTile
                   key={deckName}
                   deckName={deckName}
                   isActive={deckName === activeDeckName}
                   compatibility={compatibilities[deckName]}
-                  onClick={() => handleTileClick(deckName)}
-                  onEdit={onEditDeck ? () => onEditDeck(deckName) : undefined}
-                  onDelete={mode === "manage" ? () => handleDeleteDeck(deckName) : undefined}
+                  mode={mode}
+                  onTileClick={handleTileClick}
+                  onEditDeck={onEditDeck}
+                  onDeleteDeck={handleDeleteDeck}
+                  preconCandidate={legalPreconByName.get(deckName)}
                 />
               ))}
             </div>
@@ -792,16 +1258,65 @@ export function MyDecks({
               </div>
               <div className="grid w-full grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
                 {bundledDecks.map((deckName) => (
-                  <DeckTile
+                  <SavedDeckTile
                     key={deckName}
                     deckName={deckName}
                     isActive={deckName === activeDeckName}
                     compatibility={compatibilities[deckName]}
-                    onClick={() => handleTileClick(deckName)}
-                    onEdit={onEditDeck ? () => onEditDeck(deckName) : undefined}
+                    mode={mode}
+                    onTileClick={handleTileClick}
+                    onEditDeck={onEditDeck}
+                    onDeleteDeck={handleDeleteDeck}
+                    preconCandidate={legalPreconByName.get(deckName)}
                   />
                 ))}
               </div>
+            </div>
+          )}
+
+          {preconDeckNames.length > 0 && (
+            <div className="rounded-[18px] border border-white/8 bg-black/10 p-3">
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+                  Legal Precons
+                  <span className="ml-2 text-slate-600">{preconDeckNames.length}</span>
+                </h3>
+                <button
+                  onClick={() => setShowPrecon(true)}
+                  className="text-[11px] text-slate-500 transition-colors hover:text-slate-300"
+                >
+                  Browse All
+                </button>
+              </div>
+              <div className="grid w-full grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
+                {displayedPreconDeckNames.map((deckName) => {
+                  const candidate = legalPreconByName.get(deckName);
+                  return (
+                    <SavedDeckTile
+                      key={deckName}
+                      deckName={deckName}
+                      isActive={deckName === activeDeckName}
+                      compatibility={compatibilities[deckName]}
+                      mode={mode}
+                      onTileClick={handleTileClick}
+                      onEditDeck={onEditDeck}
+                      onDeleteDeck={handleDeleteDeck}
+                      preconCandidate={candidate}
+                    />
+                  );
+                })}
+              </div>
+              {displayedPreconDeckNames.length < preconDeckNames.length && (
+                <div className="mt-4 flex justify-center">
+                  <button
+                    type="button"
+                    onClick={() => setPreconDisplayCount((count) => count + PRECON_PAGE_SIZE)}
+                    className={menuButtonClass({ tone: "neutral", size: "sm" })}
+                  >
+                    Load More
+                  </button>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -912,15 +1427,13 @@ function SubscriptionsView({
             </div>
             <div className="grid w-full grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
               {[...feedDecks].sort((a, b) => a.name.localeCompare(b.name)).map((deck) => (
-                <DeckTile
+                <FeedDeckTile
                   key={deck.name}
-                  deckName={deck.name}
+                  deck={deck}
                   isActive={deck.name === activeDeckName}
                   compatibility={compatibilities[deck.name]}
-                  onClick={() => onTileClick(deck.name)}
-                  onAdopt={() => onAdopt(deck.name)}
-                  hideFeedBadge
-                  feedDeckOverride={deck}
+                  onTileClick={onTileClick}
+                  onAdopt={onAdopt}
                 />
               ))}
             </div>

@@ -120,12 +120,43 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         .map(|a| a.targets.clone())
         .unwrap_or_default();
 
+    // CR 702.103e: As a bestowed Aura spell begins resolving, if its target is
+    // illegal it ceases to be bestowed and the effect making it an Aura spell
+    // ends — it continues resolving as a creature spell. We detect this BEFORE
+    // the standard fizzle check (which would otherwise route the spell to
+    // graveyard per CR 608.2b). The revert restores Creature core type and
+    // removes the bestow-granted Aura subtype + `enchant creature` keyword;
+    // `is_permanent_type` then sees a Creature and routes to the battlefield.
+    let mut bestow_reverted_at_resolution = false;
+    if casting_variant == CastingVariant::Bestow {
+        let target_is_illegal = ability.as_ref().is_some_and(|a| {
+            let original = flatten_targets_in_chain(a);
+            if original.is_empty() {
+                return false;
+            }
+            let validated = validate_targets_in_chain(state, a);
+            let legal = flatten_targets_in_chain(&validated);
+            targeting::check_fizzle(&original, &legal)
+        });
+        let still_bestow_form = state
+            .objects
+            .get(&entry.id)
+            .is_some_and(|o| o.bestow_form.is_some());
+        if target_is_illegal && still_bestow_form {
+            super::casting::revert_bestow_form(state, entry.id);
+            bestow_reverted_at_resolution = true;
+        }
+    }
+
     // Only run targeting validation and effect execution when an ability exists.
     // Permanent spells with no spell ability (ability is None) skip straight to
     // zone-change handling below.
     if let Some(ref ability) = ability {
         let original_targets = flatten_targets_in_chain(ability);
-        if !original_targets.is_empty() {
+        // CR 702.103e: when a bestowed Aura reverted at the start of resolution,
+        // suppress the fizzle check — the spell is no longer an Aura and proceeds
+        // to resolve as a creature spell with no remaining target.
+        if !original_targets.is_empty() && !bestow_reverted_at_resolution {
             let validated = validate_targets_in_chain(state, ability);
             let legal_targets = flatten_targets_in_chain(&validated);
             if targeting::check_fizzle(&original_targets, &legal_targets) {
@@ -403,6 +434,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     if let Some(effect_def) = state.post_replacement_effect.take() {
                         state.post_replacement_source = None;
                         state.post_replacement_event_source = None;
+                        state.post_replacement_event_target = None;
                         let _ = super::engine_replacement::apply_post_replacement_effect(
                             state,
                             &effect_def,
@@ -560,12 +592,40 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 }
             }
 
+            // CR 702.188a: Web-slinging is a casting alternative cost, so tag
+            // the resolved permanent through the same cast-variant channel as
+            // other alternative-cost casting variants.
+            if let CastingVariant::WebSlinging { .. } = casting_variant {
+                if let Some(obj) = state.objects.get_mut(&entry.id) {
+                    obj.cast_variant_paid = Some((
+                        crate::types::ability::CastVariantPaid::WebSlinging,
+                        state.turn_number,
+                    ));
+                }
+            }
+
             // CR 702.74a: Evoke-cast permanent gets the `cast_variant_paid` tag
             // so the synthesized intervening-if ETB sacrifice trigger fires.
             if casting_variant == CastingVariant::Evoke {
                 if let Some(obj) = state.objects.get_mut(&entry.id) {
                     obj.cast_variant_paid = Some((
                         crate::types::ability::CastVariantPaid::Evoke,
+                        state.turn_number,
+                    ));
+                }
+            }
+
+            // CR 702.103a + CR 702.103b: Bestow-cast permanent gets the
+            // `cast_variant_paid` tag so future "if its bestow cost was paid"
+            // triggers/conditions can evaluate against the resolved permanent.
+            // Tag is set whether the bestow form persisted (legal target →
+            // Aura attached) or was reverted at resolution (CR 702.103e
+            // illegal-target → resolved as creature) — the audit trail is the
+            // *cost* paid, not the form at ETB.
+            if casting_variant == CastingVariant::Bestow {
+                if let Some(obj) = state.objects.get_mut(&entry.id) {
+                    obj.cast_variant_paid = Some((
+                        crate::types::ability::CastVariantPaid::Bestow,
                         state.turn_number,
                     ));
                 }

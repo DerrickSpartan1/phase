@@ -119,6 +119,16 @@ function ZoneCard({
     }, [inspectObject, setPreviewSticky, obj.id]),
   );
 
+  const handleClick = useCallback((e: React.MouseEvent) => {
+    if (longPressFired.current) { longPressFired.current = false; return; }
+    if (useUiStore.getState().debugInteractionMode) {
+      e.stopPropagation();
+      useUiStore.getState().openDebugContextMenu({ objectId: obj.id, x: e.clientX, y: e.clientY });
+      return;
+    }
+    if (isValidTarget) onTarget();
+  }, [obj.id, isValidTarget, onTarget, longPressFired]);
+
   return (
     <div
       className={`shrink-0 cursor-pointer rounded transition-colors ${
@@ -130,9 +140,7 @@ function ZoneCard({
       }`}
       data-card-hover
       {...hoverProps(obj.id)}
-      onClick={isValidTarget
-        ? () => { if (!longPressFired.current) onTarget(); else longPressFired.current = false; }
-        : undefined}
+      onClick={handleClick}
       {...longPressHandlers}
     >
       <CardImage cardName={obj.name} size="normal" />

@@ -22,6 +22,7 @@ import {
   type VfxQuality,
 } from "../../animation/types.ts";
 import type {
+  ArtChainEntry,
   CardSizePreference,
   LogDefaultState,
 } from "../../stores/preferencesStore.ts";
@@ -42,11 +43,11 @@ const CARD_SIZES: CardSizePreference[] = ["small", "medium", "large"];
 const LOG_DEFAULTS: LogDefaultState[] = ["open", "closed"];
 const VFX_QUALITIES: VfxQuality[] = ["full", "reduced", "minimal"];
 
-/** Format a multiplier as a user-facing label. `0` is a meaningful sentinel
- *  (skip animations entirely), so call it out explicitly rather than showing
- *  "0.00×" which reads like a typo. */
-function formatMultiplier(value: number): string {
-  if (value <= 0) return "Instant";
+/** Format a speed value as a user-facing label. The slider goes 0→max where
+ *  max = instant (skip animations). `0` = slowest, `1` = normal. */
+function formatSpeed(value: number, max: number): string {
+  if (value >= max) return "Instant";
+  if (value <= 0) return "Slowest";
   return `${value.toFixed(2)}×`;
 }
 const SETTINGS_TABS = [
@@ -56,6 +57,7 @@ const SETTINGS_TABS = [
   { id: "audio", label: "Audio" },
   { id: "multiplayer", label: "Multiplayer" },
   { id: "data", label: "Data" },
+  { id: "experimental", label: "Experimental" },
 ] as const;
 
 export type SettingsTabId = (typeof SETTINGS_TABS)[number]["id"];
@@ -133,6 +135,13 @@ export function PreferencesModal({
   const setAnimationSpeedMultiplier = usePreferencesStore((s) => s.setAnimationSpeedMultiplier);
   const showKeywordStrip = usePreferencesStore((s) => s.showKeywordStrip) ?? true;
   const setShowKeywordStrip = usePreferencesStore((s) => s.setShowKeywordStrip);
+  const artChain = usePreferencesStore((s) => s.artChain);
+  const addArtChainEntry = usePreferencesStore((s) => s.addArtChainEntry);
+  const removeArtChainEntry = usePreferencesStore((s) => s.removeArtChainEntry);
+  const moveArtChainEntry = usePreferencesStore((s) => s.moveArtChainEntry);
+  const artOverrides = usePreferencesStore((s) => s.artOverrides);
+  const clearAllArtOverrides = usePreferencesStore((s) => s.clearAllArtOverrides);
+  const artOverrideCount = Object.keys(artOverrides).length;
 
   // Audio theme settings
   const audioThemeId = usePreferencesStore((s) => s.audioThemeId);
@@ -292,6 +301,28 @@ export function PreferencesModal({
                       <span className="text-sm text-slate-200">Show keywords on battlefield cards</span>
                     </label>
                   </SettingGroup>
+
+                  <SettingGroup label="Card Art Preferences">
+                    <ArtChainEditor
+                      chain={artChain}
+                      onAdd={addArtChainEntry}
+                      onRemove={removeArtChainEntry}
+                      onMove={moveArtChainEntry}
+                    />
+                    {artOverrideCount > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (window.confirm(`Clear all ${artOverrideCount} art override(s)?`)) {
+                            clearAllArtOverrides();
+                          }
+                        }}
+                        className="mt-2 rounded-[14px] border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-slate-200 transition hover:bg-white/10"
+                      >
+                        Clear All Art Overrides ({artOverrideCount})
+                      </button>
+                    )}
+                  </SettingGroup>
                 </SettingsSection>
               )}
 
@@ -449,6 +480,8 @@ export function PreferencesModal({
               )}
 
               {activeTab === "data" && <DataSection />}
+
+              {activeTab === "experimental" && <ExperimentalSection />}
             </div>
             <ResetAllFooter resetAllPreferences={resetAllPreferences} />
           </div>
@@ -481,6 +514,36 @@ function ResetAllFooter({
         Reset all preferences
       </button>
     </div>
+  );
+}
+
+function ExperimentalSection() {
+  const experimentalFeatures = usePreferencesStore((s) => s.experimentalFeatures);
+  const setExperimentalFeatures = usePreferencesStore((s) => s.setExperimentalFeatures);
+  return (
+    <SettingsSection title="Experimental">
+      <p className="text-xs text-slate-400">
+        These features are still in development. They may be incomplete, buggy,
+        or change without notice. Enable them to try things out early.
+      </p>
+
+      <SettingGroup label="Draft Mode">
+        <label className="flex min-h-11 items-center gap-3">
+          <input
+            type="checkbox"
+            checked={experimentalFeatures}
+            onChange={(e) => setExperimentalFeatures(e.target.checked)}
+            className="accent-cyan-500"
+          />
+          <div className="flex flex-col">
+            <span className="text-sm text-slate-200">Enable draft</span>
+            <span className="text-xs text-slate-500">
+              Unlocks Quick Draft and Pod Draft on the main menu.
+            </span>
+          </div>
+        </label>
+      </SettingGroup>
+    </SettingsSection>
   );
 }
 
@@ -631,7 +694,7 @@ function MultiplierSlider({
           {label}
         </label>
         <span className="font-mono text-xs tabular-nums text-slate-300">
-          {formatMultiplier(value)}
+          {formatSpeed(value, max)}
         </span>
       </div>
       <div className="flex items-center gap-2">
@@ -725,13 +788,13 @@ function PacingSection({
       <div className="flex flex-col gap-5">
         <MultiplierSlider
           label="Animation Speed"
-          description="Master multiplier — scales every animation duration. 0× skips animations entirely."
-          value={animationSpeedMultiplier}
-          defaultValue={ANIMATION_SPEED_DEFAULT}
+          description="Master speed — higher is faster. Full-right skips animations entirely."
+          value={ANIMATION_SPEED_MAX - animationSpeedMultiplier}
+          defaultValue={ANIMATION_SPEED_MAX - ANIMATION_SPEED_DEFAULT}
           min={ANIMATION_SPEED_MIN}
           max={ANIMATION_SPEED_MAX}
           step={ANIMATION_SPEED_STEP}
-          onChange={setAnimationSpeedMultiplier}
+          onChange={(speed) => setAnimationSpeedMultiplier(ANIMATION_SPEED_MAX - speed)}
         />
 
         {PACING_CATEGORIES.map((category) => (
@@ -739,12 +802,12 @@ function PacingSection({
             key={category}
             label={PACING_LABELS[category]}
             description={PACING_DESCRIPTIONS[category]}
-            value={pacingMultipliers[category]}
-            defaultValue={PACING_DEFAULT}
+            value={PACING_MAX - pacingMultipliers[category]}
+            defaultValue={PACING_MAX - PACING_DEFAULT}
             min={PACING_MIN}
             max={PACING_MAX}
             step={PACING_STEP}
-            onChange={(n) => setPacingMultiplier(category, n)}
+            onChange={(speed) => setPacingMultiplier(category, PACING_MAX - speed)}
           />
         ))}
       </div>
@@ -754,6 +817,199 @@ function PacingSection({
         slider — or tap the <span className="text-slate-300">↺</span> next to it — to reset.
       </p>
     </section>
+  );
+}
+
+const ART_CHAIN_RULE_OPTIONS: { type: ArtChainEntry["type"]; label: string }[] = [
+  { type: "newest", label: "Newest Printing" },
+  { type: "oldest", label: "Oldest Printing" },
+  { type: "prefer_borderless", label: "Prefer Borderless" },
+  { type: "prefer_extended", label: "Prefer Extended Art" },
+];
+
+interface ScryfallSetInfo {
+  name: string;
+  icon_svg_uri: string;
+  released_at: string;
+}
+
+function artChainEntryLabel(entry: ArtChainEntry): string {
+  switch (entry.type) {
+    case "set": return `Set: ${entry.label} (${entry.setCode.toUpperCase()})`;
+    case "newest": return "Newest Printing";
+    case "oldest": return "Oldest Printing";
+    case "prefer_borderless": return "Prefer Borderless";
+    case "prefer_extended": return "Prefer Extended Art";
+  }
+}
+
+function isTerminal(entry: ArtChainEntry): boolean {
+  return entry.type === "newest" || entry.type === "oldest";
+}
+
+function ArtChainEditor({
+  chain,
+  onAdd,
+  onRemove,
+  onMove,
+}: {
+  chain: ArtChainEntry[];
+  onAdd: (entry: ArtChainEntry) => void;
+  onRemove: (index: number) => void;
+  onMove: (from: number, to: number) => void;
+}) {
+  const [setInput, setSetInput] = useState("");
+  const [scryfallSets, setScryfallSets] = useState<Record<string, ScryfallSetInfo> | null>(null);
+
+  useEffect(() => {
+    fetch(__SCRYFALL_SETS_URL__)
+      .then((r) => r.json() as Promise<Record<string, ScryfallSetInfo>>)
+      .then(setScryfallSets)
+      .catch(() => {});
+  }, []);
+
+  const resolveSetCode = useCallback(
+    (input: string): { code: string; label: string } | null => {
+      if (!scryfallSets) return null;
+      const trimmed = input.trim().toLowerCase();
+      if (!trimmed) return null;
+      if (scryfallSets[trimmed]) {
+        return { code: trimmed, label: scryfallSets[trimmed].name };
+      }
+      const byName = Object.entries(scryfallSets).find(
+        ([, info]) => info.name.toLowerCase() === trimmed,
+      );
+      if (byName) return { code: byName[0], label: byName[1].name };
+      return null;
+    },
+    [scryfallSets],
+  );
+
+  const handleAddSet = useCallback(() => {
+    const resolved = resolveSetCode(setInput);
+    if (resolved) {
+      onAdd({ type: "set", setCode: resolved.code, label: resolved.label });
+      setSetInput("");
+    }
+  }, [setInput, resolveSetCode, onAdd]);
+
+  const sortedSets = scryfallSets
+    ? Object.entries(scryfallSets)
+        .sort(([, a], [, b]) => b.released_at.localeCompare(a.released_at))
+    : [];
+
+  const terminalIndex = chain.findIndex(isTerminal);
+
+  return (
+    <div className="flex flex-col gap-3">
+      {chain.length === 0 && (
+        <p className="text-xs text-slate-500">Using default Scryfall art. Add rules below to customize.</p>
+      )}
+
+      {chain.length > 0 && (
+        <div className="flex flex-col gap-1">
+          {chain.map((entry, i) => (
+            <div
+              key={`${entry.type}-${i}`}
+              className={`flex items-center gap-2 rounded-lg px-3 py-2 ${
+                terminalIndex >= 0 && i > terminalIndex
+                  ? "bg-amber-500/5 opacity-50"
+                  : "bg-black/20"
+              }`}
+            >
+              <span className="mr-1 font-mono text-[10px] text-slate-600">{i + 1}</span>
+              <span className="flex-1 text-sm text-slate-200">{artChainEntryLabel(entry)}</span>
+              <button
+                type="button"
+                onClick={() => onMove(i, i - 1)}
+                disabled={i === 0}
+                className="text-slate-500 transition hover:text-slate-200 disabled:opacity-30"
+                aria-label="Move up"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4">
+                  <path fillRule="evenodd" d="M14.77 12.79a.75.75 0 01-1.06-.02L10 8.832 6.29 12.77a.75.75 0 11-1.08-1.04l4.25-4.5a.75.75 0 011.08 0l4.25 4.5a.75.75 0 01-.02 1.06z" clipRule="evenodd" />
+                </svg>
+              </button>
+              <button
+                type="button"
+                onClick={() => onMove(i, i + 1)}
+                disabled={i === chain.length - 1}
+                className="text-slate-500 transition hover:text-slate-200 disabled:opacity-30"
+                aria-label="Move down"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4">
+                  <path fillRule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clipRule="evenodd" />
+                </svg>
+              </button>
+              <button
+                type="button"
+                onClick={() => onRemove(i)}
+                className="text-slate-500 transition hover:text-red-400"
+                aria-label="Remove"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4">
+                  <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+                </svg>
+              </button>
+            </div>
+          ))}
+          {terminalIndex >= 0 && terminalIndex < chain.length - 1 && (
+            <p className="text-[10px] text-amber-400/70">
+              Rules below "{artChainEntryLabel(chain[terminalIndex])}" are unreachable — it always matches.
+            </p>
+          )}
+        </div>
+      )}
+
+      <div className="flex flex-col gap-2 rounded-lg border border-white/5 bg-black/10 p-3">
+        <span className="text-[10px] font-semibold uppercase tracking-widest text-slate-500">Add Rule</span>
+        <div className="flex flex-wrap gap-2">
+          {ART_CHAIN_RULE_OPTIONS.map((opt) => (
+            <button
+              key={opt.type}
+              type="button"
+              onClick={() => onAdd({ type: opt.type } as ArtChainEntry)}
+              disabled={chain.some((e) => e.type === opt.type)}
+              className="rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-slate-200 transition hover:bg-white/10 disabled:opacity-30"
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+        <div className="flex gap-2">
+          <div className="relative flex-1">
+            <input
+              type="text"
+              value={setInput}
+              onChange={(e) => setSetInput(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleAddSet()}
+              placeholder="Set code or name…"
+              list="art-chain-set-list"
+              className="w-full rounded-[14px] border border-white/10 bg-black/18 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:border-sky-400/40 focus:outline-none"
+            />
+            {sortedSets.length > 0 && (
+              <datalist id="art-chain-set-list">
+                {sortedSets.map(([code, info]) => (
+                  <option key={code} value={info.name} />
+                ))}
+              </datalist>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={handleAddSet}
+            disabled={!resolveSetCode(setInput)}
+            className="rounded-[14px] border border-white/10 bg-sky-600/30 px-4 py-2 text-sm text-slate-100 hover:bg-sky-600/50 disabled:opacity-50"
+          >
+            Add Set
+          </button>
+        </div>
+      </div>
+
+      <p className="text-xs text-slate-500">
+        Rules are tried top-to-bottom. The first match wins. Per-card overrides (right-click in deck builder) always take priority.
+      </p>
+    </div>
   );
 }
 

@@ -30,18 +30,90 @@ interface ScryfallDataEntry {
 export const CARD_BACK_URL =
   "https://backs.scryfall.io/normal/0/a/0aeebaf5-8c7d-4636-9e82-8c27447861f7.jpg";
 
+export interface PrintingEntry {
+  id: string;
+  set: string;
+  set_name: string;
+  collector_number: string;
+  border_color: string;
+  frame_effects: string[];
+  full_art: boolean;
+  faces: Array<{ normal: string; art_crop: string }>;
+}
+
 type ScryfallDataMap = Record<string, ScryfallDataEntry>;
+type PrintingsDataMap = Record<string, PrintingEntry[]>;
 
 let scryfallDataPromise: Promise<ScryfallDataMap | null> | null = null;
+let scryfallDataResolved: ScryfallDataMap | null = null;
+let printingsDataPromise: Promise<PrintingsDataMap | null> | null = null;
 let scryfallQueue: Promise<void> = Promise.resolve();
 
 function loadScryfallData(): Promise<ScryfallDataMap | null> {
   if (!scryfallDataPromise) {
     scryfallDataPromise = fetch(__SCRYFALL_DATA_URL__)
       .then((r) => r.json() as Promise<ScryfallDataMap>)
+      .then((data) => {
+        scryfallDataResolved = data;
+        return data;
+      })
       .catch(() => null);
   }
   return scryfallDataPromise;
+}
+
+let printingsDataResolved: PrintingsDataMap | null = null;
+
+export function loadPrintingsData(): Promise<PrintingsDataMap | null> {
+  if (!printingsDataPromise) {
+    printingsDataPromise = fetch(__SCRYFALL_PRINTINGS_URL__)
+      .then((r) => r.json() as Promise<PrintingsDataMap>)
+      .then((data) => {
+        printingsDataResolved = data;
+        return data;
+      })
+      .catch(() => null);
+  }
+  return printingsDataPromise;
+}
+
+export function hasAlternatePrintingsSync(oracleId: string): boolean {
+  if (!printingsDataResolved) return false;
+  const printings = printingsDataResolved[oracleId];
+  return printings != null && printings.length > 0;
+}
+
+export async function getCardPrintings(oracleId: string): Promise<PrintingEntry[]> {
+  const data = await loadPrintingsData();
+  return data?.[oracleId] ?? [];
+}
+
+export async function getCardPrintingsByName(cardName: string): Promise<PrintingEntry[]> {
+  const data = await loadScryfallData();
+  const entry = data?.[cardName.toLowerCase()];
+  if (!entry) return [];
+  return getCardPrintings(entry.oracle_id);
+}
+
+export function resolvePrintingImageUrl(
+  printing: PrintingEntry,
+  faceIndex: number,
+  size: ImageSize,
+): string | null {
+  const face = printing.faces[faceIndex] ?? printing.faces[0];
+  return face?.[size === "small" || size === "large" ? "normal" : size] ?? null;
+}
+
+export function findPrintingById(
+  printings: PrintingEntry[],
+  scryfallId: string,
+): PrintingEntry | undefined {
+  return printings.find((p) => p.id === scryfallId);
+}
+
+export function resolveOracleIdSync(cardName: string): string | null {
+  if (!scryfallDataResolved) return null;
+  return scryfallDataResolved[cardName.toLowerCase()]?.oracle_id ?? null;
 }
 
 const SCRYFALL_DELAY_MS = 100;
@@ -289,6 +361,9 @@ export async function fetchTokenImageUrl(
   size: ImageSize = "normal",
   filters?: TokenSearchFilters,
 ): Promise<string> {
+  const localUrl = await fetchTokenImageFromLocal(tokenName, size);
+  if (localUrl) return localUrl;
+
   const colorClause = buildTokenColorClause(filters?.colors);
 
   // Try with exact P/T first, then fall back without P/T if no results.
@@ -310,6 +385,18 @@ export async function fetchTokenImageUrl(
   }
 
   throw new Error(`No token image found for "${tokenName}"`);
+}
+
+async function fetchTokenImageFromLocal(
+  tokenName: string,
+  size: ImageSize,
+): Promise<string | null> {
+  const data = await loadScryfallData();
+  const key = `token:${tokenName.toLowerCase()}`;
+  const entry = data?.[key];
+  if (!entry) return null;
+  const face = entry.faces[0];
+  return face?.[size === "small" || size === "large" ? "normal" : size] ?? null;
 }
 
 function buildTokenQuery(

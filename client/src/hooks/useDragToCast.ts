@@ -11,31 +11,12 @@ import { dispatchAction } from "../game/dispatch.ts";
 export const DRAG_PLAY_THRESHOLD = -20;
 
 interface UseDragToCastOptions {
-  /**
-   * Whether the local player currently holds priority. When false, no drag
-   * ever triggers a play.
-   */
   hasPriority: boolean;
-  /**
-   * Optional predicate that suppresses the cast when the pointer ends inside
-   * the source zone's bounds (hand drops back into hand, for example). Omit
-   * when the source zone has no "release without playing" gesture — e.g. the
-   * command zone, where any upward drag past the threshold always casts.
-   */
   isInSourceZone?: (info: PanInfo) => boolean;
-  /**
-   * Direct CastSpell action for a single-cast card (Commander zone path).
-   * When provided, drag-end dispatches this action. Mutually exclusive with
-   * `onPlay` — if both are set, `onPlay` takes precedence since it can
-   * encode richer play choices (flashback, adventure, channel, etc.).
-   */
   castAction?: GameAction | null;
-  /**
-   * Custom play callback for source zones that resolve to more than a single
-   * CastSpell (e.g. hand cards that may have a choice modal between cast and
-   * an activated ability). Invoked only when the gesture passes all gates.
-   */
   onPlay?: () => void;
+  /** Use Euclidean distance instead of y-only for the drag threshold. */
+  useDistanceThreshold?: boolean;
 }
 
 /**
@@ -50,12 +31,16 @@ export function useDragToCast({
   onPlay,
   hasPriority,
   isInSourceZone,
+  useDistanceThreshold,
 }: UseDragToCastOptions) {
   return useCallback(
     (_event: MouseEvent | TouchEvent | PointerEvent, info: PanInfo): boolean => {
       if (!hasPriority) return false;
       if (isInSourceZone?.(info)) return false;
-      if (info.offset.y >= DRAG_PLAY_THRESHOLD) return false;
+      const pastThreshold = useDistanceThreshold
+        ? Math.hypot(info.offset.x, info.offset.y) >= Math.abs(DRAG_PLAY_THRESHOLD)
+        : info.offset.y < DRAG_PLAY_THRESHOLD;
+      if (!pastThreshold) return false;
       if (onPlay) {
         onPlay();
         return true;
@@ -66,6 +51,6 @@ export function useDragToCast({
       }
       return false;
     },
-    [castAction, onPlay, hasPriority, isInSourceZone],
+    [castAction, onPlay, hasPriority, isInSourceZone, useDistanceThreshold],
   );
 }

@@ -1,8 +1,8 @@
 use std::str::FromStr;
 
 use nom::branch::alt;
-use nom::bytes::complete::{tag, take_till};
-use nom::combinator::{opt, value};
+use nom::bytes::complete::{tag, take_till, take_till1};
+use nom::combinator::{opt, peek, value};
 use nom::multi::many0;
 use nom::Parser;
 
@@ -11,22 +11,24 @@ use crate::types::ability::{
     SharedQuality, SharedQualityRelation, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::Supertype;
+use crate::types::counter::CounterType;
 use crate::types::identifiers::TrackedSetId;
 use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::mana::ManaColor;
 use crate::types::zones::Zone;
 
+use super::oracle_ir::context::ParseContext;
+use super::oracle_ir::diagnostic::OracleDiagnostic;
+use super::oracle_nom::error::OracleError;
 use super::oracle_nom::filter as nom_filter;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_nom::target as nom_target;
 use super::oracle_quantity::capitalize_first;
-use super::oracle_target_scope;
 use super::oracle_util::{
     merge_or_filters, parse_subtype, strip_possessive, TextPair, SELF_REF_PARSE_ONLY_PHRASES,
     SELF_REF_TYPE_PHRASES,
 };
-use super::oracle_warnings::push_warning;
 
 /// Run a nom combinator on lowercased text, returning the result and
 /// remainder from the original (mixed-case) text.
@@ -49,15 +51,13 @@ fn parse_word_bounded<'a>(
     input: &'a str,
     word: &str,
 ) -> super::oracle_nom::error::OracleResult<'a, ()> {
-    let (rest, _) = tag::<_, _, nom_language::error::VerboseError<&str>>(word).parse(input)?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(word).parse(input)?;
     match rest.chars().next() {
         None | Some(' ' | ',' | '.' | ';' | ':' | ')' | '\'' | '"' | '/' | '-') => Ok((rest, ())),
-        _ => Err(nom::Err::Error(nom_language::error::VerboseError {
-            errors: vec![(
-                input,
-                nom_language::error::VerboseErrorKind::Context("word boundary required"),
-            )],
-        })),
+        _ => Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        ))),
     }
 }
 
@@ -78,7 +78,7 @@ pub fn parse_event_context_ref(text: &str) -> Option<(TargetFilter, &str)> {
             // Longest-match-first within shared prefixes.
             value(
                 TargetFilter::TriggeringSpellController,
-                tag::<_, _, nom_language::error::VerboseError<&str>>("that spell's controller"),
+                tag::<_, _, OracleError<'_>>("that spell's controller"),
             ),
             value(
                 TargetFilter::TriggeringSpellOwner,
@@ -116,25 +116,35 @@ pub fn parse_event_context_ref(text: &str) -> Option<(TargetFilter, &str)> {
 ///
 /// Uses first-character dispatch to group `starts_with` checks, reducing average
 /// comparisons from ~12 to ~3-4 per call.
+///
+/// Prefer `parse_target_with_ctx` when a `ParseContext` is available — diagnostics
+/// from the fallback path (TargetFallback) are accumulated there. This wrapper
+/// creates a temporary context whose diagnostics are discarded.
 pub fn parse_target(text: &str) -> (TargetFilter, &str) {
+    parse_target_with_ctx(text, &mut ParseContext::default())
+}
+
+/// Context-aware variant of `parse_target`. TargetFallback diagnostics are
+/// accumulated on `ctx.diagnostics` instead of being silently lost.
+pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetFilter, &'a str) {
     let text = text.trim_start();
     let lower = text.to_lowercase();
 
     // Strip leading article ("a "/"an ") before "target" to handle "a target creature".
     // Guard: only strip when followed by "target " to avoid over-stripping.
     if let Ok((after_article, _)) = alt((
-        tag::<_, _, nom_language::error::VerboseError<&str>>("a second "),
+        tag::<_, _, OracleError<'_>>("a second "),
         tag("a "),
         tag("an "),
     ))
     .parse(lower.as_str())
     {
-        if tag::<_, _, nom_language::error::VerboseError<&str>>("target ")
+        if tag::<_, _, OracleError<'_>>("target ")
             .parse(after_article)
             .is_ok()
         {
             let original_rest = &text[lower.len() - after_article.len()..];
-            return parse_target(original_rest);
+            return parse_target_with_ctx(original_rest, ctx);
         }
     }
 
@@ -161,12 +171,10 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
         "x ",
     ];
     for prefix in QUANTIFIED_PREFIXES {
-        if let Ok((rest, _)) =
-            tag::<_, _, nom_language::error::VerboseError<&str>>(*prefix).parse(lower.as_str())
-        {
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(*prefix).parse(lower.as_str()) {
             let trimmed_rest = rest.trim_start();
             let quantified_target = alt((
-                tag::<_, _, nom_language::error::VerboseError<&str>>("target "),
+                tag::<_, _, OracleError<'_>>("target "),
                 tag("other target "),
                 tag("another target "),
                 tag("other "),
@@ -182,17 +190,15 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
                 || (!matches!(*prefix, "one " | "up to one ") && trimmed_rest.starts_with("of "));
             if quantified_target {
                 let original_rest = &text[lower.len() - rest.len()..];
-                return parse_target(original_rest);
+                return parse_target_with_ctx(original_rest, ctx);
             }
         }
     }
 
     for prefix in ["or untap ", "untap ", "or tap ", "tap "] {
-        if let Ok((rest, _)) =
-            tag::<_, _, nom_language::error::VerboseError<&str>>(prefix).parse(lower.as_str())
-        {
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(prefix).parse(lower.as_str()) {
             let original_rest = &text[lower.len() - rest.len()..];
-            return parse_target(original_rest);
+            return parse_target_with_ctx(original_rest, ctx);
         }
     }
 
@@ -202,9 +208,7 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
         "any number of targets",
         "targets",
     ] {
-        if let Ok((rest, _)) =
-            tag::<_, _, nom_language::error::VerboseError<&str>>(phrase).parse(lower.as_str())
-        {
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(phrase).parse(lower.as_str()) {
             return (TargetFilter::Any, &text[lower.len() - rest.len()..]);
         }
     }
@@ -219,7 +223,7 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
     if let Some((_, rest)) = nom_on_lower(text, &lower, |input| parse_word_bounded(input, "them")) {
         return (TargetFilter::ParentTarget, rest);
     }
-    if tag::<_, _, nom_language::error::VerboseError<&str>>("one of ")
+    if tag::<_, _, OracleError<'_>>("one of ")
         .parse(lower.as_str())
         .is_err()
     {
@@ -238,9 +242,17 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
     }
     if let Some((filter, rest)) = nom_on_lower(text, &lower, |input| {
         alt((
+            parse_cost_paid_object_reference,
+            value(
+                TargetFilter::TriggeringSource,
+                (
+                    alt((tag("the discarded card"), tag("that discarded card"))),
+                    opt(tag(" from your graveyard")),
+                ),
+            ),
             value(
                 TargetFilter::ParentTargetController,
-                tag::<_, _, nom_language::error::VerboseError<&str>>("that creature's controller"),
+                tag::<_, _, OracleError<'_>>("that creature's controller"),
             ),
             value(
                 TargetFilter::ParentTargetController,
@@ -255,32 +267,26 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
     }) {
         return (filter, rest);
     }
-    if let Ok((rest, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("on ").parse(lower.as_str())
-    {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("on ").parse(lower.as_str()) {
         let original_rest = &text[lower.len() - rest.len()..];
         if matches!(
             rest,
             "it" | "them" | "him" | "her" | "enchanted permanent" | "enchanted creature"
         ) {
-            return parse_target(original_rest);
+            return parse_target_with_ctx(original_rest, ctx);
         }
     }
     // "that [type phrase]" → anaphoric reference to a typed subject
-    if let Ok((rest_subject, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("that ").parse(lower.as_str())
-    {
+    if let Ok((rest_subject, _)) = tag::<_, _, OracleError<'_>>("that ").parse(lower.as_str()) {
         let original_rest = &text[lower.len() - rest_subject.len()..];
-        let (filter, rem) = parse_type_phrase(original_rest);
+        let (filter, rem) = parse_type_phrase_with_ctx(original_rest, ctx);
         if !matches!(filter, TargetFilter::Any) {
             return (TargetFilter::ParentTarget, rem);
         }
     }
 
     // "~" — self-reference (normalized from card name)
-    if let Ok((rest, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("~").parse(lower.as_str())
-    {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("~").parse(lower.as_str()) {
         return (
             TargetFilter::SelfRef,
             text[lower.len() - rest.len()..].trim_start(),
@@ -289,11 +295,7 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
 
     // "any other target" — matches any legal target different from previously chosen targets
     if let Some((_, rest)) = nom_on_lower(text, &lower, |input| {
-        value(
-            (),
-            tag::<_, _, nom_language::error::VerboseError<&str>>("any other target"),
-        )
-        .parse(input)
+        value((), tag::<_, _, OracleError<'_>>("any other target")).parse(input)
     }) {
         return (
             TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Another])),
@@ -305,18 +307,36 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
     if let Some((_, rest)) = nom_on_lower(text, &lower, |input| {
         value(
             TargetFilter::Any,
-            tag::<_, _, nom_language::error::VerboseError<&str>>("any target"),
+            tag::<_, _, OracleError<'_>>("any target"),
         )
         .parse(input)
     }) {
         return (TargetFilter::Any, rest);
     }
 
-    // "all " + type phrase
-    if let Ok((rest, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("all ").parse(lower.as_str())
+    // CR 610.3 / CR 406.6: linked exile and counter-marked exile phrases are
+    // more specific than the generic "all <type phrase>" parser below.
+    if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("each card exiled with ~"),
+        tag("each card exiled with it"),
+        tag("all cards exiled with ~"),
+        tag("all cards exiled with it"),
+        tag("all cards they own exiled with ~"),
+        tag("all cards they own exiled with it"),
+        tag("cards exiled with ~"),
+        tag("cards exiled with it"),
+    ))
+    .parse(lower.as_str())
     {
-        let (filter, rest) = parse_type_phrase(&text[lower.len() - rest.len()..]);
+        return (
+            TargetFilter::ExiledBySource,
+            &text[lower.len() - rest.len()..],
+        );
+    }
+
+    // "all " + type phrase
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("all ").parse(lower.as_str()) {
+        let (filter, rest) = parse_type_phrase_with_ctx(&text[lower.len() - rest.len()..], ctx);
         return (filter, rest);
     }
 
@@ -343,22 +363,17 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
         .iter()
         .chain(SELF_REF_PARSE_ONLY_PHRASES)
     {
-        if let Ok((rest, _)) =
-            tag::<_, _, nom_language::error::VerboseError<&str>>(*phrase).parse(lower.as_str())
-        {
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(*phrase).parse(lower.as_str()) {
             return (TargetFilter::SelfRef, &text[lower.len() - rest.len()..]);
         }
     }
 
     // "target" group — longest-match-first within
-    if let Ok((after_target, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("target ").parse(lower.as_str())
-    {
+    if let Ok((after_target, _)) = tag::<_, _, OracleError<'_>>("target ").parse(lower.as_str()) {
         let target_offset = lower.len() - after_target.len();
         // "target player or planeswalker"
         if let Ok((rest, _)) =
-            tag::<_, _, nom_language::error::VerboseError<&str>>("player or planeswalker")
-                .parse(after_target)
+            tag::<_, _, OracleError<'_>>("player or planeswalker").parse(after_target)
         {
             return (
                 TargetFilter::Or {
@@ -371,22 +386,18 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
             );
         }
         // "target opponent"
-        if let Ok((rest, _)) =
-            tag::<_, _, nom_language::error::VerboseError<&str>>("opponent").parse(after_target)
-        {
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("opponent").parse(after_target) {
             return (
                 TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
                 &text[lower.len() - rest.len()..],
             );
         }
         // "target player"
-        if let Ok((rest, _)) =
-            tag::<_, _, nom_language::error::VerboseError<&str>>("player").parse(after_target)
-        {
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("player").parse(after_target) {
             return (TargetFilter::Player, &text[lower.len() - rest.len()..]);
         }
         // "target" + type phrase (generic)
-        let (filter, rest) = parse_type_phrase(&text[target_offset..]);
+        let (filter, rest) = parse_type_phrase_with_ctx(&text[target_offset..], ctx);
         let consumed_end = lower.len() - rest.len();
         return (
             scope_target_spell_phrase(filter, &lower[target_offset..consumed_end]),
@@ -423,9 +434,7 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
         "both cards",
     ];
     for phrase in TRACKED_SET_PHRASES {
-        if let Ok((rest, _)) =
-            tag::<_, _, nom_language::error::VerboseError<&str>>(*phrase).parse(lower.as_str())
-        {
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(*phrase).parse(lower.as_str()) {
             return (
                 TargetFilter::TrackedSet {
                     id: TrackedSetId(0),
@@ -433,6 +442,16 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
                 &text[lower.len() - rest.len()..],
             );
         }
+    }
+
+    if let Some(rest) = parse_selected_from_set_reference(lower.as_str()) {
+        return (
+            TargetFilter::ParentTarget,
+            &text[lower.len() - rest.len()..],
+        );
+    }
+    if let Some((filter, rest)) = parse_definite_parent_reference(lower.as_str()) {
+        return (filter, &text[lower.len() - rest.len()..]);
     }
 
     // Singular selection from a previously-referenced set.
@@ -445,9 +464,13 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
         "a new target for it",
         "up to one of them",
         "either of them",
+        "the chosen creatures",
         "the chosen creature",
+        "the chosen cards",
         "the chosen card",
+        "the chosen players",
         "the chosen player",
+        "the chosen permanent",
         "the last chosen card",
         "the revealed card",
         "the token",
@@ -458,9 +481,7 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
         "one of them",
     ];
     for phrase in SELECTED_FROM_SET_PHRASES {
-        if let Ok((rest, _)) =
-            tag::<_, _, nom_language::error::VerboseError<&str>>(*phrase).parse(lower.as_str())
-        {
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(*phrase).parse(lower.as_str()) {
             return (
                 TargetFilter::ParentTarget,
                 &text[lower.len() - rest.len()..],
@@ -478,9 +499,7 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
         "of them",
     ];
     for phrase in SET_REFERENCE_SUFFIXES {
-        if let Ok((rest, _)) =
-            tag::<_, _, nom_language::error::VerboseError<&str>>(*phrase).parse(lower.as_str())
-        {
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(*phrase).parse(lower.as_str()) {
             return (
                 TargetFilter::TrackedSet {
                     id: TrackedSetId(0),
@@ -496,7 +515,7 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
         alt((
             value(
                 TargetFilter::ParentTargetController,
-                tag::<_, _, nom_language::error::VerboseError<&str>>("the creature's controller"),
+                tag::<_, _, OracleError<'_>>("the creature's controller"),
             ),
             value(
                 TargetFilter::ParentTargetController,
@@ -514,9 +533,7 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
     }
     // Generic "the [noun]'s controller" — any possessive ending in "'s controller"
     // catches subtypes like "the Wall's controller" and similar.
-    if let Ok((after_the, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("the ").parse(lower.as_str())
-    {
+    if let Ok((after_the, _)) = tag::<_, _, OracleError<'_>>("the ").parse(lower.as_str()) {
         if let Some(pos) = after_the.find("'s controller") {
             let consumed = "the ".len() + pos + "'s controller".len();
             return (TargetFilter::ParentTargetController, &text[consumed..]);
@@ -524,17 +541,14 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
     }
     // "the [type] card" / "the enchanted [type] card" — definite reference to a
     // previously-mentioned typed card. Must come after tracked-set phrases.
-    if let Ok((after_the, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("the ").parse(lower.as_str())
-    {
+    if let Ok((after_the, _)) = tag::<_, _, OracleError<'_>>("the ").parse(lower.as_str()) {
         // "the enchanted card" / "the enchanted instant card"
-        let type_start = if let Ok((rest, _)) =
-            tag::<_, _, nom_language::error::VerboseError<&str>>("enchanted ").parse(after_the)
-        {
-            rest
-        } else {
-            after_the
-        };
+        let type_start =
+            if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("enchanted ").parse(after_the) {
+                rest
+            } else {
+                after_the
+            };
 
         // Check for [type] card pattern: the remaining must start with a type word
         // followed by " card"/"cards", or just be "card"/"cards" directly.
@@ -558,27 +572,21 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
             } else {
                 type_start
             };
-            let rest_after_card = if let Ok((r, _)) =
-                tag::<_, _, nom_language::error::VerboseError<&str>>("cards").parse(card_start)
-            {
-                r
-            } else if let Ok((r, _)) =
-                tag::<_, _, nom_language::error::VerboseError<&str>>("card").parse(card_start)
-            {
-                r
-            } else {
-                card_start
-            };
+            let rest_after_card =
+                if let Ok((r, _)) = tag::<_, _, OracleError<'_>>("cards").parse(card_start) {
+                    r
+                } else if let Ok((r, _)) = tag::<_, _, OracleError<'_>>("card").parse(card_start) {
+                    r
+                } else {
+                    card_start
+                };
             let consumed = lower.len() - rest_after_card.len();
             return (TargetFilter::ParentTarget, &text[consumed..]);
         }
     }
     // "himself" / "herself" — archaic self-reference (e.g., "deals damage to himself")
-    if let Ok((rest, _)) = alt((
-        tag::<_, _, nom_language::error::VerboseError<&str>>("himself"),
-        tag("herself"),
-    ))
-    .parse(lower.as_str())
+    if let Ok((rest, _)) =
+        alt((tag::<_, _, OracleError<'_>>("himself"), tag("herself"))).parse(lower.as_str())
     {
         return (TargetFilter::SelfRef, &text[lower.len() - rest.len()..]);
     }
@@ -588,7 +596,7 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
         alt((
             value(
                 TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
-                tag::<_, _, nom_language::error::VerboseError<&str>>("each opponent"),
+                tag::<_, _, OracleError<'_>>("each opponent"),
             ),
             value(
                 TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
@@ -601,9 +609,7 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
     }
 
     for phrase in ["opponent's graveyard", "an opponent's graveyard"] {
-        if let Ok((rest, _)) =
-            tag::<_, _, nom_language::error::VerboseError<&str>>(phrase).parse(lower.as_str())
-        {
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(phrase).parse(lower.as_str()) {
             return (
                 TargetFilter::Typed(TypedFilter::card().properties(vec![
                     FilterProp::Owned {
@@ -618,10 +624,19 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
         }
     }
 
-    // CR 610.3: "each card exiled with ~" / "each card exiled with this <type>"
-    if let Ok((rest, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("each card exiled with ~")
-            .parse(lower.as_str())
+    // CR 610.3 / CR 406.6: "each card exiled with this <type>" is a linked-
+    // object reference to cards exiled by this source.
+    if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("each card exiled with ~"),
+        tag("each card exiled with it"),
+        tag("all cards exiled with ~"),
+        tag("all cards exiled with it"),
+        tag("all cards they own exiled with ~"),
+        tag("all cards they own exiled with it"),
+        tag("cards exiled with ~"),
+        tag("cards exiled with it"),
+    ))
+    .parse(lower.as_str())
     {
         return (
             TargetFilter::ExiledBySource,
@@ -629,8 +644,7 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
         );
     }
     if let Ok((rest, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("each card exiled with this ")
-            .parse(lower.as_str())
+        tag::<_, _, OracleError<'_>>("each card exiled with this ").parse(lower.as_str())
     {
         // Skip the type word after "this " to consume "each card exiled with this artifact"
         let after_type = rest.find(' ').map_or("", |i| &rest[i..]);
@@ -642,7 +656,7 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
 
     // "each of those creatures/permanents/cards" → TrackedSet reference
     if let Ok((rest, _)) = alt((
-        tag::<_, _, nom_language::error::VerboseError<&str>>("each of those creatures"),
+        tag::<_, _, OracleError<'_>>("each of those creatures"),
         tag("each of those permanents"),
         tag("each of those cards"),
     ))
@@ -657,10 +671,8 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
     }
 
     // "each " + type phrase
-    if let Ok((rest, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("each ").parse(lower.as_str())
-    {
-        let (filter, rest) = parse_type_phrase(&text[lower.len() - rest.len()..]);
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("each ").parse(lower.as_str()) {
+        let (filter, rest) = parse_type_phrase_with_ctx(&text[lower.len() - rest.len()..], ctx);
         return (filter, rest);
     }
 
@@ -669,20 +681,16 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
     if let Some((filter, rest)) = nom_on_lower(text, &lower, |input| {
         value(
             TargetFilter::ParentTargetController,
-            tag::<_, _, nom_language::error::VerboseError<&str>>(
-                "enchanted permanent's controller",
-            ),
+            tag::<_, _, OracleError<'_>>("enchanted permanent's controller"),
         )
         .parse(input)
     }) {
         return (filter, rest);
     }
     // "enchanted [type phrase]" → parse the type after "enchanted " and add EnchantedBy
-    if let Ok((rest_lower, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("enchanted ").parse(lower.as_str())
-    {
+    if let Ok((rest_lower, _)) = tag::<_, _, OracleError<'_>>("enchanted ").parse(lower.as_str()) {
         let after_enchanted = &text[lower.len() - rest_lower.len()..];
-        let (filter, rest) = parse_type_phrase(after_enchanted);
+        let (filter, rest) = parse_type_phrase_with_ctx(after_enchanted, ctx);
         if target_filter_has_meaningful_content(&filter) {
             let enchanted = match filter {
                 TargetFilter::Typed(mut tf) => {
@@ -698,26 +706,45 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
     if let Some((filter, rest)) = nom_on_lower(text, &lower, |input| {
         value(
             TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EquippedBy])),
-            tag::<_, _, nom_language::error::VerboseError<&str>>("equipped creature"),
+            tag::<_, _, OracleError<'_>>("equipped creature"),
         )
         .parse(input)
     }) {
         return (filter, rest);
     }
 
-    // "cards exiled with ~" / "cards exiled with this <type>"
-    if let Ok((rest, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("cards exiled with ~")
-            .parse(lower.as_str())
+    // "exiled cards with [counter] counters on them" — linked only by the
+    // counter marker, not by source. Keep the target narrowed to exile plus
+    // the counter type instead of falling back to Any.
+    if let Ok((rest, counter_type)) = alt((
+        (
+            tag::<_, _, OracleError<'_>>("exiled cards with "),
+            nom_primitives::parse_counter_type_typed,
+            tag(" on them"),
+        )
+            .map(|(_, counter_type, _)| counter_type),
+        (
+            tag("exiled cards with "),
+            take_till1::<_, _, OracleError<'_>>(|c: char| c.is_whitespace()),
+            tag(" counters on them"),
+        )
+            .map(|(_, counter_name, _)| CounterType::Generic(counter_name.to_string())),
+    ))
+    .parse(lower.as_str())
     {
         return (
-            TargetFilter::ExiledBySource,
+            TargetFilter::Typed(TypedFilter::card().properties(vec![
+                FilterProp::InZone { zone: Zone::Exile },
+                FilterProp::CountersGE {
+                    counter_type,
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
+            ])),
             &text[lower.len() - rest.len()..],
         );
     }
     if let Ok((rest, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("cards exiled with this ")
-            .parse(lower.as_str())
+        tag::<_, _, OracleError<'_>>("cards exiled with this ").parse(lower.as_str())
     {
         let after_type = rest.find(' ').map_or("", |i| &rest[i..]);
         return (
@@ -749,9 +776,7 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
                 ("hand", Zone::Hand),
             ];
             for &(zone_word, zone) in ZONE_WORDS {
-                if let Ok((zone_rest, _)) =
-                    tag::<_, _, nom_language::error::VerboseError<&str>>(zone_word).parse(rest)
-                {
+                if let Ok((zone_rest, _)) = tag::<_, _, OracleError<'_>>(zone_word).parse(rest) {
                     let consumed = lower.len() - zone_rest.len();
                     return (
                         TargetFilter::Typed(TypedFilter {
@@ -774,9 +799,7 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
     // resolver can locate the right card.
     if let Some((_poss, rest)) = strip_possessive(&lower) {
         for word in &["commanders", "commander"] {
-            if let Ok((after, _)) =
-                tag::<_, _, nom_language::error::VerboseError<&str>>(*word).parse(rest)
-            {
+            if let Ok((after, _)) = tag::<_, _, OracleError<'_>>(*word).parse(rest) {
                 let consumed = lower.len() - after.len();
                 return (
                     TargetFilter::Typed(TypedFilter {
@@ -792,7 +815,7 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
 
     // Bare type phrase fallback: try parse_type_phrase before giving up.
     // Handles "other nonland permanents you own and control" after quantifier stripping.
-    let (filter, rest) = parse_type_phrase(text);
+    let (filter, rest) = parse_type_phrase_with_ctx(text, ctx);
     if target_filter_has_meaningful_content(&filter) {
         let consumed_end = lower.len() - rest.len();
         (
@@ -800,17 +823,92 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
             rest,
         )
     } else {
-        push_warning(format!(
-            "target-fallback: parse_target could not classify '{}'",
-            text.trim()
-        ));
+        ctx.push_diagnostic(OracleDiagnostic::TargetFallback {
+            context: "parse_target could not classify".into(),
+            text: text.trim().into(),
+            line_index: 0,
+        });
         (TargetFilter::Any, text)
+    }
+}
+
+fn parse_selected_from_set_reference(input: &str) -> Option<&str> {
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>("a different "))
+        .parse(input)
+        .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("one of those ")
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("artifact cards"),
+        tag::<_, _, OracleError<'_>>("cards"),
+        tag::<_, _, OracleError<'_>>("creatures"),
+        tag::<_, _, OracleError<'_>>("dragons"),
+        tag::<_, _, OracleError<'_>>("lands"),
+        tag::<_, _, OracleError<'_>>("permanents"),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (rest, _) = opt(nom::sequence::preceded(
+        tag::<_, _, OracleError<'_>>(" of "),
+        alt((
+            tag::<_, _, OracleError<'_>>("their choice"),
+            tag::<_, _, OracleError<'_>>("his or her choice"),
+            tag::<_, _, OracleError<'_>>("that player's choice"),
+        )),
+    ))
+    .parse(rest)
+    .ok()?;
+    Some(rest)
+}
+
+fn parse_definite_parent_reference(input: &str) -> Option<(TargetFilter, &str)> {
+    let (rest, filter) = alt((
+        value(
+            TargetFilter::ParentTargetSlot { index: 1 },
+            tag::<_, _, OracleError<'_>>("the artifact card"),
+        ),
+        value(
+            TargetFilter::ParentTargetSlot { index: 0 },
+            tag::<_, _, OracleError<'_>>("the artifact"),
+        ),
+    ))
+    .parse(input)
+    .ok()?;
+    if rest.is_empty()
+        || peek(alt((
+            tag::<_, _, OracleError<'_>>(","),
+            tag::<_, _, OracleError<'_>>("."),
+            tag::<_, _, OracleError<'_>>(";"),
+            tag::<_, _, OracleError<'_>>(" and "),
+            tag::<_, _, OracleError<'_>>(" to "),
+            tag::<_, _, OracleError<'_>>(" into "),
+            tag::<_, _, OracleError<'_>>(" onto "),
+        )))
+        .parse(rest)
+        .is_ok()
+    {
+        Some((filter, rest))
+    } else {
+        None
     }
 }
 
 /// Parse a type phrase like "creature", "nonland permanent", "artifact or enchantment",
 /// "creature you control", "creature an opponent controls".
+///
+/// Prefer `parse_type_phrase_with_ctx` when a `ParseContext` is available —
+/// it enables relative-player scope resolution for "that player controls".
 pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
+    parse_type_phrase_with_ctx(text, &mut ParseContext::default())
+}
+
+/// Context-aware variant of `parse_type_phrase`. Enables relative-player scope
+/// resolution via `ctx.relative_player_scope`.
+pub fn parse_type_phrase_with_ctx<'a>(
+    text: &'a str,
+    ctx: &mut ParseContext,
+) -> (TargetFilter, &'a str) {
     let lower = text.to_lowercase();
     let mut pos = 0;
     let mut properties = Vec::new();
@@ -820,15 +918,11 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
 
     // Strip leading article ("a "/"an ") when followed by a recognized type word.
     // Guard: "an opponent" → "opponent" fails type word check → no stripping.
-    if let Ok((rest, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("a ").parse(&lower[pos..])
-    {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("a ").parse(&lower[pos..]) {
         if starts_with_type_phrase_lead(rest) {
             pos += "a ".len();
         }
-    } else if let Ok((rest, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("an ").parse(&lower[pos..])
-    {
+    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("an ").parse(&lower[pos..]) {
         if starts_with_type_phrase_lead(rest) {
             pos += "an ".len();
         }
@@ -836,13 +930,13 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
 
     // Handle "other"/"another" prefix: "other creatures", "another creature",
     // "other nonland permanents", "another target creature"
-    if tag::<_, _, nom_language::error::VerboseError<&str>>("other ")
+    if tag::<_, _, OracleError<'_>>("other ")
         .parse(lower_trimmed)
         .is_ok()
     {
         properties.push(FilterProp::Another);
         pos = offset + "other ".len();
-    } else if tag::<_, _, nom_language::error::VerboseError<&str>>("another ")
+    } else if tag::<_, _, OracleError<'_>>("another ")
         .parse(lower_trimmed)
         .is_ok()
     {
@@ -851,9 +945,7 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
     }
     // "another target [type]" — strip "target " after "another " so the type is reachable.
     if properties.contains(&FilterProp::Another) {
-        if let Ok((_, _)) =
-            tag::<_, _, nom_language::error::VerboseError<&str>>("target ").parse(&lower[pos..])
-        {
+        if let Ok((_, _)) = tag::<_, _, OracleError<'_>>("target ").parse(&lower[pos..]) {
             pos += "target ".len();
         }
     }
@@ -864,9 +956,7 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
         properties.push(prop);
         pos += consumed;
         // Check for "or " followed by another combat status prefix
-        if let Ok((after_or, _)) =
-            tag::<_, _, nom_language::error::VerboseError<&str>>("or ").parse(&lower[pos..])
-        {
+        if let Ok((after_or, _)) = tag::<_, _, OracleError<'_>>("or ").parse(&lower[pos..]) {
             if let Some((next_prop, next_consumed)) = parse_combat_status_prefix(after_or) {
                 properties.push(next_prop);
                 pos += "or ".len() + next_consumed;
@@ -890,11 +980,11 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
     if let Ok((rest, prop)) = alt((
         value(
             FilterProp::EnchantedBy,
-            tag::<_, _, nom_language::error::VerboseError<&str>>("enchanted "),
+            tag::<_, _, OracleError<'_>>("enchanted "),
         ),
         value(
             FilterProp::EquippedBy,
-            tag::<_, _, nom_language::error::VerboseError<&str>>("equipped "),
+            tag::<_, _, OracleError<'_>>("equipped "),
         ),
     ))
     .parse(&lower[pos..])
@@ -914,9 +1004,7 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
     // "enchanted " / "equipped " adjective handling above: only consume when a
     // type word follows, so bare "modified" alone doesn't hijack other
     // contexts.
-    if let Ok((rest, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("modified ").parse(&lower[pos..])
-    {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("modified ").parse(&lower[pos..]) {
         if starts_with_type_phrase_lead(rest) {
             properties.push(FilterProp::Modified);
             pos += lower[pos..].len() - rest.len();
@@ -929,9 +1017,7 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
     // `FilterProp::Historic` in types/ability.rs). Mirrors the "modified"
     // adjective handling above: only consume when a type word follows, so
     // bare "historic" alone doesn't hijack other contexts.
-    if let Ok((rest, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("historic ").parse(&lower[pos..])
-    {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("historic ").parse(&lower[pos..]) {
         if starts_with_type_phrase_lead(rest) {
             properties.push(FilterProp::Historic);
             pos += lower[pos..].len() - rest.len();
@@ -957,17 +1043,14 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
     let mut neg_type_filters: Vec<TypeFilter> = Vec::new();
     loop {
         let remaining = &lower[pos..];
-        let Ok((after_non, _)) =
-            tag::<_, _, nom_language::error::VerboseError<&str>>("non").parse(remaining)
-        else {
+        let Ok((after_non, _)) = tag::<_, _, OracleError<'_>>("non").parse(remaining) else {
             break;
         };
         // Optional hyphen: "non-" or "non"
-        let after_non =
-            match tag::<_, _, nom_language::error::VerboseError<&str>>("-").parse(after_non) {
-                Ok((r, _)) => r,
-                Err(_) => after_non,
-            };
+        let after_non = match tag::<_, _, OracleError<'_>>("-").parse(after_non) {
+            Ok((r, _)) => r,
+            Err(_) => after_non,
+        };
         let prefix_len = remaining.len() - after_non.len(); // "non" or "non-"
 
         // Find the negated word: ends at comma or whitespace
@@ -985,13 +1068,8 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
         pos += prefix_len + end;
 
         // Check for ", non" continuation (stacked negation)
-        if let Ok((rest, _)) =
-            tag::<_, _, nom_language::error::VerboseError<&str>>(", ").parse(&lower[pos..])
-        {
-            if tag::<_, _, nom_language::error::VerboseError<&str>>("non")
-                .parse(rest)
-                .is_ok()
-            {
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(", ").parse(&lower[pos..]) {
+            if tag::<_, _, OracleError<'_>>("non").parse(rest).is_ok() {
                 pos += ", ".len();
                 continue;
             }
@@ -1010,9 +1088,7 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
     // negation. Mirrors the structural reasoning that produced
     // `is_adjective_prefix_prop` — the predicate is leg-local but its position
     // in surface text varies relative to negation.
-    if let Ok((rest, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("historic ").parse(&lower[pos..])
-    {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("historic ").parse(&lower[pos..]) {
         if starts_with_type_phrase_lead(rest) && !properties.contains(&FilterProp::Historic) {
             properties.push(FilterProp::Historic);
             pos += lower[pos..].len() - rest.len();
@@ -1150,9 +1226,7 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
         static REDUNDANT_SUFFIXES: &[&str] = &["spells ", "spell ", "cards ", "card "];
         let mut consumed_suffix = false;
         for suffix in REDUNDANT_SUFFIXES {
-            if let Ok((after, _)) =
-                tag::<_, _, nom_language::error::VerboseError<&str>>(*suffix).parse(rest_trimmed)
-            {
+            if let Ok((after, _)) = tag::<_, _, OracleError<'_>>(*suffix).parse(rest_trimmed) {
                 let suffix_len = rest_trimmed.len() - after.len();
                 pos += ws_len + suffix_len;
                 consumed_suffix = true;
@@ -1192,13 +1266,11 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
         "and ",
     ];
     for separator in TYPE_SEPARATORS {
-        if let Ok((after_sep, _)) =
-            tag::<_, _, nom_language::error::VerboseError<&str>>(*separator).parse(rest_lower)
-        {
+        if let Ok((after_sep, _)) = tag::<_, _, OracleError<'_>>(*separator).parse(rest_lower) {
             let after_trimmed = after_sep.trim_start();
             if starts_with_type_word(after_trimmed) {
                 let sep_text = &text[pos + rest_offset + separator.len()..];
-                let (other_filter, final_rest) = parse_type_phrase(sep_text);
+                let (other_filter, final_rest) = parse_type_phrase_with_ctx(sep_text, ctx);
                 let left = typed(
                     card_type.unwrap_or(TypeFilter::Any),
                     subtype,
@@ -1215,7 +1287,8 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
 
     // CR 108.3 + CR 110.2: Ownership and control are distinct; "you own and control" satisfies both.
     let mut controller = None;
-    pos += parse_ownership_or_controller_suffix(&lower[pos..], &mut properties, &mut controller);
+    pos +=
+        parse_ownership_or_controller_suffix(&lower[pos..], &mut properties, &mut controller, ctx);
 
     // Check "with power N or less/greater" suffix
     if let Some((prop, consumed)) = parse_mana_value_suffix(&lower[pos..]) {
@@ -1248,8 +1321,12 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
             .iter()
             .any(|prop| matches!(prop, FilterProp::Owned { .. }))
     {
-        pos +=
-            parse_ownership_or_controller_suffix(&lower[pos..], &mut properties, &mut controller);
+        pos += parse_ownership_or_controller_suffix(
+            &lower[pos..],
+            &mut properties,
+            &mut controller,
+            ctx,
+        );
     }
 
     // CR 205.3 + CR 205.4b: "that isn't a <Subtype>" relative-clause negation.
@@ -1279,7 +1356,7 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
     // Check "of the chosen type" suffix (Cavern of Souls, Metallic Mimic, etc.)
     let remaining = lower[pos..].trim_start();
     let remaining_offset = lower[pos..].len() - remaining.len();
-    if tag::<_, _, nom_language::error::VerboseError<&str>>("of the chosen type")
+    if tag::<_, _, OracleError<'_>>("of the chosen type")
         .parse(remaining)
         .is_ok()
     {
@@ -1295,7 +1372,7 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
         "that are not of the chosen type",
         "not of the chosen type",
     ] {
-        if tag::<_, _, nom_language::error::VerboseError<&str>>(*suffix)
+        if tag::<_, _, OracleError<'_>>(*suffix)
             .parse(remaining)
             .is_ok()
         {
@@ -1319,18 +1396,15 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
     // here — consume it as a single non-space run via take_till1 so it doesn't
     // leak into the remainder.
     if let Ok((rest, _)) = (
-        tag::<_, _, nom_language::error::VerboseError<&str>>("exiled with this "),
-        nom::bytes::complete::take_till1::<_, _, nom_language::error::VerboseError<&str>>(
-            |c: char| c.is_whitespace(),
-        ),
+        tag::<_, _, OracleError<'_>>("exiled with this "),
+        nom::bytes::complete::take_till1::<_, _, OracleError<'_>>(|c: char| c.is_whitespace()),
     )
         .parse(remaining_exiled)
     {
         exiled_by_source = true;
         pos += exiled_offset + (remaining_exiled.len() - rest.len());
     } else if let Ok((rest, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("exiled with ~")
-            .parse(remaining_exiled)
+        tag::<_, _, OracleError<'_>>("exiled with ~").parse(remaining_exiled)
     {
         exiled_by_source = true;
         pos += exiled_offset + (remaining_exiled.len() - rest.len());
@@ -1341,7 +1415,7 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
     let remaining_choice = lower[pos..].trim_start();
     let choice_offset = lower[pos..].len() - remaining_choice.len();
     for suffix in &["of their choice", "of his or her choice"] {
-        if tag::<_, _, nom_language::error::VerboseError<&str>>(*suffix)
+        if tag::<_, _, OracleError<'_>>(*suffix)
             .parse(remaining_choice)
             .is_ok()
         {
@@ -1354,9 +1428,7 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
     // Handles "creature named X", "cards named X", "named X" patterns.
     let remaining_named = lower[pos..].trim_start();
     let named_offset = lower[pos..].len() - remaining_named.len();
-    if let Ok((name_text, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("named ").parse(remaining_named)
-    {
+    if let Ok((name_text, _)) = tag::<_, _, OracleError<'_>>("named ").parse(remaining_named) {
         // Name extends to end-of-clause markers: comma, period, "you control", "that", or end.
         let name_end = name_text.find([',', '.']).unwrap_or(name_text.len());
         let raw_name = name_text[..name_end].trim();
@@ -1426,6 +1498,13 @@ enum NegationResult {
 /// CR 205.4b: Classify a negated word by semantic layer.
 /// `parse_non_prefix` strips "non"/"non-" and lowercases, so `negated` is e.g. "black", "basic", "creature".
 fn classify_negation(negated: &str) -> NegationResult {
+    if tag::<_, _, OracleError<'_>>("token")
+        .parse(negated)
+        .is_ok_and(|(rest, _)| rest.is_empty())
+    {
+        return NegationResult::Prop(FilterProp::NonToken);
+    }
+
     match negated {
         // Color negation — parallel to HasColor
         "white" => NegationResult::Prop(FilterProp::NotColor {
@@ -1490,9 +1569,7 @@ pub(crate) fn starts_with_type_word(text: &str) -> bool {
     // parse_type_phrase handles color prefixes internally, but the article guard
     // must recognize them to strip "a "/"an " correctly.
     if let Ok((rest, _)) = nom_primitives::parse_color(text) {
-        if let Ok((after_space, _)) =
-            tag::<_, _, nom_language::error::VerboseError<&str>>(" ").parse(rest)
-        {
+        if let Ok((after_space, _)) = tag::<_, _, OracleError<'_>>(" ").parse(rest) {
             if starts_with_type_word(after_space) {
                 return true;
             }
@@ -1506,16 +1583,12 @@ pub(crate) fn starts_with_type_word(text: &str) -> bool {
         }
     }
     // CR 205.4b: Negated type prefix: "noncreature spell", "nonland permanent"
-    if let Ok((after_non, _)) = alt((
-        tag::<_, _, nom_language::error::VerboseError<&str>>("non-"),
-        tag("non"),
-    ))
-    .parse(text)
+    if let Ok((after_non, _)) = alt((tag::<_, _, OracleError<'_>>("non-"), tag("non"))).parse(text)
     {
         // Consume the negated word up to whitespace, then check for a core type after.
         if let Ok((after_space, _)) = (
-            take_till::<_, _, nom_language::error::VerboseError<&str>>(|c: char| c.is_whitespace()),
-            tag::<_, _, nom_language::error::VerboseError<&str>>(" "),
+            take_till::<_, _, OracleError<'_>>(|c: char| c.is_whitespace()),
+            tag::<_, _, OracleError<'_>>(" "),
         )
             .parse(after_non)
         {
@@ -1528,9 +1601,7 @@ pub(crate) fn starts_with_type_word(text: &str) -> bool {
     // phrase (e.g., "modified creatures you control"). Consume the adjective
     // and verify a type word follows so the comma/and-list recursion can
     // continue across the "modified" leg.
-    if let Ok((after_modified, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("modified ").parse(text)
-    {
+    if let Ok((after_modified, _)) = tag::<_, _, OracleError<'_>>("modified ").parse(text) {
         if starts_with_type_phrase_lead(after_modified) {
             return true;
         }
@@ -1539,9 +1610,7 @@ pub(crate) fn starts_with_type_word(text: &str) -> bool {
     // (e.g., "historic permanents you control"). Consume the adjective and
     // verify a type word follows so the comma/and-list recursion can continue
     // across the "historic" leg.
-    if let Ok((after_historic, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("historic ").parse(text)
-    {
+    if let Ok((after_historic, _)) = tag::<_, _, OracleError<'_>>("historic ").parse(text) {
         if starts_with_type_phrase_lead(after_historic) {
             return true;
         }
@@ -1554,6 +1623,8 @@ fn starts_with_type_phrase_lead(text: &str) -> bool {
     starts_with_type_word(text)
         || nom_target::parse_supertype_prefix(text).is_ok()
         || parse_color_prefix(text).is_some()
+        || parse_color_quality_prefix(text).is_some()
+        || parse_combat_status_prefix(text).is_some()
 }
 
 fn target_filter_has_meaningful_content(filter: &TargetFilter) -> bool {
@@ -1694,6 +1765,7 @@ fn is_adjective_prefix_prop(prop: &FilterProp) -> bool {
             | FilterProp::NotSupertype { .. }
             // Token qualifier ("creature tokens").
             | FilterProp::Token
+            | FilterProp::NonToken
     )
 }
 
@@ -1803,7 +1875,7 @@ fn parse_core_type(text: &str) -> (Option<TypeFilter>, Option<String>, usize) {
 /// Delegates to `nom_target::parse_controller_suffix` for the common patterns
 /// ("you control", "an opponent controls", "your opponents control"), then
 /// handles additional patterns not in the shared combinator.
-fn parse_controller_suffix(text: &str) -> Option<(ControllerRef, usize)> {
+fn parse_controller_suffix(text: &str, ctx: &ParseContext) -> Option<(ControllerRef, usize)> {
     let trimmed = text.trim_start();
     let leading_ws = text.len() - trimmed.len();
 
@@ -1816,27 +1888,40 @@ fn parse_controller_suffix(text: &str) -> Option<(ControllerRef, usize)> {
     // Additional patterns via nom tag().
     // Note: "target player controls" is handled by `parse_zone_controller` above
     // (single-authority for `ControllerRef::TargetPlayer`).
-    if let Ok((rest, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("that player controls").parse(trimmed)
-    {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that player controls").parse(trimmed) {
         // CR 109.4 + CR 115.1: "that player controls" is a relative reference
         // back to a player introduced earlier in the ability (e.g. the attacked
         // player in a "whenever you attack a player, ... that player controls"
-        // trigger). When the surrounding parser pushed a relative-player scope
-        // (see `oracle_target_scope`), emit `ControllerRef::TargetPlayer` so the
-        // runtime auto-surfaces a companion `TargetFilter::Player` slot via
-        // `effect_references_target_player` (game/ability_utils.rs). Without a
-        // scope, fall back to the legacy `ControllerRef::You` behaviour relied
-        // on by per-player iteration contexts (`resolve_quantity_scoped`).
-        let ctrl = oracle_target_scope::current().unwrap_or(ControllerRef::You);
+        // trigger). When the surrounding parser set `ctx.relative_player_scope`,
+        // emit `ControllerRef::TargetPlayer` so the runtime auto-surfaces a
+        // companion `TargetFilter::Player` slot via `effect_references_target_player`
+        // (game/ability_utils.rs). Without a scope, fall back to the legacy
+        // `ControllerRef::You` behaviour relied on by per-player iteration
+        // contexts (`resolve_quantity_scoped`).
+        let ctrl = ctx
+            .relative_player_scope
+            .clone()
+            .unwrap_or(ControllerRef::You);
         return Some((ctrl, leading_ws + trimmed.len() - rest.len()));
     }
-    if let Ok((rest, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("they control").parse(trimmed)
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("controlled by that player").parse(trimmed)
     {
-        // CR 608.2d: "they control" → ControllerRef::You, resolved against
-        // accepting_player during "any opponent may" resolution.
-        return Some((ControllerRef::You, leading_ws + trimmed.len() - rest.len()));
+        let ctrl = ctx
+            .relative_player_scope
+            .clone()
+            .unwrap_or(ControllerRef::You);
+        return Some((ctrl, leading_ws + trimmed.len() - rest.len()));
+    }
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("they control").parse(trimmed) {
+        // "They control" is an anaphoric player reference when the surrounding
+        // parser supplies a relative player scope; otherwise keep the legacy
+        // ControllerRef::You fallback used by "any opponent may" accepting-
+        // player resolution.
+        let ctrl = ctx
+            .relative_player_scope
+            .clone()
+            .unwrap_or(ControllerRef::You);
+        return Some((ctrl, leading_ws + trimmed.len() - rest.len()));
     }
 
     None
@@ -1847,9 +1932,7 @@ fn parse_token_suffix(text: &str) -> Option<usize> {
 
     // Try "tokens" before "token" (longest match first), with word boundary.
     for word in &["tokens", "token"] {
-        if let Ok((rest, _)) =
-            tag::<_, _, nom_language::error::VerboseError<&str>>(*word).parse(trimmed)
-        {
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(*word).parse(trimmed) {
             match rest.chars().next() {
                 None | Some(' ' | ',' | '.') => return Some(text.len() - rest.len()),
                 _ => {}
@@ -1868,9 +1951,7 @@ fn parse_token_suffix(text: &str) -> Option<usize> {
 fn parse_color_prefix(text: &str) -> Option<(FilterProp, usize)> {
     let (rest, color) = nom_primitives::parse_color(text).ok()?;
     // Must be followed by a space (color adjective prefix, not standalone color word).
-    let (rest, _) = tag::<_, _, nom_language::error::VerboseError<&str>>(" ")
-        .parse(rest)
-        .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" ").parse(rest).ok()?;
     let consumed = text.len() - rest.len();
     Some((FilterProp::HasColor { color }, consumed))
 }
@@ -1881,7 +1962,7 @@ fn parse_color_quality_prefix(text: &str) -> Option<(FilterProp, usize)> {
     let (rest, prop) = alt((
         value(
             FilterProp::Colorless,
-            tag::<_, _, nom_language::error::VerboseError<&str>>("colorless "),
+            tag::<_, _, OracleError<'_>>("colorless "),
         ),
         value(FilterProp::Multicolored, tag("multicolored ")),
     ))
@@ -1910,18 +1991,14 @@ pub(crate) fn parse_combat_status_prefix(text: &str) -> Option<(FilterProp, usiz
                 | FilterProp::FaceDown
         ) {
             // Must be followed by space (prefix, not standalone)
-            if let Ok((after_space, _)) =
-                tag::<_, _, nom_language::error::VerboseError<&str>>(" ").parse(rest)
-            {
+            if let Ok((after_space, _)) = tag::<_, _, OracleError<'_>>(" ").parse(rest) {
                 return Some((prop, text.len() - after_space.len()));
             }
         }
     }
 
     // Handle "face-down " (hyphenated variant not in the nom combinator).
-    if let Ok((rest, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("face-down ").parse(text)
-    {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("face-down ").parse(text) {
         return Some((FilterProp::FaceDown, text.len() - rest.len()));
     }
 
@@ -1942,17 +2019,12 @@ fn parse_power_suffix(text: &str) -> Option<(FilterProp, usize)> {
     let trimmed = text.trim_start();
 
     // CR 509.1b: "with greater power" — relative to the source object.
-    if let Ok((after, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("with greater power").parse(trimmed)
-    {
+    if let Ok((after, _)) = tag::<_, _, OracleError<'_>>("with greater power").parse(trimmed) {
         return Some((FilterProp::PowerGTSource, text.len() - after.len()));
     }
 
     // Longest-match first: disjunctive "with power or toughness N or {less,greater}".
-    if let Ok((rest, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("with power or toughness ")
-            .parse(trimmed)
-    {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("with power or toughness ").parse(trimmed) {
         if let Some((comparator, value, after)) = parse_pt_quantity_comparison_tail(rest) {
             let props = if comparator == Comparator::LE {
                 vec![
@@ -1974,9 +2046,7 @@ fn parse_power_suffix(text: &str) -> Option<(FilterProp, usize)> {
 
         let (rest, value) = nom_quantity::parse_quantity_expr_number(rest).ok()?;
         let after_num = rest.trim_start();
-        if let Ok((after, _)) =
-            tag::<_, _, nom_language::error::VerboseError<&str>>("or less").parse(after_num)
-        {
+        if let Ok((after, _)) = tag::<_, _, OracleError<'_>>("or less").parse(after_num) {
             let props = vec![
                 FilterProp::PowerLE {
                     value: value.clone(),
@@ -1985,9 +2055,7 @@ fn parse_power_suffix(text: &str) -> Option<(FilterProp, usize)> {
             ];
             return Some((FilterProp::AnyOf { props }, text.len() - after.len()));
         }
-        if let Ok((after, _)) =
-            tag::<_, _, nom_language::error::VerboseError<&str>>("or greater").parse(after_num)
-        {
+        if let Ok((after, _)) = tag::<_, _, OracleError<'_>>("or greater").parse(after_num) {
             let props = vec![
                 FilterProp::PowerGE {
                     value: value.clone(),
@@ -2000,9 +2068,7 @@ fn parse_power_suffix(text: &str) -> Option<(FilterProp, usize)> {
     }
 
     // "with toughness N or less/greater" — CR 208.1, mirrors the power form.
-    if let Ok((rest, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("with toughness ").parse(trimmed)
-    {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("with toughness ").parse(trimmed) {
         if let Some((comparator, value, after)) = parse_pt_quantity_comparison_tail(rest) {
             let prop = if comparator == Comparator::LE {
                 FilterProp::ToughnessLE { value }
@@ -2014,21 +2080,18 @@ fn parse_power_suffix(text: &str) -> Option<(FilterProp, usize)> {
 
         let (rest, value) = nom_quantity::parse_quantity_expr_number(rest).ok()?;
         let after_num = rest.trim_start();
-        let (prop, after) = if let Ok((a, _)) =
-            tag::<_, _, nom_language::error::VerboseError<&str>>("or less").parse(after_num)
-        {
-            (FilterProp::ToughnessLE { value }, a)
-        } else if let Ok((a, _)) =
-            tag::<_, _, nom_language::error::VerboseError<&str>>("or greater").parse(after_num)
-        {
-            (FilterProp::ToughnessGE { value }, a)
-        } else {
-            return None;
-        };
+        let (prop, after) =
+            if let Ok((a, _)) = tag::<_, _, OracleError<'_>>("or less").parse(after_num) {
+                (FilterProp::ToughnessLE { value }, a)
+            } else if let Ok((a, _)) = tag::<_, _, OracleError<'_>>("or greater").parse(after_num) {
+                (FilterProp::ToughnessGE { value }, a)
+            } else {
+                return None;
+            };
         return Some((prop, text.len() - after.len()));
     }
 
-    let (rest, _) = tag::<_, _, nom_language::error::VerboseError<&str>>("with power ")
+    let (rest, _) = tag::<_, _, OracleError<'_>>("with power ")
         .parse(trimmed)
         .ok()?;
     if let Some((comparator, value, after)) = parse_pt_quantity_comparison_tail(rest) {
@@ -2045,13 +2108,10 @@ fn parse_power_suffix(text: &str) -> Option<(FilterProp, usize)> {
     // resolving ability's `chosen_x` via `FilterContext::from_ability`.
     let (rest, value) = nom_quantity::parse_quantity_expr_number(rest).ok()?;
     let after_num = rest.trim_start();
-    let (prop, after) = if let Ok((a, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("or less").parse(after_num)
+    let (prop, after) = if let Ok((a, _)) = tag::<_, _, OracleError<'_>>("or less").parse(after_num)
     {
         (FilterProp::PowerLE { value }, a)
-    } else if let Ok((a, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("or greater").parse(after_num)
-    {
+    } else if let Ok((a, _)) = tag::<_, _, OracleError<'_>>("or greater").parse(after_num) {
         (FilterProp::PowerGE { value }, a)
     } else {
         return None;
@@ -2060,7 +2120,7 @@ fn parse_power_suffix(text: &str) -> Option<(FilterProp, usize)> {
 }
 
 fn parse_pt_quantity_comparison_tail(input: &str) -> Option<(Comparator, QuantityExpr, &str)> {
-    type Vbe<'a> = nom_language::error::VerboseError<&'a str>;
+    type Vbe<'a> = OracleError<'a>;
     let input = input.trim_start();
     let (after_cmp, comparator) = alt((
         value(Comparator::LT, tag::<_, _, Vbe>("less than")),
@@ -2113,9 +2173,9 @@ pub(crate) fn parse_mana_value_suffix(text: &str) -> Option<(FilterProp, usize)>
     }
 
     let (rest, _) = alt((
-        tag::<_, _, nom_language::error::VerboseError<&str>>("with mana value "),
-        tag::<_, _, nom_language::error::VerboseError<&str>>("that have mana value "),
-        tag::<_, _, nom_language::error::VerboseError<&str>>("that each have mana value "),
+        tag::<_, _, OracleError<'_>>("with mana value "),
+        tag::<_, _, OracleError<'_>>("that have mana value "),
+        tag::<_, _, OracleError<'_>>("that each have mana value "),
     ))
     .parse(trimmed)
     .ok()?;
@@ -2125,7 +2185,7 @@ pub(crate) fn parse_mana_value_suffix(text: &str) -> Option<(FilterProp, usize)>
     // "that <type>" (e.g. "that creature", "that spell") → `EventContextSourceManaValue`
     // (mana value of the triggering source object).
     // Staged checks: first detect "less than" / "greater than", then check for "or equal to".
-    type Vbe<'a> = nom_language::error::VerboseError<&'a str>;
+    type Vbe<'a> = OracleError<'a>;
     let try_dynamic = |rest: &str, is_le: bool| -> Option<(FilterProp, usize)> {
         let kw_tag = if is_le { "less than" } else { "greater than" };
         let (a, _) = tag::<_, _, Vbe>(kw_tag).parse(rest).ok()?;
@@ -2210,13 +2270,8 @@ pub(crate) fn parse_mana_value_suffix(text: &str) -> Option<(FilterProp, usize)>
     // ("1 plus the sacrificed creature's mana value"), event-context refs
     // ("that damage"), and game-state counts ("the number of lands you
     // control") share the same quantity grammar as CDA/static parsing.
-    if let Ok((after_equal_to, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("equal to ").parse(rest)
-    {
-        let (after, phrase) =
-            take_till::<_, _, nom_language::error::VerboseError<&str>>(|c: char| {
-                c == ',' || c == '.'
-            })
+    if let Ok((after_equal_to, _)) = tag::<_, _, OracleError<'_>>("equal to ").parse(rest) {
+        let (after, phrase) = take_till::<_, _, OracleError<'_>>(|c: char| c == ',' || c == '.')
             .parse(after_equal_to)
             .ok()?;
         let phrase = phrase.trim();
@@ -2242,41 +2297,55 @@ pub(crate) fn parse_mana_value_suffix(text: &str) -> Option<(FilterProp, usize)>
     let (after_num_raw, value) = nom_quantity::parse_quantity_expr_number(rest).ok()?;
     let after_num = after_num_raw.trim_start();
 
-    let (prop, after) = if let Ok((a, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("or greater").parse(after_num)
-    {
-        (
-            FilterProp::Cmc {
-                comparator: Comparator::GE,
-                value,
-            },
-            a,
-        )
-    } else if let Ok((a, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("or less").parse(after_num)
-    {
-        (
-            FilterProp::Cmc {
-                comparator: Comparator::LE,
-                value,
-            },
-            a,
-        )
-    } else {
-        // CR 202.3: Exact mana value match — "with mana value N" (no "or less"/"or greater").
-        (
-            FilterProp::Cmc {
-                comparator: Comparator::EQ,
-                value,
-            },
-            after_num,
-        )
-    };
+    let (prop, after) =
+        if let Ok((a, _)) = tag::<_, _, OracleError<'_>>("or greater").parse(after_num) {
+            (
+                FilterProp::Cmc {
+                    comparator: Comparator::GE,
+                    value,
+                },
+                a,
+            )
+        } else if let Ok((a, _)) = tag::<_, _, OracleError<'_>>("or less").parse(after_num) {
+            (
+                FilterProp::Cmc {
+                    comparator: Comparator::LE,
+                    value,
+                },
+                a,
+            )
+        } else if let Ok((a, _)) = tag::<_, _, OracleError<'_>>("or ").parse(after_num) {
+            let (after, second_value) = nom_quantity::parse_quantity_expr_number(a).ok()?;
+            (
+                FilterProp::AnyOf {
+                    props: vec![
+                        FilterProp::Cmc {
+                            comparator: Comparator::EQ,
+                            value,
+                        },
+                        FilterProp::Cmc {
+                            comparator: Comparator::EQ,
+                            value: second_value,
+                        },
+                    ],
+                },
+                after,
+            )
+        } else {
+            // CR 202.3: Exact mana value match — "with mana value N" (no "or less"/"or greater").
+            (
+                FilterProp::Cmc {
+                    comparator: Comparator::EQ,
+                    value,
+                },
+                after_num,
+            )
+        };
     Some((prop, text.len() - after.len()))
 }
 
 fn parse_relative_mana_value_suffix(text: &str) -> Option<(FilterProp, &str)> {
-    type Vbe<'a> = nom_language::error::VerboseError<&'a str>;
+    type Vbe<'a> = OracleError<'a>;
     let (rest, comparator) = nom::sequence::preceded(
         tag::<_, _, Vbe>("with "),
         alt((
@@ -2309,15 +2378,61 @@ fn parse_relative_mana_value_suffix(text: &str) -> Option<(FilterProp, &str)> {
 }
 
 fn parse_mana_value_reference_expr(text: &str) -> Option<(QuantityExpr, &str)> {
+    if let Ok((after, expr)) = parse_mana_value_of_reference_expr(text) {
+        return Some((expr, after));
+    }
+
     parse_mana_value_reference_qty(text)
-        .map(|(after, qty)| (QuantityExpr::Ref { qty }, after))
+        .map(|(after, qty)| {
+            (
+                apply_mana_value_reference_offset(QuantityExpr::Ref { qty }, after),
+                after,
+            )
+        })
         .ok()
+        .map(|(expr, after)| (expr, consume_mana_value_reference_offset(after)))
+}
+
+fn parse_mana_value_of_reference_expr(
+    input: &str,
+) -> super::oracle_nom::error::OracleResult<'_, QuantityExpr> {
+    let (rest, _) = tag("the mana value of ").parse(input)?;
+    let (rest, qty) = parse_mana_value_reference_qty(rest)?;
+    let expr = apply_mana_value_reference_offset(QuantityExpr::Ref { qty }, rest);
+    Ok((consume_mana_value_reference_offset(rest), expr))
+}
+
+fn apply_mana_value_reference_offset(expr: QuantityExpr, rest: &str) -> QuantityExpr {
+    if parse_mana_value_reference_plus_one(rest).is_ok() {
+        QuantityExpr::Offset {
+            inner: Box::new(expr),
+            offset: 1,
+        }
+    } else {
+        expr
+    }
+}
+
+fn consume_mana_value_reference_offset(rest: &str) -> &str {
+    parse_mana_value_reference_plus_one(rest)
+        .map(|(after, _)| after)
+        .unwrap_or(rest)
+}
+
+fn parse_mana_value_reference_plus_one(
+    input: &str,
+) -> super::oracle_nom::error::OracleResult<'_, ()> {
+    value(
+        (),
+        nom::sequence::pair(tag(" plus "), alt((tag("one"), tag("1")))),
+    )
+    .parse(input)
 }
 
 fn parse_mana_value_reference_qty(
     input: &str,
 ) -> super::oracle_nom::error::OracleResult<'_, QuantityRef> {
-    type Vbe<'a> = nom_language::error::VerboseError<&'a str>;
+    type Vbe<'a> = OracleError<'a>;
     alt((
         value(
             QuantityRef::ObjectManaValue {
@@ -2328,10 +2443,18 @@ fn parse_mana_value_reference_qty(
                 tag("that card's mana value"),
                 tag("that permanent's mana value"),
                 tag("that creature's mana value"),
+                tag("the chosen spell's mana value"),
+                tag("the chosen card's mana value"),
+                tag("the chosen permanent's mana value"),
+                tag("the chosen creature's mana value"),
                 tag("that spell"),
                 tag("that card"),
                 tag("that permanent"),
                 tag("that creature"),
+                tag("the chosen spell"),
+                tag("the chosen card"),
+                tag("the chosen permanent"),
+                tag("the chosen creature"),
             )),
         ),
         value(
@@ -2383,7 +2506,12 @@ fn parse_cost_paid_mana_value_reference(
         tag("land"),
     ))
     .parse(rest)?;
-    Ok((rest, QuantityRef::CostPaidObjectManaValue))
+    Ok((
+        rest,
+        QuantityRef::ObjectManaValue {
+            scope: ObjectScope::CostPaidObject,
+        },
+    ))
 }
 
 /// Parse "with [count] [counter] counter(s) on it/them" using pure nom combinators.
@@ -2404,7 +2532,7 @@ pub(crate) fn parse_counter_suffix(text: &str) -> Option<(FilterProp, usize)> {
 
     let trimmed = text.trim_start();
     let leading_ws = text.len() - trimmed.len();
-    let (rest, _) = tag_e::<_, _, nom_language::error::VerboseError<&str>>("with ")
+    let (rest, _) = tag_e::<_, _, OracleError<'_>>("with ")
         .parse(trimmed)
         .ok()?;
 
@@ -2414,9 +2542,7 @@ pub(crate) fn parse_counter_suffix(text: &str) -> Option<(FilterProp, usize)> {
     // matches any counter-bearing creature regardless of type. Must precede the
     // typed-counter branch so the empty-counter-type guard there doesn't fire.
     for prefix in ["a counter on it", "a counter on them", "any counter on it"] {
-        if let Ok((after, _)) =
-            tag_e::<_, _, nom_language::error::VerboseError<&str>>(prefix).parse(rest)
-        {
+        if let Ok((after, _)) = tag_e::<_, _, OracleError<'_>>(prefix).parse(rest) {
             let consumed = leading_ws + "with ".len() + (rest.len() - after.len());
             return Some((FilterProp::HasAnyCounter, consumed));
         }
@@ -2433,8 +2559,7 @@ pub(crate) fn parse_counter_suffix(text: &str) -> Option<(FilterProp, usize)> {
         ),
         |input| {
             let (input, expr) = nom_quantity::parse_quantity_expr_number(input)?;
-            let (input, _) =
-                tag_e::<_, _, nom_language::error::VerboseError<&str>>(" ").parse(input)?;
+            let (input, _) = tag_e::<_, _, OracleError<'_>>(" ").parse(input)?;
             Ok((input, expr))
         },
     ));
@@ -2450,8 +2575,7 @@ pub(crate) fn parse_counter_suffix(text: &str) -> Option<(FilterProp, usize)> {
         " counter on them",
         " counter on it",
     ] {
-        let Ok((after, counter_text)) =
-            take_until::<_, _, nom_language::error::VerboseError<&str>>(suffix).parse(rest)
+        let Ok((after, counter_text)) = take_until::<_, _, OracleError<'_>>(suffix).parse(rest)
         else {
             continue;
         };
@@ -2475,9 +2599,7 @@ pub(crate) fn parse_counter_suffix(text: &str) -> Option<(FilterProp, usize)> {
 fn parse_keyword_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> {
     let trimmed = text.trim_start();
     let leading_ws = text.len() - trimmed.len();
-    let (after_with, _) = tag::<_, _, nom_language::error::VerboseError<&str>>("with ")
-        .parse(trimmed)
-        .ok()?;
+    let (after_with, _) = tag::<_, _, OracleError<'_>>("with ").parse(trimmed).ok()?;
     let mut remaining = after_with;
     let mut consumed = leading_ws + "with ".len();
     let mut properties = Vec::new();
@@ -2497,9 +2619,7 @@ fn parse_keyword_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> {
         // Try keyword list separators in longest-match-first order.
         let mut found_sep = false;
         for sep in &[", and ", ", or ", " and ", " or ", ", "] {
-            if let Ok((rest, _)) =
-                tag::<_, _, nom_language::error::VerboseError<&str>>(*sep).parse(remaining)
-            {
+            if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(*sep).parse(remaining) {
                 consumed += sep.len();
                 remaining = rest;
                 found_sep = true;
@@ -2524,7 +2644,7 @@ fn parse_keyword_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> {
 fn parse_without_keyword_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> {
     let trimmed = text.trim_start();
     let leading_ws = text.len() - trimmed.len();
-    let (after_without, _) = tag::<_, _, nom_language::error::VerboseError<&str>>("without ")
+    let (after_without, _) = tag::<_, _, OracleError<'_>>("without ")
         .parse(trimmed)
         .ok()?;
     let mut remaining = after_without;
@@ -2546,9 +2666,7 @@ fn parse_without_keyword_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> 
         // Try keyword list separators in longest-match-first order.
         let mut found_sep = false;
         for sep in &[", and ", ", or ", " and ", " or ", ", "] {
-            if let Ok((rest, _)) =
-                tag::<_, _, nom_language::error::VerboseError<&str>>(*sep).parse(remaining)
-            {
+            if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(*sep).parse(remaining) {
                 consumed += sep.len();
                 remaining = rest;
                 found_sep = true;
@@ -2571,10 +2689,11 @@ fn parse_ownership_or_controller_suffix(
     text: &str,
     properties: &mut Vec<FilterProp>,
     controller: &mut Option<ControllerRef>,
+    ctx: &ParseContext,
 ) -> usize {
     let own_ctrl = text.trim_start();
     let own_ctrl_offset = text.len() - own_ctrl.len();
-    if tag::<_, _, nom_language::error::VerboseError<&str>>("you own and control")
+    if tag::<_, _, OracleError<'_>>("you own and control")
         .parse(own_ctrl)
         .is_ok()
     {
@@ -2584,10 +2703,10 @@ fn parse_ownership_or_controller_suffix(
         });
         return own_ctrl_offset + "you own and control".len();
     }
-    if tag::<_, _, nom_language::error::VerboseError<&str>>("you own")
+    if tag::<_, _, OracleError<'_>>("you own")
         .parse(own_ctrl)
         .is_ok()
-        && tag::<_, _, nom_language::error::VerboseError<&str>>("you own and")
+        && tag::<_, _, OracleError<'_>>("you own and")
             .parse(own_ctrl)
             .is_err()
     {
@@ -2598,10 +2717,7 @@ fn parse_ownership_or_controller_suffix(
     }
     // CR 108.3: "an opponent owns" — the card belongs to an opponent, used by Eldrazi Processors.
     for phrase in ["an opponent owns", "opponents own"] {
-        if tag::<_, _, nom_language::error::VerboseError<&str>>(phrase)
-            .parse(own_ctrl)
-            .is_ok()
-        {
+        if tag::<_, _, OracleError<'_>>(phrase).parse(own_ctrl).is_ok() {
             properties.push(FilterProp::Owned {
                 controller: ControllerRef::Opponent,
             });
@@ -2610,7 +2726,7 @@ fn parse_ownership_or_controller_suffix(
     }
 
     let (ctrl, ctrl_len) =
-        parse_controller_suffix(text).map_or((None, 0), |(ctrl, len)| (Some(ctrl), len));
+        parse_controller_suffix(text, ctx).map_or((None, 0), |(ctrl, len)| (Some(ctrl), len));
     if ctrl.is_some() {
         *controller = ctrl;
     }
@@ -2649,7 +2765,7 @@ fn parse_leading_keyword_match(text: &str) -> Option<(KeywordMatch, usize)> {
 fn parse_keyword_match(text: &str) -> Option<KeywordMatch> {
     if let Ok((rest, kind)) = value(
         KeywordKind::Disturb,
-        tag::<_, _, nom_language::error::VerboseError<&str>>("disturb"),
+        tag::<_, _, OracleError<'_>>("disturb"),
     )
     .parse(text)
     {
@@ -2688,9 +2804,7 @@ fn parse_keyword_match(text: &str) -> Option<KeywordMatch> {
     Some(KeywordMatch::Concrete(keyword))
 }
 
-fn parse_shared_quality(
-    input: &str,
-) -> nom::IResult<&str, SharedQuality, nom_language::error::VerboseError<&str>> {
+fn parse_shared_quality(input: &str) -> nom::IResult<&str, SharedQuality, OracleError<'_>> {
     alt((
         value(SharedQuality::Name, tag("names")),
         value(SharedQuality::Name, tag("name")),
@@ -2708,10 +2822,14 @@ fn parse_shared_quality(
 
 fn parse_shared_quality_reference(
     input: &str,
-) -> nom::IResult<&str, TargetFilter, nom_language::error::VerboseError<&str>> {
+) -> nom::IResult<&str, TargetFilter, OracleError<'_>> {
+    if let Ok((rest, filter)) = parse_cost_paid_object_reference(input) {
+        return Ok((rest, filter));
+    }
+
     if let Ok((rest, filter)) = value(
         TargetFilter::TriggeringSource,
-        tag::<_, _, nom_language::error::VerboseError<&str>>("one of the discarded cards"),
+        tag::<_, _, OracleError<'_>>("one of the discarded cards"),
     )
     .parse(input)
     {
@@ -2720,7 +2838,7 @@ fn parse_shared_quality_reference(
 
     if let Ok((rest, filter)) = value(
         TargetFilter::ParentTarget,
-        tag::<_, _, nom_language::error::VerboseError<&str>>("the discarded card"),
+        tag::<_, _, OracleError<'_>>("the discarded card"),
     )
     .parse(input)
     {
@@ -2729,21 +2847,37 @@ fn parse_shared_quality_reference(
 
     let (filter, rest) = parse_target(input);
     if matches!(filter, TargetFilter::Any) {
-        Err(nom::Err::Error(nom_language::error::VerboseError {
-            errors: vec![(
-                input,
-                nom_language::error::VerboseErrorKind::Context("shared quality reference"),
-            )],
-        }))
+        Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )))
     } else {
         Ok((rest, filter))
     }
 }
 
+fn parse_cost_paid_object_reference(
+    input: &str,
+) -> nom::IResult<&str, TargetFilter, OracleError<'_>> {
+    let (rest, _) = opt(tag("the ")).parse(input)?;
+    let (rest, _) = tag("sacrificed ").parse(rest)?;
+    let (rest, _) = alt((
+        tag("creature"),
+        tag("card"),
+        tag("permanent"),
+        tag("artifact"),
+        tag("enchantment"),
+        tag("planeswalker"),
+        tag("land"),
+    ))
+    .parse(rest)?;
+    Ok((rest, TargetFilter::CostPaidObject))
+}
+
 pub(crate) fn parse_shared_quality_clause(
     input: &str,
-) -> nom::IResult<&str, FilterProp, nom_language::error::VerboseError<&str>> {
-    type Vbe<'a> = nom_language::error::VerboseError<&'a str>;
+) -> nom::IResult<&str, FilterProp, OracleError<'_>> {
+    type Vbe<'a> = OracleError<'a>;
     let (rest, _) = tag::<_, _, Vbe>("that ").parse(input)?;
     let (rest, relation) = alt((
         value(
@@ -2785,6 +2919,38 @@ pub(crate) fn parse_shared_quality_clause(
     ))
 }
 
+pub(crate) fn parse_attachment_kind_disjunction(
+    input: &str,
+) -> nom::IResult<&str, Vec<AttachmentKind>, OracleError<'_>> {
+    // Longest-match-first: handle compound forms before single-kind forms.
+    alt((
+        value(
+            vec![AttachmentKind::Aura, AttachmentKind::Equipment],
+            tag("enchanted or equipped"),
+        ),
+        value(
+            vec![AttachmentKind::Equipment, AttachmentKind::Aura],
+            tag("equipped or enchanted"),
+        ),
+        value(vec![AttachmentKind::Aura], tag("enchanted")),
+        value(vec![AttachmentKind::Equipment], tag("equipped")),
+    ))
+    .parse(input)
+}
+
+pub(crate) fn attachment_kinds_filter_prop(
+    kinds: Vec<AttachmentKind>,
+    controller: Option<ControllerRef>,
+) -> FilterProp {
+    match kinds.as_slice() {
+        [kind] => FilterProp::HasAttachment {
+            kind: kind.clone(),
+            controller,
+        },
+        _ => FilterProp::HasAnyAttachmentOf { kinds, controller },
+    }
+}
+
 /// Parse "that [verb phrase]" relative clause suffix on target noun phrases.
 ///
 /// Handles multiple pattern classes:
@@ -2793,46 +2959,28 @@ pub(crate) fn parse_shared_quality_clause(
 /// - CR 400.7: "that entered (the battlefield) this turn" → `EnteredThisTurn`
 /// - CR 508.1a: "that attacked this turn" → `AttackedThisTurn`
 /// - CR 509.1a: "that blocked this turn" → `BlockedThisTurn`
+/// - CR 301.5 + CR 303.4: "that are enchanted or equipped" → attachment predicate
 ///
 /// Returns `(properties, bytes_consumed)` or `None` if the text doesn't match.
-fn parse_that_clause_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> {
+pub(crate) fn parse_that_clause_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> {
     let trimmed = text.trim_start();
     let leading_ws = text.len() - trimmed.len();
-
-    if let Some(parsed) = parse_color_relative_clause_suffix(trimmed, leading_ws) {
-        return Some(parsed);
-    }
 
     // CR 303.4 + CR 301.5: "that's enchanted or equipped" / "that's enchanted" /
     // "that's equipped" — relative clause attaching an attachment-presence
     // predicate to the enclosing type phrase. Covers the compound-subject grant
     // class (Reyav, Master Smith; Dogmeat, Ever Loyal). Composes with disjunction
     // via `FilterProp::HasAnyAttachmentOf` (kinds.len() == 2 for the "or" form).
-    if let Ok((after_contraction, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("that's ").parse(trimmed)
-    {
+    let intro = alt((
+        tag::<_, _, OracleError<'_>>("that's "),
+        tag("that is "),
+        tag("that are "),
+    ))
+    .parse(trimmed);
+    if let Ok((after_intro, _)) = intro {
         // Note: `parse_that_isnt_subtype_suffix` runs first in `parse_type_phrase`
         // and consumes "that's not …", so this branch only sees positive forms.
-        fn parse_attachment_disjunction(
-            input: &str,
-        ) -> nom::IResult<&str, Vec<AttachmentKind>, nom_language::error::VerboseError<&str>>
-        {
-            // Longest-match-first: handle compound forms before single-kind forms.
-            alt((
-                value(
-                    vec![AttachmentKind::Aura, AttachmentKind::Equipment],
-                    tag("enchanted or equipped"),
-                ),
-                value(
-                    vec![AttachmentKind::Equipment, AttachmentKind::Aura],
-                    tag("equipped or enchanted"),
-                ),
-                value(vec![AttachmentKind::Aura], tag("enchanted")),
-                value(vec![AttachmentKind::Equipment], tag("equipped")),
-            ))
-            .parse(input)
-        }
-        if let Ok((rest, kinds)) = parse_attachment_disjunction(after_contraction) {
+        if let Ok((rest, kinds)) = parse_attachment_kind_disjunction(after_intro) {
             // Word-boundary check: the next char must terminate the adjective so
             // we don't false-match e.g. "that's enchanted by something else".
             // Accept end-of-string or any non-alphanumeric terminator.
@@ -2841,21 +2989,15 @@ fn parse_that_clause_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> {
                 .next()
                 .is_none_or(|c| !c.is_alphanumeric() && c != '_');
             if next_char_is_boundary {
-                let consumed = trimmed.len() - rest.len();
-                let prop = if kinds.len() == 1 {
-                    FilterProp::HasAttachment {
-                        kind: kinds.into_iter().next().expect("len == 1"),
-                        controller: None,
-                    }
-                } else {
-                    FilterProp::HasAnyAttachmentOf {
-                        kinds,
-                        controller: None,
-                    }
-                };
-                return Some((vec![prop], leading_ws + consumed));
+                let consumed = leading_ws + trimmed.len() - rest.len();
+                let prop = attachment_kinds_filter_prop(kinds, None);
+                return Some((vec![prop], consumed));
             }
         }
+    }
+
+    if let Some(parsed) = parse_color_relative_clause_suffix(trimmed, leading_ws) {
+        return Some(parsed);
     }
 
     if let Ok((rest, prop)) = parse_shared_quality_clause(trimmed) {
@@ -2863,15 +3005,11 @@ fn parse_that_clause_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> {
         return Some((vec![prop], leading_ws + consumed));
     }
 
-    let (after_that, _) = tag::<_, _, nom_language::error::VerboseError<&str>>("that ")
-        .parse(trimmed)
-        .ok()?;
+    let (after_that, _) = tag::<_, _, OracleError<'_>>("that ").parse(trimmed).ok()?;
     let that_len = leading_ws + "that ".len();
 
     // --- CR 115.9c: "that targets only [filter]" ---
-    if let Ok((rest, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("targets only ").parse(after_that)
-    {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("targets only ").parse(after_that) {
         let targets_verb_len = "targets only ".len();
         if let Some((props, consumed)) =
             parse_targets_only_constraint(rest, that_len + targets_verb_len)
@@ -2882,9 +3020,7 @@ fn parse_that_clause_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> {
 
     // --- CR 115.9b: "that targets [filter]" (.any() semantics) ---
     // Must come AFTER "targets only" check above (longest match first).
-    if let Ok((rest, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("targets ").parse(after_that)
-    {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("targets ").parse(after_that) {
         let targets_verb_len = "targets ".len();
         if let Some((props, consumed)) = parse_targets_constraint(rest, that_len + targets_verb_len)
         {
@@ -2914,9 +3050,7 @@ fn parse_that_clause_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> {
     ];
 
     for (phrase, prop) in VERB_PHRASES {
-        if let Ok((_, _)) =
-            tag::<_, _, nom_language::error::VerboseError<&str>>(*phrase).parse(after_that)
-        {
+        if let Ok((_, _)) = tag::<_, _, OracleError<'_>>(*phrase).parse(after_that) {
             let total = that_len + phrase.len();
             return Some((vec![prop.clone()], total));
         }
@@ -2929,21 +3063,16 @@ fn parse_color_relative_clause_suffix(
     trimmed: &str,
     leading_ws: usize,
 ) -> Option<(Vec<FilterProp>, usize)> {
-    let (after_intro, intro_len) = if let Ok((rest, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("that's ").parse(trimmed)
-    {
-        (rest, "that's ".len())
-    } else if let Ok((rest, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("that is ").parse(trimmed)
-    {
-        (rest, "that is ".len())
-    } else if let Ok((rest, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("that are ").parse(trimmed)
-    {
-        (rest, "that are ".len())
-    } else {
-        return None;
-    };
+    let (after_intro, intro_len) =
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that's ").parse(trimmed) {
+            (rest, "that's ".len())
+        } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that is ").parse(trimmed) {
+            (rest, "that is ".len())
+        } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that are ").parse(trimmed) {
+            (rest, "that are ".len())
+        } else {
+            return None;
+        };
 
     let (rest, colors) = parse_color_disjunction(after_intro).ok()?;
     let next_char_is_boundary = rest
@@ -2980,7 +3109,7 @@ fn parse_color_disjunction(
 
 fn preceded_color_separator(input: &str) -> super::oracle_nom::error::OracleResult<'_, ManaColor> {
     let (rest, _) = alt((
-        tag::<_, _, nom_language::error::VerboseError<&str>>(", or "),
+        tag::<_, _, OracleError<'_>>(", or "),
         tag(", "),
         tag(" or "),
     ))
@@ -3000,34 +3129,26 @@ fn parse_that_isnt_subtype_suffix(text: &str) -> Option<(Vec<TypeFilter>, usize)
     let leading_ws = text.len() - trimmed.len();
 
     // "that isn't" / "that's not" / "that is not" — longest-match-first.
-    let (after_neg, neg_len) = if let Ok((rest, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("that isn't ").parse(trimmed)
-    {
-        (rest, "that isn't ".len())
-    } else if let Ok((rest, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("that's not ").parse(trimmed)
-    {
-        (rest, "that's not ".len())
-    } else if let Ok((rest, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("that is not ").parse(trimmed)
-    {
-        (rest, "that is not ".len())
-    } else {
-        return None;
-    };
+    let (after_neg, neg_len) =
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that isn't ").parse(trimmed) {
+            (rest, "that isn't ".len())
+        } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that's not ").parse(trimmed) {
+            (rest, "that's not ".len())
+        } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that is not ").parse(trimmed) {
+            (rest, "that is not ".len())
+        } else {
+            return None;
+        };
 
     // Optional article: "a " / "an " before the subtype.
-    let (after_article, article_len) = if let Ok((rest, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("a ").parse(after_neg)
-    {
-        (rest, "a ".len())
-    } else if let Ok((rest, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("an ").parse(after_neg)
-    {
-        (rest, "an ".len())
-    } else {
-        (after_neg, 0)
-    };
+    let (after_article, article_len) =
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("a ").parse(after_neg) {
+            (rest, "a ".len())
+        } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("an ").parse(after_neg) {
+            (rest, "an ".len())
+        } else {
+            (after_neg, 0)
+        };
 
     // CR 205.3: Subtype token — delegates to the shared subtype recognizer.
     let (subtype, sub_len) = parse_subtype(after_article)?;
@@ -3051,7 +3172,7 @@ fn parse_targets_only_constraint(
     prefix_len: usize,
 ) -> Option<(Vec<FilterProp>, usize)> {
     // Self-reference: "~"
-    if let Ok((_, _)) = tag::<_, _, nom_language::error::VerboseError<&str>>("~").parse(text) {
+    if let Ok((_, _)) = tag::<_, _, OracleError<'_>>("~").parse(text) {
         let props = vec![FilterProp::TargetsOnly {
             filter: Box::new(TargetFilter::SelfRef),
         }];
@@ -3076,9 +3197,7 @@ fn parse_targets_only_constraint(
     }
 
     // "a single [type phrase or player]" — TargetsOnly + HasSingleTarget
-    if let Ok((rest, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("a single ").parse(text)
-    {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("a single ").parse(text) {
         let single_len = "a single ".len();
         let (inner_filter, consumed) = parse_targets_only_type_or_player(rest);
         let props = vec![
@@ -3091,11 +3210,8 @@ fn parse_targets_only_constraint(
     }
 
     // "a/an [type phrase or player]" — TargetsOnly without single constraint
-    let article_result = nom::branch::alt((
-        tag::<_, _, nom_language::error::VerboseError<&str>>("a "),
-        tag("an "),
-    ))
-    .parse(text);
+    let article_result =
+        nom::branch::alt((tag::<_, _, OracleError<'_>>("a "), tag("an "))).parse(text);
     if let Ok((rest, matched)) = article_result {
         let article_len = matched.len();
         let (inner_filter, consumed) = parse_targets_only_type_or_player(rest);
@@ -3119,17 +3235,16 @@ fn parse_targets_only_constraint(
 /// - "a/an [type phrase]" → `Targets { filter }`
 fn parse_targets_constraint(text: &str, prefix_len: usize) -> Option<(Vec<FilterProp>, usize)> {
     // Strip "one or more " — redundant with .any() semantics
-    let (text, extra_len) = if let Ok((rest, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("one or more ").parse(text)
-    {
-        (rest, "one or more ".len())
-    } else {
-        (text, 0)
-    };
+    let (text, extra_len) =
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("one or more ").parse(text) {
+            (rest, "one or more ".len())
+        } else {
+            (text, 0)
+        };
     let prefix_len = prefix_len + extra_len;
 
     // Self-reference: "~"
-    if let Ok((_, _)) = tag::<_, _, nom_language::error::VerboseError<&str>>("~").parse(text) {
+    if let Ok((_, _)) = tag::<_, _, OracleError<'_>>("~").parse(text) {
         let props = vec![FilterProp::Targets {
             filter: Box::new(TargetFilter::SelfRef),
         }];
@@ -3155,11 +3270,9 @@ fn parse_targets_constraint(text: &str, prefix_len: usize) -> Option<(Vec<Filter
 
     // "you or a [type]" / "you or an [type]" — compound controller + typed filter
     let lower = text.to_lowercase();
-    let you_or_result = nom::branch::alt((
-        tag::<_, _, nom_language::error::VerboseError<&str>>("you or an "),
-        tag("you or a "),
-    ))
-    .parse(lower.as_str());
+    let you_or_result =
+        nom::branch::alt((tag::<_, _, OracleError<'_>>("you or an "), tag("you or a ")))
+            .parse(lower.as_str());
     if let Ok((_, matched)) = you_or_result {
         let you_or_len = matched.len();
         let after_you_or = &text[you_or_len..];
@@ -3183,11 +3296,8 @@ fn parse_targets_constraint(text: &str, prefix_len: usize) -> Option<(Vec<Filter
     }
 
     // "a/an [type phrase or player]" — parse type, using the same helper as TargetsOnly
-    let article_result = nom::branch::alt((
-        tag::<_, _, nom_language::error::VerboseError<&str>>("a "),
-        tag("an "),
-    ))
-    .parse(text);
+    let article_result =
+        nom::branch::alt((tag::<_, _, OracleError<'_>>("a "), tag("an "))).parse(text);
     if let Ok((rest, matched)) = article_result {
         let article_len = matched.len();
         let (inner_filter, consumed) = parse_targets_only_type_or_player(rest);
@@ -3274,17 +3384,14 @@ fn typed(
 /// The remainder includes any trailing text after the zone word (e.g., " face down").
 fn parse_zone_position_ref<'a>(text: &'a str, lower: &str) -> Option<(TargetFilter, &'a str)> {
     // Must start with "the top " or "the bottom "
-    let (after_position, _is_top) = if let Ok((rest, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("the top ").parse(lower)
-    {
-        (rest, true)
-    } else if let Ok((rest, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("the bottom ").parse(lower)
-    {
-        (rest, false)
-    } else {
-        return None;
-    };
+    let (after_position, _is_top) =
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("the top ").parse(lower) {
+            (rest, true)
+        } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("the bottom ").parse(lower) {
+            (rest, false)
+        } else {
+            return None;
+        };
 
     // Optional number: "three ", "two ", "x ", etc. — skip it, we only care about the zone.
     let after_number = if let Ok((rest, _)) = nom_primitives::parse_number_or_x(after_position) {
@@ -3307,23 +3414,22 @@ fn parse_zone_position_ref<'a>(text: &'a str, lower: &str) -> Option<(TargetFilt
     };
 
     // Required "card"/"cards" — may be followed by " of [zone]" or be standalone
-    let (after_card, card_is_terminal) = if let Ok((rest, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("cards").parse(after_type)
-    {
-        (
-            rest,
-            rest.trim_start().is_empty() || !rest.trim_start().starts_with("of "),
-        )
-    } else if let Ok((rest, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("card").parse(after_type)
-    {
-        (
-            rest,
-            rest.trim_start().is_empty() || !rest.trim_start().starts_with("of "),
-        )
-    } else {
-        return None;
-    };
+    let (after_card, card_is_terminal) =
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("cards").parse(after_type) {
+            let trimmed = rest.trim_start();
+            (
+                rest,
+                trimmed.is_empty() || tag::<_, _, OracleError<'_>>("of ").parse(trimmed).is_err(),
+            )
+        } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("card").parse(after_type) {
+            let trimmed = rest.trim_start();
+            (
+                rest,
+                trimmed.is_empty() || tag::<_, _, OracleError<'_>>("of ").parse(trimmed).is_err(),
+            )
+        } else {
+            return None;
+        };
 
     // Standalone "the top [N] cards" — default to your library
     if card_is_terminal {
@@ -3341,7 +3447,7 @@ fn parse_zone_position_ref<'a>(text: &'a str, lower: &str) -> Option<(TargetFilt
     }
 
     // "of " followed by possessive + zone
-    let after_of = tag::<_, _, nom_language::error::VerboseError<&str>>("of ")
+    let after_of = tag::<_, _, OracleError<'_>>("of ")
         .parse(after_card.trim_start())
         .ok()?
         .0;
@@ -3354,45 +3460,42 @@ fn parse_zone_position_ref<'a>(text: &'a str, lower: &str) -> Option<(TargetFilt
     ];
 
     // Check "each player's" / "each opponent's" / "target player's" / "target opponent's"
-    let (controller, after_possessive) = if let Ok((rest, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("each player's ").parse(after_of)
-    {
-        (None, rest) // All players
-    } else if let Ok((rest, _)) = alt((
-        tag::<_, _, nom_language::error::VerboseError<&str>>("each opponent's "),
-        tag("each opponents' "),
-    ))
-    .parse(after_of)
-    {
-        (Some(ControllerRef::Opponent), rest)
-    } else if let Ok((rest, _)) = alt((
-        tag::<_, _, nom_language::error::VerboseError<&str>>("target player's "),
-        tag("target opponent's "),
-    ))
-    .parse(after_of)
-    {
-        (None, rest) // Targeted player — resolved at runtime
-    } else if let Some((_, rest)) = strip_possessive(after_of) {
-        // Generic possessive: "your library", "their library"
-        let ctrl = if tag::<_, _, nom_language::error::VerboseError<&str>>("your ")
-            .parse(after_of)
-            .is_ok()
+    let (controller, after_possessive) =
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("each player's ").parse(after_of) {
+            (None, rest) // All players
+        } else if let Ok((rest, _)) = alt((
+            tag::<_, _, OracleError<'_>>("each opponent's "),
+            tag("each opponents' "),
+        ))
+        .parse(after_of)
         {
-            Some(ControllerRef::You)
+            (Some(ControllerRef::Opponent), rest)
+        } else if let Ok((rest, _)) = alt((
+            tag::<_, _, OracleError<'_>>("target player's "),
+            tag("target opponent's "),
+        ))
+        .parse(after_of)
+        {
+            (None, rest) // Targeted player — resolved at runtime
+        } else if let Some((_, rest)) = strip_possessive(after_of) {
+            // Generic possessive: "your library", "their library"
+            let ctrl = if tag::<_, _, OracleError<'_>>("your ")
+                .parse(after_of)
+                .is_ok()
+            {
+                Some(ControllerRef::You)
+            } else {
+                None
+            };
+            (ctrl, rest)
         } else {
-            None
+            return None;
         };
-        (ctrl, rest)
-    } else {
-        return None;
-    };
 
     // Required zone word
     for &(zone_word, zone_plural, ref zone) in zone_words {
         for word in [zone_word, zone_plural] {
-            if let Ok((zone_rest, _)) =
-                tag::<_, _, nom_language::error::VerboseError<&str>>(word).parse(after_possessive)
-            {
+            if let Ok((zone_rest, _)) = tag::<_, _, OracleError<'_>>(word).parse(after_possessive) {
                 let consumed = lower.len() - zone_rest.len();
                 return Some((
                     TargetFilter::Typed(TypedFilter {
@@ -3508,12 +3611,10 @@ fn parse_zone_suffix_nom(
     // CR 400.1: only the battlefield is referred to with "on"; "on <other zone>" is not
     // valid Oracle text, so reject it here rather than emitting a misleading filter.
     if prep == ZonePrep::On && zone != Zone::Battlefield {
-        return Err(nom::Err::Error(nom_language::error::VerboseError {
-            errors: vec![(
-                i,
-                nom_language::error::VerboseErrorKind::Context("'on' requires battlefield"),
-            )],
-        }));
+        return Err(nom::Err::Error(nom::error::Error::new(
+            i,
+            nom::error::ErrorKind::Fail,
+        )));
     }
 
     let out = match qual {
@@ -3584,19 +3685,18 @@ fn parse_zone_word(i: &str) -> super::oracle_nom::error::OracleResult<'_, Zone> 
 fn peek_zone_boundary(i: &str) -> super::oracle_nom::error::OracleResult<'_, ()> {
     match i.chars().next() {
         None | Some(' ' | ',' | '.') => Ok((i, ())),
-        _ => Err(nom::Err::Error(nom_language::error::VerboseError {
-            errors: vec![(
-                i,
-                nom_language::error::VerboseErrorKind::Context("zone word boundary required"),
-            )],
-        })),
+        _ => Err(nom::Err::Error(nom::error::Error::new(
+            i,
+            nom::error::ErrorKind::Fail,
+        ))),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::oracle_warnings::{clear_warnings, take_warnings};
+    use crate::parser::oracle_ir::context::ParseContext;
+    use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
     use crate::types::counter::CounterType;
 
     #[test]
@@ -3622,14 +3722,36 @@ mod tests {
     }
 
     #[test]
+    fn article_status_type_phrase_parses_as_target() {
+        let (f, rest) = parse_target("a tapped land you control");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(
+                TypedFilter::land()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::Tapped])
+            )
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn discarded_card_from_graveyard_refers_to_triggering_source() {
+        let (f, rest) = parse_target("the discarded card from your graveyard");
+        assert_eq!(f, TargetFilter::TriggeringSource);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
     fn parse_target_warns_on_any_fallback() {
-        clear_warnings();
-        let (filter, rest) = parse_target("foobar");
+        let mut ctx = ParseContext::default();
+        let (filter, rest) = parse_target_with_ctx("foobar", &mut ctx);
         assert_eq!(filter, TargetFilter::Any);
         assert_eq!(rest, "foobar");
-        assert!(take_warnings()
-            .iter()
-            .any(|warning| warning == "target-fallback: parse_target could not classify 'foobar'"));
+        assert!(ctx.diagnostics.iter().any(
+            |d| matches!(d, OracleDiagnostic::TargetFallback { context, text, .. }
+                if context == "parse_target could not classify" && text == "foobar")
+        ));
     }
 
     #[test]
@@ -3891,6 +4013,13 @@ mod tests {
     }
 
     #[test]
+    fn this_attraction_is_self_ref() {
+        let (f, rest) = parse_target("this attraction");
+        assert_eq!(f, TargetFilter::SelfRef);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
     fn white_creature_you_control() {
         let (f, _) = parse_type_phrase("white creature you control");
         assert_eq!(
@@ -4083,6 +4212,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn artifact_card_with_mana_value_4_or_5() {
+        let (f, rest) = parse_type_phrase("artifact card with mana value 4 or 5, reveal it");
+        assert_eq!(rest, ", reveal it");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact).properties(vec![
+                FilterProp::AnyOf {
+                    props: vec![
+                        FilterProp::Cmc {
+                            comparator: Comparator::EQ,
+                            value: QuantityExpr::Fixed { value: 4 },
+                        },
+                        FilterProp::Cmc {
+                            comparator: Comparator::EQ,
+                            value: QuantityExpr::Fixed { value: 5 },
+                        },
+                    ],
+                },
+            ]))
+        );
+    }
+
     /// CR 107.3a + CR 601.2b: Nature's Rhythm — "creature card with mana value X
     /// or less". The literal X must produce a `QuantityRef::Variable { "X" }`,
     /// resolved at effect time against the spell's announced X.
@@ -4151,7 +4303,9 @@ mod tests {
                 comparator: Comparator::EQ,
                 value: QuantityExpr::Offset {
                     inner: Box::new(QuantityExpr::Ref {
-                        qty: QuantityRef::CostPaidObjectManaValue,
+                        qty: QuantityRef::ObjectManaValue {
+                            scope: ObjectScope::CostPaidObject,
+                        },
                     }),
                     offset: 1,
                 },
@@ -4200,7 +4354,9 @@ mod tests {
             TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::Cmc {
                 comparator: Comparator::GT,
                 value: QuantityExpr::Ref {
-                    qty: QuantityRef::CostPaidObjectManaValue,
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::CostPaidObject,
+                    },
                 },
             }]))
         );
@@ -4224,6 +4380,24 @@ mod tests {
     }
 
     #[test]
+    fn card_with_same_mana_value_as_chosen_spell_uses_parent_target() {
+        let (f, rest) =
+            parse_type_phrase("creature card with the same mana value as the chosen spell");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Cmc {
+                comparator: Comparator::EQ,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::Target,
+                    },
+                },
+            }]))
+        );
+    }
+
+    #[test]
     fn card_with_mana_value_equal_to_that_cards_mana_value() {
         let (f, rest) = parse_type_phrase("card with mana value equal to that card's mana value");
         assert!(rest.trim().is_empty(), "remainder: '{rest}'");
@@ -4235,6 +4409,28 @@ mod tests {
                     qty: QuantityRef::ObjectManaValue {
                         scope: ObjectScope::Target,
                     },
+                },
+            }]))
+        );
+    }
+
+    #[test]
+    fn card_with_mana_value_of_that_card_plus_one_uses_offset_target() {
+        let (f, rest) = parse_type_phrase(
+            "creature card with mana value equal to the mana value of that card plus one",
+        );
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Cmc {
+                comparator: Comparator::EQ,
+                value: QuantityExpr::Offset {
+                    inner: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectManaValue {
+                            scope: ObjectScope::Target,
+                        },
+                    }),
+                    offset: 1,
                 },
             }]))
         );
@@ -4643,6 +4839,13 @@ mod tests {
     }
 
     #[test]
+    fn the_chosen_permanent_inherits_parent_target() {
+        let (filter, rest) = parse_target("the chosen permanent");
+        assert_eq!(filter, TargetFilter::ParentTarget);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
     fn the_chosen_cards_produce_tracked_set() {
         let (filter, rest) = parse_target("the chosen cards");
         assert_eq!(
@@ -4666,6 +4869,48 @@ mod tests {
         let (filter, rest) = parse_target("one of those cards");
         assert_eq!(filter, TargetFilter::ParentTarget);
         assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn selected_one_of_those_lands_with_choice_inherits_parent_target() {
+        let (filter, rest) = parse_target("one of those lands of their choice and untaps it");
+        assert_eq!(filter, TargetFilter::ParentTarget);
+        assert_eq!(rest, " and untaps it");
+    }
+
+    #[test]
+    fn different_one_of_those_creatures_inherits_parent_target() {
+        let (filter, rest) = parse_target("a different one of those creatures");
+        assert_eq!(filter, TargetFilter::ParentTarget);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn subtype_one_of_those_dragons_inherits_parent_target() {
+        let (filter, rest) = parse_target("one of those Dragons");
+        assert_eq!(filter, TargetFilter::ParentTarget);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn definite_artifact_reference_binds_first_parent_target_slot() {
+        let (filter, rest) = parse_target("the artifact and returns it");
+        assert_eq!(filter, TargetFilter::ParentTargetSlot { index: 0 });
+        assert_eq!(rest, " and returns it");
+    }
+
+    #[test]
+    fn definite_artifact_card_reference_binds_second_parent_target_slot() {
+        let (filter, rest) = parse_target("the artifact card to the battlefield");
+        assert_eq!(filter, TargetFilter::ParentTargetSlot { index: 1 });
+        assert_eq!(rest, " to the battlefield");
+    }
+
+    #[test]
+    fn definite_artifact_reference_does_not_steal_type_phrase() {
+        let (filter, rest) = parse_target("the artifact creature");
+        assert_ne!(filter, TargetFilter::ParentTargetSlot { index: 0 });
+        assert_ne!(rest, " creature");
     }
 
     #[test]
@@ -4830,6 +5075,32 @@ mod tests {
     }
 
     #[test]
+    fn all_cards_they_own_exiled_with_it_produces_exiled_by_source() {
+        let (f, rest) = parse_target("all cards they own exiled with it");
+        assert_eq!(f, TargetFilter::ExiledBySource);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn exiled_cards_with_named_counters_produces_exile_counter_filter() {
+        let (f, rest) = parse_target("exiled cards with aegis counters on them");
+        assert_eq!(rest, "");
+        match f {
+            TargetFilter::Typed(tf) => {
+                assert!(tf
+                    .properties
+                    .contains(&FilterProp::InZone { zone: Zone::Exile }));
+                assert!(tf.properties.iter().any(|prop| matches!(
+                    prop,
+                    FilterProp::CountersGE { counter_type, .. }
+                        if counter_type.as_str() == "aegis"
+                )));
+            }
+            other => panic!("expected typed exiled-card filter, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn target_creature_card_exiled_with_tilde_produces_and_filter() {
         // CR 406.6: Singular targeted form — composes typed filter with the
         // exile-link constraint via TargetFilter::And.
@@ -4913,6 +5184,13 @@ mod tests {
     fn unrecognized_bare_text_stays_any() {
         let (f, _) = parse_target("foobar");
         assert_eq!(f, TargetFilter::Any);
+    }
+
+    #[test]
+    fn parse_cost_paid_object_reference() {
+        let (filter, rest) = parse_target("the sacrificed creature");
+        assert_eq!(filter, TargetFilter::CostPaidObject);
+        assert!(rest.is_empty(), "remainder: {rest:?}");
     }
 
     #[test]
@@ -5286,7 +5564,7 @@ mod tests {
     #[test]
     fn historic_adjective_after_nontoken_arbaaz() {
         // CR 700.6: Arbaaz Mir's "another nontoken historic permanent you
-        // control" composes negation (`Non(Token)` subtype), the Historic
+        // control" composes token identity (`NonToken`), the Historic
         // adjective, the Another property, and the You controller — all in
         // sequence. The historic adjective parses AFTER the `non` negation
         // sweep, exercising the post-negation arm.
@@ -5300,12 +5578,9 @@ mod tests {
                     tf.type_filters,
                 );
                 assert!(
-                    tf.type_filters
-                        .contains(&TypeFilter::Non(Box::new(TypeFilter::Subtype(
-                            "Token".to_string()
-                        )))),
-                    "expected Non(Token) in {:?}",
-                    tf.type_filters,
+                    tf.properties.contains(&FilterProp::NonToken),
+                    "expected NonToken in {:?}",
+                    tf.properties,
                 );
                 assert!(
                     tf.properties.contains(&FilterProp::Historic),
@@ -6281,6 +6556,19 @@ mod tests {
         let result = parse_that_clause_suffix(" that's equipped or enchanted");
         let (props, _consumed) = result.expect("should parse");
         assert_eq!(props.len(), 1);
+        assert!(matches!(
+            &props[0],
+            FilterProp::HasAnyAttachmentOf { kinds, .. }
+                if kinds.len() == 2 && kinds.contains(&AttachmentKind::Aura)
+                    && kinds.contains(&AttachmentKind::Equipment)
+        ));
+    }
+
+    #[test]
+    fn that_are_enchanted_or_equipped_emits_disjunction() {
+        let result = parse_that_clause_suffix(" that are enchanted or equipped");
+        let (props, consumed) = result.expect("should parse");
+        assert_eq!(consumed, " that are enchanted or equipped".len());
         assert!(matches!(
             &props[0],
             FilterProp::HasAnyAttachmentOf { kinds, .. }

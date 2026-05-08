@@ -1,0 +1,47 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&lowered"
+---
+{
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Unimplemented",
+        "name": "unknown",
+        "description": "Soulbond"
+      },
+      "cost": null,
+      "sub_ability": null,
+      "duration": null,
+      "description": "Soulbond",
+      "target_prompt": null,
+      "sorcery_speed": false,
+      "condition": null,
+      "optional_targeting": false,
+      "optional": false,
+      "forward_result": false
+    }
+  ],
+  "triggers": [],
+  "statics": [
+    {
+      "mode": "Continuous",
+      "affected": {
+        "type": "SelfRef"
+      },
+      "modifications": [],
+      "condition": {
+        "type": "Unrecognized",
+        "text": "~ is paired with another creature"
+      },
+      "affected_zone": null,
+      "effect_zone": null,
+      "active_zones": [],
+      "characteristic_defining": false,
+      "description": "As long as ~ is paired with another creature, each of those creatures gets +4/+4."
+    }
+  ],
+  "replacements": [],
+  "extractedKeywords": []
+}

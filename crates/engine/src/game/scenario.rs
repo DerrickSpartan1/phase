@@ -1051,9 +1051,11 @@ impl GameRunner {
             WaitingFor::RevealChoice { .. } => "RevealChoice",
             WaitingFor::SearchChoice { .. } => "SearchChoice",
             WaitingFor::ChooseFromZoneChoice { .. } => "ChooseFromZoneChoice",
+            WaitingFor::ChooseOneOfBranch { .. } => "ChooseOneOfBranch",
             WaitingFor::ConniveDiscard { .. } => "ConniveDiscard",
             WaitingFor::DiscardChoice { .. } => "DiscardChoice",
             WaitingFor::EffectZoneChoice { .. } => "EffectZoneChoice",
+            WaitingFor::DrawnThisTurnTopdeckChoice { .. } => "DrawnThisTurnTopdeckChoice",
             WaitingFor::ManifestDreadChoice { .. } => "ManifestDreadChoice",
             WaitingFor::TriggerTargetSelection { .. } => "TriggerTargetSelection",
             WaitingFor::BetweenGamesSideboard { .. } => "BetweenGamesSideboard",
@@ -1069,6 +1071,7 @@ impl GameRunner {
             WaitingFor::WarpCostChoice { .. } => "WarpCostChoice",
             WaitingFor::EvokeCostChoice { .. } => "EvokeCostChoice",
             WaitingFor::OverloadCostChoice { .. } => "OverloadCostChoice",
+            WaitingFor::BestowCostChoice { .. } => "BestowCostChoice",
             WaitingFor::MultiTargetSelection { .. } => "MultiTargetSelection",
             WaitingFor::AbilityModeChoice { .. } => "AbilityModeChoice",
             WaitingFor::OptionalEffectChoice { .. } => "OptionalEffectChoice",
@@ -1123,6 +1126,7 @@ impl GameRunner {
             WaitingFor::MiracleReveal { .. } => "MiracleReveal",
             WaitingFor::MiracleCastOffer { .. } => "MiracleCastOffer",
             WaitingFor::MadnessCastOffer { .. } => "MadnessCastOffer",
+            WaitingFor::CommanderZoneChoice { .. } => "CommanderZoneChoice",
         }
     }
 

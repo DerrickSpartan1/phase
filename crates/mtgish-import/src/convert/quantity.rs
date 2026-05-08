@@ -191,14 +191,16 @@ pub fn convert(g: &GameNumber) -> ConvResult<QuantityExpr> {
         },
 
         // CR 107.1a: "Half N, rounded up/down" wraps an inner expression in a
-        // rounding-aware divide-by-two. Mirrors the parser's HalfRounded path
+        // rounding-aware divide-by-two. Mirrors the parser's DivideRounded path
         // (oracle_quantity.rs).
-        GameNumber::HalfRoundedDown(inner) => QuantityExpr::HalfRounded {
+        GameNumber::HalfRoundedDown(inner) => QuantityExpr::DivideRounded {
             inner: Box::new(convert(inner)?),
+            divisor: 2,
             rounding: RoundingMode::Down,
         },
-        GameNumber::HalfRoundedUp(inner) => QuantityExpr::HalfRounded {
+        GameNumber::HalfRoundedUp(inner) => QuantityExpr::DivideRounded {
             inner: Box::new(convert(inner)?),
+            divisor: 2,
             rounding: RoundingMode::Up,
         },
 
@@ -588,6 +590,7 @@ pub fn convert(g: &GameNumber) -> ConvResult<QuantityExpr> {
         GameNumber::NumSpellsCastByPlayerThisTurn(spells, player) => match &**player {
             Player::You => QuantityExpr::Ref {
                 qty: QuantityRef::SpellsCastThisTurn {
+                    scope: CountScope::Controller,
                     filter: Some(spells_to_filter(spells)?),
                 },
             },
@@ -598,6 +601,7 @@ pub fn convert(g: &GameNumber) -> ConvResult<QuantityExpr> {
         // — controller-scoped at runtime via SpellsCastThisTurn.
         GameNumber::NumSpellsCastThisTurn(spells) => QuantityExpr::Ref {
             qty: QuantityRef::SpellsCastThisTurn {
+                scope: CountScope::Controller,
                 filter: Some(spells_to_filter(spells)?),
             },
         },

@@ -1,19 +1,16 @@
 import { createContext, useEffect, useRef, type ReactNode } from "react";
 
-import type { FormatConfig, GameAction, MatchConfig } from "../adapter/types";
+import type { FormatConfig, GameAction, MatchConfig, MatchType } from "../adapter/types";
 import { P2PHostAdapter, P2PGuestAdapter } from "../adapter/p2p-adapter";
 import type { P2PAdapterEvent } from "../adapter/p2p-adapter";
 import { WasmAdapter, getSharedAdapter } from "../adapter/wasm-adapter";
 import { WebSocketAdapter } from "../adapter/ws-adapter";
 import { audioManager } from "../audio/AudioManager";
 import type { DeckData, WsAdapterEvent } from "../adapter/ws-adapter";
-import { STORAGE_KEY_PREFIX, loadActiveDeck, loadSavedDeck } from "../constants/storage";
-import { getCachedFeed, feedDeckToParsedDeck, listSubscriptions } from "../services/feedService";
-import type { FeedDeck } from "../types/feed";
-import { evaluateDeckCompatibility } from "../services/deckCompatibility";
-import { classifyDeck } from "../services/engineRuntime";
+import { loadActiveDeck } from "../constants/storage";
+import type { AiDeckCandidate } from "../services/aiDeckCatalog";
+import { buildLegalAiDeckCatalog } from "../services/aiDeckCatalog";
 import { AI_DECK_RANDOM, usePreferencesStore } from "../stores/preferencesStore";
-import type { AiArchetypeFilter } from "../stores/preferencesStore";
 import { createGameLoopController } from "../game/controllers/gameLoopController";
 import { dispatchAction, processRemoteUpdate } from "../game/dispatch";
 import { usePhaseStopsSync } from "../hooks/usePhaseStopsSync";
@@ -23,6 +20,7 @@ import { loadP2PSession } from "../services/p2pSession";
 import { expandParsedDeck, type ParsedDeck } from "../services/deckParser";
 import { consumeRecentAutoUpdateMarker } from "../pwa/updateMarker";
 import { ensureCardDatabase } from "../services/cardData";
+import { loadDraftRun } from "../services/quickDraftPersistence";
 import { clearWsSession, loadWsSession, saveWsSession } from "../services/multiplayerSession";
 import { detectServerUrl } from "../services/serverDetection";
 import {
@@ -36,6 +34,8 @@ import {
   useGameStore,
 } from "../stores/gameStore";
 import type { AISeatBinding } from "../game/controllers/aiController";
+import { useMultiplayerStore } from "../stores/multiplayerStore";
+import { assignRandomAvatars, fetchAvatarArtUrl } from "../services/playerAvatars";
 
 /** Build per-seat AI controller bindings for a game about to start. Reads
  *  the session-scoped `aiSeats` snapshot from `ActiveGameMeta` (written at
@@ -57,185 +57,141 @@ function resolveAiSeatBindings(
     difficulty: snapshot?.[i]?.difficulty ?? fallback,
   }));
 }
-import { useMultiplayerStore } from "../stores/multiplayerStore";
+
+let avatarGeneration = 0;
+
+function setupRandomAvatars(playerCount: number) {
+  const generation = ++avatarGeneration;
+  const avatars = assignRandomAvatars(playerCount);
+  const names = new Map<number, string>();
+  names.set(0, "You");
+  for (let i = 1; i < avatars.length; i++) {
+    names.set(i, avatars[i].name);
+  }
+  useMultiplayerStore.setState({ playerNames: names, playerAvatars: new Map() });
+  for (let i = 0; i < avatars.length; i++) {
+    fetchAvatarArtUrl(avatars[i].cardName).then((url) => {
+      if (!url || avatarGeneration !== generation) return;
+      const next = new Map(useMultiplayerStore.getState().playerAvatars);
+      next.set(i, url);
+      useMultiplayerStore.setState({ playerAvatars: next });
+    });
+  }
+}
+
+function setupCommanderAvatars(gameState: { objects: Record<number, { name: string; owner: number; is_commander?: boolean }> }) {
+  const generation = ++avatarGeneration;
+  const names = new Map<number, string>();
+  const commanderNames = new Map<number, string>();
+
+  for (const obj of Object.values(gameState.objects)) {
+    if (!obj?.is_commander) continue;
+    if (commanderNames.has(obj.owner)) continue;
+    commanderNames.set(obj.owner, obj.name);
+  }
+
+  for (const [playerId, cardName] of commanderNames) {
+    names.set(playerId, cardName.split(",")[0].split(" //")[0]);
+  }
+
+  useMultiplayerStore.setState({ playerNames: names, playerAvatars: new Map() });
+
+  for (const [playerId, cardName] of commanderNames) {
+    fetchAvatarArtUrl(cardName).then((url) => {
+      if (!url || avatarGeneration !== generation) return;
+      const next = new Map(useMultiplayerStore.getState().playerAvatars);
+      next.set(playerId, url);
+      useMultiplayerStore.setState({ playerAvatars: next });
+    });
+  }
+}
 
 function parsedDeckToDeckData(deck: ParsedDeck): DeckData {
   return expandParsedDeck(deck);
 }
 
-function collectFormatFeedDecks(formatConfig?: FormatConfig): FeedDeck[] {
-  if (!formatConfig) return [];
-  const formatKey = formatConfig.format.toLowerCase();
-  const formatDecks: FeedDeck[] = [];
-  for (const sub of listSubscriptions()) {
-    const feed = getCachedFeed(sub.sourceId);
-    if (feed?.format === formatKey) {
-      formatDecks.push(...feed.decks);
-    }
-  }
-  return formatDecks;
-}
+type ExpandedDeck = { main_deck: string[]; sideboard: string[]; commander: string[] };
+type DeckListPayload = {
+  player: ExpandedDeck;
+  opponent: ExpandedDeck;
+  ai_decks: ExpandedDeck[];
+};
 
-async function applyAiFilters(
-  decks: FeedDeck[],
-  archetypeFilter: AiArchetypeFilter,
+function candidatePassesFilters(
+  candidate: AiDeckCandidate,
+  archetypeFilter: ReturnType<typeof usePreferencesStore.getState>["aiArchetypeFilter"],
   coverageFloor: number,
-): Promise<FeedDeck[]> {
-  if (archetypeFilter === "Any" && coverageFloor <= 50) return decks;
-  const keep: FeedDeck[] = [];
-  for (const d of decks) {
-    if (coverageFloor > 50) {
-      try {
-        const compat = await evaluateDeckCompatibility(feedDeckToParsedDeck(d));
-        const cov = compat.coverage;
-        if (cov && cov.total_unique > 0) {
-          const pct = Math.round((cov.supported_unique / cov.total_unique) * 100);
-          if (pct < coverageFloor) continue;
-        }
-      } catch {
-        // If coverage can't be computed, don't exclude the deck.
-      }
-    }
-    if (archetypeFilter !== "Any") {
-      const names: string[] = [];
-      for (const entry of d.main) {
-        for (let i = 0; i < entry.count; i++) names.push(entry.name);
-      }
-      try {
-        const profile = await classifyDeck(names);
-        if (profile.archetype !== archetypeFilter) continue;
-      } catch {
-        continue;
-      }
-    }
-    keep.push(d);
-  }
-  return keep;
+): boolean {
+  if (candidate.coveragePct != null && candidate.coveragePct < coverageFloor) return false;
+  return archetypeFilter === "Any" || !candidate.archetype || candidate.archetype === archetypeFilter;
 }
 
-interface PickOptions {
-  /** Explicit deck name pinned by the user; `AI_DECK_RANDOM` means "pick from pool". */
-  requestedDeckName: string;
-  /** `FeedDeck.name` values already assigned to earlier AI seats. Random picks
-   *  prefer candidates *not* in this set; if the pool is exhausted the last
-   *  seats reuse names rather than erroring. */
-  excludeNames: Set<string>;
-  archetypeFilter: AiArchetypeFilter;
-  coverageFloor: number;
-}
-
-/** Random-pick a `FeedDeck` from `pool`, preferring names not already in
- *  `excludeNames`. Returns the full `FeedDeck` so the caller can record its
- *  name to extend the excludeNames set for subsequent seats. */
-function randomPickDistinct(pool: FeedDeck[], excludeNames: Set<string>): FeedDeck {
-  const fresh = pool.filter((d) => !excludeNames.has(d.name));
+function randomPickDistinct(pool: AiDeckCandidate[], excludeIds: Set<string>): AiDeckCandidate {
+  const fresh = pool.filter((d) => !excludeIds.has(d.id));
   const source = fresh.length > 0 ? fresh : pool;
   return source[Math.floor(Math.random() * source.length)];
 }
 
-/** Pick a single AI opponent's deck for one seat. Seat-agnostic: all per-seat
- *  state is passed in, and the function returns both the parsed deck and the
- *  picked `FeedDeck.name` (or `null` when the fallback paths land on a local
- *  or mirrored deck — those have no stable cross-seat name to dedup against). */
-async function pickOpponentDeck(
-  playerDeck: ParsedDeck,
-  opts: PickOptions,
-  formatConfig?: FormatConfig,
-): Promise<{ deck: ParsedDeck; name: string | null }> {
-  const { requestedDeckName, excludeNames, archetypeFilter, coverageFloor } = opts;
-
-  // 1. Honor an explicit named selection — bypass all filters and feed fallbacks.
-  //    Seats may intentionally share a pinned deck, so `excludeNames` does not
-  //    apply here; dedup is a Random-pool concern only.
-  if (requestedDeckName !== AI_DECK_RANDOM) {
-    const pool = collectFormatFeedDecks(formatConfig);
-    const starter = getCachedFeed("starter-decks")?.decks ?? [];
-    const match =
-      pool.find((d) => d.name === requestedDeckName)
-      ?? starter.find((d) => d.name === requestedDeckName);
-    if (match) return { deck: feedDeckToParsedDeck(match), name: match.name };
-    // Selection no longer exists — fall through to Random.
+function pickOpponentDeck(
+  catalog: AiDeckCandidate[],
+  requestedDeckId: string,
+  excludeIds: Set<string>,
+  archetypeFilter: ReturnType<typeof usePreferencesStore.getState>["aiArchetypeFilter"],
+  coverageFloor: number,
+): AiDeckCandidate {
+  if (requestedDeckId !== AI_DECK_RANDOM) {
+    const pinned = catalog.find((candidate) => candidate.id === requestedDeckId);
+    if (pinned) return pinned;
   }
 
-  // 2. Format-specific feeds, filtered by archetype + coverage preferences.
-  const formatDecks = collectFormatFeedDecks(formatConfig);
-  if (formatDecks.length > 0) {
-    const filtered = await applyAiFilters(formatDecks, archetypeFilter, coverageFloor);
-    const pool = filtered.length > 0 ? filtered : formatDecks;
-    const pick = randomPickDistinct(pool, excludeNames);
-    return { deck: feedDeckToParsedDeck(pick), name: pick.name };
-  }
-
-  // 3. Fall back to starter-decks feed.
-  const feed = getCachedFeed("starter-decks");
-  const feedDecks = feed?.decks ?? [];
-  if (feedDecks.length > 0) {
-    const filtered = await applyAiFilters(feedDecks, archetypeFilter, coverageFloor);
-    const pool = filtered.length > 0 ? filtered : feedDecks;
-    const pick = randomPickDistinct(pool, excludeNames);
-    return { deck: feedDeckToParsedDeck(pick), name: pick.name };
-  }
-
-  // 4. Local deck storage fallback — no metadata, no stable deck name.
-  const savedCandidates: ParsedDeck[] = [];
-  const commandZoneFormat = formatConfig?.command_zone === true;
-  for (let i = 0; i < localStorage.length; i++) {
-    const key = localStorage.key(i);
-    if (key?.startsWith(STORAGE_KEY_PREFIX)) {
-      const deckName = key.slice(STORAGE_KEY_PREFIX.length);
-      const deck = loadSavedDeck(deckName);
-      if (!deck) continue;
-      const cardCount = deck.main.reduce((s, e) => s + e.count, 0);
-      if (commandZoneFormat ? deck.commander?.length : cardCount >= 40 && cardCount <= 80 && !deck.commander?.length) {
-        savedCandidates.push(deck);
-      }
-    }
-  }
-  if (savedCandidates.length > 0) {
-    return {
-      deck: savedCandidates[Math.floor(Math.random() * savedCandidates.length)],
-      name: null,
-    };
-  }
-
-  // 5. Last resort: mirror the player's deck.
-  return { deck: playerDeck, name: null };
+  const filtered = catalog.filter((candidate) =>
+    candidatePassesFilters(candidate, archetypeFilter, coverageFloor)
+  );
+  return randomPickDistinct(filtered.length > 0 ? filtered : catalog, excludeIds);
 }
 
-/** Build a DeckList (name-only) for the WASM engine to resolve. Picks one
- *  deck per AI seat (`playerCount - 1` total), honoring each seat's pinned
- *  deck selection and dedup-ing Random picks by `FeedDeck.name`. */
-async function buildDeckList(
+function buildPlayerOnlyDeckList(deck: ParsedDeck): DeckListPayload {
+  const player = expandParsedDeck(deck);
+  return {
+    player,
+    opponent: { main_deck: [], sideboard: [], commander: [] },
+    ai_decks: [],
+  };
+}
+
+async function buildLocalAiDeckList(
   deck: ParsedDeck,
   playerCount: number,
   formatConfig?: FormatConfig,
-): Promise<{
-  player: { main_deck: string[]; sideboard: string[]; commander: string[] };
-  opponent: { main_deck: string[]; sideboard: string[]; commander: string[] };
-  ai_decks: Array<{ main_deck: string[]; sideboard: string[]; commander: string[] }>;
-}> {
+  selectedMatchType?: MatchType,
+): Promise<DeckListPayload> {
   const { aiSeats, aiArchetypeFilter, aiCoverageFloor } = usePreferencesStore.getState();
+  const catalog = await buildLegalAiDeckCatalog({
+    selectedFormat: formatConfig?.format,
+    selectedMatchType,
+  });
+  if (catalog.candidates.length === 0) {
+    throw new Error(`No legal AI decks are available for ${formatConfig?.format ?? "the selected format"}.`);
+  }
+
   const opponentCount = Math.max(1, playerCount - 1);
-  const excludeNames = new Set<string>();
+  const excludeIds = new Set<string>();
   const picks: ParsedDeck[] = [];
   for (let i = 0; i < opponentCount; i++) {
     // Unconfigured seats default to Random — NOT to `aiSeats[0]`. Falling
     // through to seat 0 would re-introduce the original bug: if the user
     // pinned one deck for a 2-player session and a 4-player resume-fallback
     // fires, every missing seat would clone that pinned deck.
-    const requestedDeckName = aiSeats[i]?.deckName ?? AI_DECK_RANDOM;
-    const result = await pickOpponentDeck(
-      deck,
-      {
-        requestedDeckName,
-        excludeNames,
-        archetypeFilter: aiArchetypeFilter,
-        coverageFloor: aiCoverageFloor,
-      },
-      formatConfig,
+    const requestedDeckId = aiSeats[i]?.deckId ?? AI_DECK_RANDOM;
+    const result = pickOpponentDeck(
+      catalog.candidates,
+      requestedDeckId,
+      excludeIds,
+      aiArchetypeFilter,
+      aiCoverageFloor,
     );
     picks.push(result.deck);
-    if (result.name) excludeNames.add(result.name);
+    excludeIds.add(result.id);
   }
   return {
     player: expandParsedDeck(deck),
@@ -320,11 +276,13 @@ export interface GameProviderProps {
    */
   useBroker?: boolean;
   roomName?: string;
+  source?: string;
+  draftId?: string;
   onWsEvent?: (event: WsAdapterEvent) => void;
   onP2PEvent?: (event: P2PAdapterEvent) => void;
   onReady?: () => void;
   onCardDataMissing?: () => void;
-  onNoDeck?: () => void;
+  onNoDeck?: (reason?: string) => void;
   /** Called when a saved game could not be resumed and a fresh game was started instead. */
   onResumeReset?: (reason: string) => void;
   children: ReactNode;
@@ -341,6 +299,8 @@ export function GameProvider({
   firstPlayer,
   useBroker = false,
   roomName,
+  source,
+  draftId,
   onWsEvent,
   onP2PEvent,
   onReady,
@@ -369,6 +329,24 @@ export function GameProvider({
   onResumeResetRef.current = onResumeReset;
 
   useEffect(() => {
+    if (mode !== "ai") return;
+    let applied = false;
+    const unsub = useGameStore.subscribe((state) => {
+      if (applied || !state.gameState?.command_zone?.length) return;
+      applied = true;
+      setupCommanderAvatars(state.gameState);
+      unsub();
+    });
+    const state = useGameStore.getState();
+    if (!applied && state.gameState?.command_zone?.length) {
+      applied = true;
+      setupCommanderAvatars(state.gameState);
+      unsub();
+    }
+    return unsub;
+  }, [mode, gameId]);
+
+  useEffect(() => {
     // A prior cleanup may have deferred a store reset. Cancel it — this mount
     // is about to populate the store via initGame/resumeGame, and a fire from
     // the previous cleanup would null out the state we just wrote.
@@ -380,7 +358,11 @@ export function GameProvider({
     const isOnline = mode === "online";
     const isP2P = mode === "p2p-host" || mode === "p2p-join";
     if (!isOnline && !isP2P) {
-      useMultiplayerStore.setState({ playerNames: new Map() });
+      if (mode === "ai") {
+        setupRandomAvatars(playerCount ?? 2);
+      } else {
+        useMultiplayerStore.setState({ playerNames: new Map(), playerAvatars: new Map() });
+      }
     }
     const hasSession = loadWsSession() !== null;
     const isReconnect = isOnline && !joinCode && hasSession;
@@ -449,7 +431,7 @@ export function GameProvider({
 
       const setupP2P = async () => {
         const effectivePlayerCount = playerCount ?? 2;
-        const deckList = await buildDeckList(parsedDeck, effectivePlayerCount, formatConfig);
+        const deckList = buildPlayerOnlyDeckList(parsedDeck);
         signal.throwIfAborted();
 
         // Resources that may need undoing on abort/error. `broker` is
@@ -525,6 +507,7 @@ export function GameProvider({
                 formatConfig: formatConfig ?? null,
                 aiSeats: [],
                 roomName: roomName ?? null,
+                draftMetadata: null,
               });
               signal.throwIfAborted();
               if (result) {
@@ -888,11 +871,14 @@ export function GameProvider({
           if (cancelled) return;
           await resumeGame(gameId, adapter, savedState);
           if (cancelled) return;
+          // Derive player count from the restored state — the URL param may be
+          // absent on resume (e.g. navigating directly to a saved game URL).
+          const resumedPlayerCount = savedState.players?.length ?? playerCount;
           controller = createGameLoopController({
             mode,
             difficulty,
-            aiSeats: resolveAiSeatBindings(gameId, playerCount, difficulty),
-            playerCount,
+            aiSeats: resolveAiSeatBindings(gameId, resumedPlayerCount, difficulty),
+            playerCount: resumedPlayerCount,
           });
           controller.start();
           audioManager.setContext("battlefield");
@@ -912,7 +898,18 @@ export function GameProvider({
             onNoDeckRef.current?.();
             return;
           }
-          const deckList = await buildDeckList(parsedDeck, playerCount ?? 2, formatConfig);
+          let deckList: DeckListPayload;
+          try {
+            deckList = await buildLocalAiDeckList(
+              parsedDeck,
+              playerCount ?? 2,
+              formatConfig,
+              matchConfig?.match_type,
+            );
+          } catch (deckErr) {
+            onNoDeckRef.current?.(deckErr instanceof Error ? deckErr.message : String(deckErr));
+            return;
+          }
           try {
             await initGame(gameId, adapter, deckList, formatConfig, playerCount, matchConfig, firstPlayer);
             if (cancelled) return;
@@ -929,20 +926,87 @@ export function GameProvider({
             audioManager.setContext("battlefield");
           } catch (initErr) {
             console.error("Deck validation failed:", initErr);
-            if (!cancelled) onNoDeckRef.current?.();
+            if (!cancelled) onNoDeckRef.current?.(initErr instanceof Error ? initErr.message : String(initErr));
           }
         }
         return;
       }
 
-      // No saved state — start a new game
+      // No saved state — start a new game.
+      // Draft mode: deck data was pre-built by DraftPage and stored in
+      // sessionStorage. Use it directly instead of loadActiveDeck + buildDeckList.
+      const draftDeckKey = `phase:draft-deck:${gameId}`;
+      const draftDeckRaw = sessionStorage.getItem(draftDeckKey);
+      if (draftDeckRaw) {
+        sessionStorage.removeItem(draftDeckKey);
+        const deckList = JSON.parse(draftDeckRaw) as {
+          player: { main_deck: string[]; sideboard: string[]; commander: string[] };
+          opponent: { main_deck: string[]; sideboard: string[]; commander: string[] };
+          ai_decks: Array<{ main_deck: string[]; sideboard: string[]; commander: string[] }>;
+        };
+        try {
+          await initGame(gameId, adapter, deckList, formatConfig, playerCount, matchConfig, firstPlayer);
+          if (cancelled) return;
+          controller = createGameLoopController({
+            mode,
+            difficulty,
+            aiSeats: resolveAiSeatBindings(gameId, playerCount, difficulty),
+            playerCount,
+          });
+          controller.start();
+          audioManager.setContext("battlefield");
+        } catch (err) {
+          console.error("Draft deck validation failed:", err);
+          if (!cancelled) onNoDeckRef.current?.();
+        }
+        return;
+      }
+
+      if (source === "draft" && draftId) {
+        const run = await loadDraftRun(draftId);
+        if (run) {
+          const deckList = {
+            player: { main_deck: run.playerDeck, sideboard: [] as string[], commander: [] as string[] },
+            opponent: { main_deck: run.opponentDeck, sideboard: [] as string[], commander: [] as string[] },
+            ai_decks: [],
+          };
+          try {
+            await initGame(gameId, adapter, deckList, formatConfig, playerCount, matchConfig, firstPlayer);
+            if (cancelled) return;
+            controller = createGameLoopController({
+              mode,
+              difficulty,
+              aiSeats: resolveAiSeatBindings(gameId, playerCount, difficulty),
+              playerCount,
+            });
+            controller.start();
+            audioManager.setContext("battlefield");
+          } catch (err) {
+            console.error("Draft IDB deck fallback failed:", err);
+            if (!cancelled) onNoDeckRef.current?.();
+          }
+          return;
+        }
+      }
+
       const parsedDeck = loadActiveDeck();
       if (!parsedDeck) {
         onNoDeckRef.current?.();
         return;
       }
 
-      const deckList = await buildDeckList(parsedDeck, playerCount ?? 2, formatConfig);
+      let deckList: DeckListPayload;
+      try {
+        deckList = await buildLocalAiDeckList(
+          parsedDeck,
+          playerCount ?? 2,
+          formatConfig,
+          matchConfig?.match_type,
+        );
+      } catch (deckErr) {
+        onNoDeckRef.current?.(deckErr instanceof Error ? deckErr.message : String(deckErr));
+        return;
+      }
       try {
         await initGame(gameId, adapter, deckList, formatConfig, playerCount, matchConfig, firstPlayer);
         if (cancelled) return;
@@ -959,7 +1023,7 @@ export function GameProvider({
         audioManager.setContext("battlefield");
       } catch (err) {
         console.error("Deck validation failed:", err);
-        if (!cancelled) onNoDeckRef.current?.();
+        if (!cancelled) onNoDeckRef.current?.(err instanceof Error ? err.message : String(err));
       }
     };
 
@@ -1001,7 +1065,7 @@ export function GameProvider({
         scheduleStoreReset(reset);
       }
     };
-  }, [gameId, mode, difficulty, joinCode, formatConfig, playerCount, matchConfig, firstPlayer, useBroker, roomName]);
+  }, [gameId, mode, difficulty, joinCode, formatConfig, playerCount, matchConfig, firstPlayer, useBroker, roomName, source, draftId]);
 
   return (
     <GameDispatchContext.Provider value={dispatchAction}>

@@ -4,6 +4,7 @@ use crate::game::game_object::GameObject;
 use crate::game::static_abilities::{build_static_registry, StaticAbilityHandler};
 use crate::game::triggers::build_trigger_registry;
 use crate::parser::oracle::is_commander_permission_sentence;
+use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
     AdditionalCost, AggregateFunction, CardTypeSetSource, ChoiceType, Comparator,
@@ -166,6 +167,58 @@ pub struct GapBundle {
     pub unlocked_by_format: BTreeMap<String, usize>,
 }
 
+/// Parser warning pattern ranked by how many cards share the same likely fix.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParseWarningPattern {
+    pub category: String,
+    pub pattern: String,
+    pub warning_count: usize,
+    pub card_count: usize,
+    /// Cards that are currently considered supported apart from this warning.
+    pub otherwise_supported_cards: usize,
+    /// Existing unsupported cards where this warning is the only coverage gap.
+    pub single_gap_cards: usize,
+    pub single_gap_by_format: BTreeMap<String, usize>,
+    pub example_cards: Vec<String>,
+}
+
+#[derive(Default)]
+struct ParseWarningPatternAccumulator {
+    warning_count: usize,
+    cards: HashSet<String>,
+    otherwise_supported_cards: HashSet<String>,
+    single_gap_cards: HashSet<String>,
+    single_gap_by_format: BTreeMap<String, usize>,
+    example_cards: Vec<String>,
+}
+
+impl ParseWarningPatternAccumulator {
+    fn push(
+        &mut self,
+        card_name: &str,
+        supported: bool,
+        single_gap: bool,
+        legal_formats: &[&'static str],
+    ) {
+        self.warning_count += 1;
+        self.cards.insert(card_name.to_string());
+        if supported {
+            self.otherwise_supported_cards.insert(card_name.to_string());
+        }
+        if single_gap && self.single_gap_cards.insert(card_name.to_string()) {
+            for format in legal_formats {
+                *self
+                    .single_gap_by_format
+                    .entry((*format).to_string())
+                    .or_default() += 1;
+            }
+        }
+        if self.example_cards.len() < 3 && !self.example_cards.iter().any(|c| c == card_name) {
+            self.example_cards.push(card_name.to_string());
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CoverageSummary {
     pub total_cards: usize,
@@ -185,6 +238,12 @@ pub struct CoverageSummary {
     /// Top 2-gap and 3-gap exact-match bundles that would unlock cards if all handlers implemented.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gap_bundles: Vec<GapBundle>,
+    /// Parse warnings clustered by the specific Oracle phrase shape that likely shares a fix.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parse_warning_patterns: Vec<ParseWarningPattern>,
+    /// Per-category diagnostic counts for regression ratcheting (D-08).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub diagnostics: BTreeMap<String, usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -222,21 +281,25 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::Any => "any target".into(),
         TargetFilter::Player => "player".into(),
         TargetFilter::Controller => "controller".into(),
+        TargetFilter::ScopedPlayer => "scoped player".into(),
         TargetFilter::SelfRef => "self".into(),
         TargetFilter::StackAbility => "ability on stack".into(),
         TargetFilter::StackSpell => "spell on stack".into(),
         TargetFilter::AttachedTo => "attached permanent".into(),
         TargetFilter::LastCreated => "last created".into(),
+        TargetFilter::CostPaidObject => "cost-paid object".into(),
         TargetFilter::TriggeringSpellController => "triggering spell's controller".into(),
         TargetFilter::TriggeringSpellOwner => "triggering spell's owner".into(),
         TargetFilter::TriggeringPlayer => "triggering player".into(),
         TargetFilter::TriggeringSource => "triggering source".into(),
         TargetFilter::DefendingPlayer => "defending player".into(),
         TargetFilter::ParentTarget => "parent target".into(),
+        TargetFilter::ParentTargetSlot { index } => format!("parent target slot {index}"),
         TargetFilter::ParentTargetController => "parent target's controller".into(),
         TargetFilter::PostReplacementSourceController => {
             "prevented event source's controller".into()
         }
+        TargetFilter::PostReplacementDamageTarget => "prevented damage target".into(),
         TargetFilter::SpecificObject { id } => format!("object #{}", id.0),
         TargetFilter::SpecificPlayer { id } => format!("player #{}", id.0),
         TargetFilter::TrackedSet { id } => format!("tracked set #{}", id.0),
@@ -268,6 +331,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
     for prop in &tf.properties {
         match prop {
             FilterProp::Token => parts.push("token".into()),
+            FilterProp::NonToken => parts.push("nontoken".into()),
             FilterProp::Attacking => parts.push("attacking".into()),
             FilterProp::AttackingController => parts.push("attacking you".into()),
             FilterProp::Blocking => parts.push("blocking".into()),
@@ -276,6 +340,9 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::Tapped => parts.push("tapped".into()),
             FilterProp::Untapped => parts.push("untapped".into()),
             FilterProp::WithKeyword { value } => parts.push(format!("with {value:?}")),
+            FilterProp::CanEnchant { target } => {
+                parts.push(format!("can enchant {}", fmt_target(target)))
+            }
             FilterProp::HasKeywordKind { value } => {
                 parts.push(format!("with {value:?}").to_lowercase())
             }
@@ -301,6 +368,9 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                     Comparator::NE => "≠",
                 };
                 parts.push(format!("mv {}{}", fmt_quantity(value), suffix))
+            }
+            FilterProp::ManaCostIn { costs } => {
+                parts.push(format!("mana cost in {costs:?}"));
             }
             FilterProp::SameName => parts.push("same name".into()),
             FilterProp::SameNameAsParentTarget => parts.push("same name as parent target".into()),
@@ -424,6 +494,8 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 parts.push(format!("any of ({})", fmt_typed_filter(&inner_tf)));
             }
             FilterProp::HasXInManaCost => parts.push("with {X} in cost".into()),
+            FilterProp::HasManaAbility => parts.push("with a mana ability".into()),
+            FilterProp::HasNoAbilities => parts.push("with no abilities".into()),
             FilterProp::HasAnyCounter => parts.push("with one or more counters".into()),
         }
     }
@@ -433,6 +505,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             let label = match ctrl {
                 ControllerRef::You => "you",
                 ControllerRef::Opponent => "opponent",
+                ControllerRef::ScopedPlayer => "scoped player",
                 ControllerRef::TargetPlayer => "target player",
                 ControllerRef::DefendingPlayer => "defending player",
             };
@@ -496,6 +569,7 @@ fn fmt_controller(ctrl: &ControllerRef) -> String {
     match ctrl {
         ControllerRef::You => "you control",
         ControllerRef::Opponent => "opponent controls",
+        ControllerRef::ScopedPlayer => "scoped player controls",
         ControllerRef::TargetPlayer => "target player controls",
         ControllerRef::DefendingPlayer => "defending player controls",
     }
@@ -514,12 +588,21 @@ fn fmt_quantity(q: &QuantityExpr) -> String {
     match q {
         QuantityExpr::Fixed { value } => value.to_string(),
         QuantityExpr::Ref { qty } => fmt_quantity_ref(qty),
-        QuantityExpr::HalfRounded { inner, rounding } => {
+        QuantityExpr::DivideRounded {
+            inner,
+            divisor,
+            rounding,
+        } => {
             let dir = match rounding {
                 crate::types::ability::RoundingMode::Up => "up",
                 crate::types::ability::RoundingMode::Down => "down",
             };
-            format!("half({}, rounded {})", fmt_quantity(inner), dir)
+            format!(
+                "divide({}, {}, rounded {})",
+                fmt_quantity(inner),
+                divisor,
+                dir
+            )
         }
         QuantityExpr::Offset { inner, offset } => {
             format!("{}+{}", fmt_quantity(inner), offset)
@@ -592,6 +675,7 @@ fn fmt_aggregate_function(f: AggregateFunction) -> &'static str {
 fn fmt_player_scope(scope: PlayerScope) -> String {
     match scope {
         PlayerScope::Controller => "you".to_string(),
+        PlayerScope::ScopedPlayer => "scoped player".to_string(),
         PlayerScope::Target => "target player".to_string(),
         PlayerScope::RecipientController => "recipient's controller".to_string(),
         PlayerScope::Opponent { aggregate } => {
@@ -629,6 +713,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 ObjectScope::Target => "target",
                 ObjectScope::Recipient => "recipient",
                 ObjectScope::EventSource => "event source",
+                ObjectScope::CostPaidObject => "cost-paid object",
             };
             match counter_type {
                 Some(ct) => format!("{ct} counters on {scope_str}"),
@@ -648,30 +733,35 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::Target => "target's power".into(),
             ObjectScope::Recipient => "recipient's power".into(),
             ObjectScope::EventSource => "event source's power".into(),
+            ObjectScope::CostPaidObject => "cost-paid object's power".into(),
         },
         QuantityRef::Toughness { scope } => match scope {
             ObjectScope::Source => "self toughness".into(),
             ObjectScope::Target => "target's toughness".into(),
             ObjectScope::Recipient => "recipient's toughness".into(),
             ObjectScope::EventSource => "event source's toughness".into(),
+            ObjectScope::CostPaidObject => "cost-paid object's toughness".into(),
         },
         QuantityRef::ObjectManaValue { scope } => match scope {
             ObjectScope::Source => "self mana value".into(),
             ObjectScope::Target => "target's mana value".into(),
             ObjectScope::Recipient => "recipient's mana value".into(),
             ObjectScope::EventSource => "event source's mana value".into(),
+            ObjectScope::CostPaidObject => "cost-paid object's mana value".into(),
         },
         QuantityRef::ObjectColorCount { scope } => match scope {
             ObjectScope::Source => "self colors".into(),
             ObjectScope::Target => "target's colors".into(),
             ObjectScope::Recipient => "recipient's colors".into(),
             ObjectScope::EventSource => "event source's colors".into(),
+            ObjectScope::CostPaidObject => "cost-paid object's colors".into(),
         },
         QuantityRef::ObjectNameWordCount { scope } => match scope {
             ObjectScope::Source => "words in self name".into(),
             ObjectScope::Target => "words in target's name".into(),
             ObjectScope::Recipient => "words in recipient's name".into(),
             ObjectScope::EventSource => "words in event source's name".into(),
+            ObjectScope::CostPaidObject => "words in cost-paid object's name".into(),
         },
         QuantityRef::ManaSymbolsInManaCost { scope, color } => {
             let scope_str = match scope {
@@ -679,6 +769,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 ObjectScope::Target => "target",
                 ObjectScope::Recipient => "recipient",
                 ObjectScope::EventSource => "event source",
+                ObjectScope::CostPaidObject => "cost-paid object",
             };
             format!("{color:?} mana symbols in {scope_str}'s mana cost")
         }
@@ -761,10 +852,13 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::EventContextSourcePower => "source's power".into(),
         QuantityRef::EventContextSourceToughness => "source's toughness".into(),
         QuantityRef::EventContextSourceManaValue => "source's mana value".into(),
-        QuantityRef::CostPaidObjectManaValue => "cost-paid object's mana value".into(),
-        QuantityRef::SpellsCastThisTurn { filter } => match filter {
-            Some(filter) => format!("{} spells cast this turn", fmt_target(filter)),
-            None => "spells cast this turn".into(),
+        QuantityRef::SpellsCastThisTurn { scope, filter } => match filter {
+            Some(filter) => format!(
+                "{} spells cast this turn ({})",
+                fmt_target(filter),
+                fmt_count_scope(scope)
+            ),
+            None => format!("spells cast this turn ({})", fmt_count_scope(scope)),
         },
         QuantityRef::EnteredThisTurn { filter } => {
             format!("{} entered this turn", fmt_target(filter))
@@ -838,6 +932,7 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
     match pf {
         PlayerFilter::Controller => "you",
         PlayerFilter::Opponent => "each opponent",
+        PlayerFilter::DefendingPlayer => "defending player",
         PlayerFilter::OpponentLostLife => "each opponent who lost life this turn",
         PlayerFilter::OpponentGainedLife => "each opponent who gained life this turn",
         PlayerFilter::All => "each player",
@@ -1076,6 +1171,17 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             }
             if !matches!(target, TargetFilter::Controller) {
                 d.push(("target".into(), fmt_target(target)));
+            }
+        }
+        Effect::ChooseDrawnThisTurnPayOrTopdeck {
+            count,
+            life_payment,
+            player,
+        } => {
+            d.push(("count".into(), fmt_quantity(count)));
+            d.push(("life_payment".into(), fmt_quantity(life_payment)));
+            if !matches!(player, TargetFilter::Controller) {
+                d.push(("player".into(), fmt_target(player)));
             }
         }
         Effect::ExileTop { player, count } => {
@@ -1539,6 +1645,8 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::MoveCounters {
             source,
             counter_type,
+            count,
+            mode,
             target,
         } => {
             d.push(("source".into(), fmt_target(source)));
@@ -1547,6 +1655,10 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             } else {
                 d.push(("counter".into(), "all".into()));
             }
+            if let Some(count) = count {
+                d.push(("count".into(), format!("{count:?}")));
+            }
+            d.push(("mode".into(), format!("{mode:?}")));
             d.push(("target".into(), fmt_target(target)));
         }
         Effect::Exploit { target } => {
@@ -1597,7 +1709,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             d.push(("rest".into(), format!("{:?}", rest_destination)));
         }
         Effect::Discover { mana_value_limit } => {
-            d.push(("mv limit".into(), mana_value_limit.to_string()));
+            d.push(("mv limit".into(), format!("{:?}", mana_value_limit)));
         }
         // CR 702.85a: Cascade takes no parameters — source MV is read from the
         // stack object at resolution time.
@@ -1649,6 +1761,20 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 d.push(("count".into(), format!("{count:?}")));
             }
         }
+        Effect::SkipNextStep {
+            target,
+            step,
+            count,
+        } => {
+            d.push(("player".into(), fmt_target(target)));
+            d.push(("step".into(), format!("{step:?}")));
+            if !matches!(
+                count,
+                crate::types::ability::QuantityExpr::Fixed { value: 1 }
+            ) {
+                d.push(("count".into(), format!("{count:?}")));
+            }
+        }
         Effect::ControlNextTurn {
             target,
             grant_extra_turn_after,
@@ -1658,11 +1784,17 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 d.push(("extra turn after".into(), "yes".into()));
             }
         }
-        Effect::AdditionalCombatPhase {
-            with_main_phase, ..
+        Effect::AdditionalPhase {
+            target,
+            phase,
+            after,
+            followed_by,
         } => {
-            if *with_main_phase {
-                d.push(("+ main phase".into(), "yes".into()));
+            d.push(("player".into(), fmt_target(target)));
+            d.push(("phase".into(), format!("{phase:?}")));
+            d.push(("after".into(), format!("{after:?}")));
+            if !followed_by.is_empty() {
+                d.push(("followed by".into(), format!("{followed_by:?}")));
             }
         }
         Effect::Double {
@@ -1685,11 +1817,15 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::Seek {
             filter,
             count,
+            from_top,
             destination,
             ..
         } => {
             d.push(("filter".into(), fmt_target(filter)));
             d.push(("count".into(), fmt_quantity(count)));
+            if let Some(from_top) = from_top {
+                d.push(("from_top".into(), from_top.to_string()));
+            }
             if *destination != Zone::Hand {
                 d.push(("to".into(), fmt_zone(destination)));
             }
@@ -2427,6 +2563,101 @@ fn normalize_oracle_pattern(text: &str) -> String {
     result.trim().to_string()
 }
 
+pub fn parse_warning_pattern(
+    warning: &OracleDiagnostic,
+    oracle_text: Option<&str>,
+) -> (String, String) {
+    match warning {
+        OracleDiagnostic::SwallowedClause {
+            detector,
+            description,
+            ..
+        } => {
+            let excerpt = oracle_text
+                .and_then(|text| swallowed_clause_excerpt(detector, text))
+                .unwrap_or(description.as_str());
+            (
+                warning.category_name().to_string(),
+                format!("{detector}: {}", normalize_oracle_pattern(excerpt)),
+            )
+        }
+        OracleDiagnostic::TargetFallback { context, text, .. } => (
+            warning.category_name().to_string(),
+            format!("{context}: {}", normalize_oracle_pattern(text)),
+        ),
+        OracleDiagnostic::IgnoredRemainder { parser, text, .. } => (
+            warning.category_name().to_string(),
+            format!("{parser}: {}", normalize_oracle_pattern(text)),
+        ),
+        OracleDiagnostic::CascadeLoss {
+            slot, effect_name, ..
+        } => (
+            warning.category_name().to_string(),
+            format!("{slot:?}: {effect_name}"),
+        ),
+    }
+}
+
+fn swallowed_clause_excerpt<'a>(detector: &str, oracle_text: &'a str) -> Option<&'a str> {
+    let markers: &[&str] = match detector {
+        "Replacement_Instead" => &[" instead"],
+        "ActivateOnlyDuring" => &["activate only during", "activate this ability only during"],
+        "ActivateLimit" => &[
+            "activate this ability only once each",
+            "activate this ability only twice each",
+            "activate this ability no more than",
+            "activate only once each turn",
+            "activate only twice each turn",
+        ],
+        "Duration_UntilEndOfTurn" => &["until end of turn"],
+        "Optional_YouMay" => &["you may "],
+        "DynamicQty" => &[
+            " equal to ",
+            "for each ",
+            " twice ",
+            "where x is ",
+            "the number of ",
+            "half your ",
+            "half their ",
+            "half its ",
+            "half the ",
+        ],
+        "Condition_If" => &[" if ", "if "],
+        "Condition_Unless" => &[" unless "],
+        "Condition_AsLongAs" => &["as long as "],
+        "Duration_ThisTurn" => &[" this turn"],
+        "Duration_NextTurn" => &["until your next turn", "until that player's next turn"],
+        "Optional_MayHave" => &["may have ", "you may have "],
+        "APNAP" => &[
+            "starting with you",
+            "starting with the active player",
+            "starting with that player",
+            "in turn order",
+        ],
+        _ => return None,
+    };
+
+    let lower = oracle_text.to_ascii_lowercase();
+    let (marker_start, marker) = markers
+        .iter()
+        .filter_map(|marker| lower.find(marker).map(|index| (index, *marker)))
+        .min_by_key(|(index, _)| *index)?;
+    let sentence_start = oracle_text[..marker_start]
+        .rfind(['\n', '.'])
+        .map_or(0, |index| index + 1);
+    let sentence_end = oracle_text[marker_start..]
+        .find(['\n', '.'])
+        .map_or(oracle_text.len(), |offset| marker_start + offset);
+    let clause_start = if marker.trim_start() != marker {
+        marker_start + (marker.len() - marker.trim_start().len())
+    } else if detector.starts_with("Duration_") {
+        sentence_start
+    } else {
+        marker_start
+    };
+    Some(oracle_text[clause_start..sentence_end].trim())
+}
+
 /// Match a p/t pattern like `+3/+1` or `-2/-2` at the start of `s`.
 /// Returns the byte length consumed, or `None` if no match.
 fn match_pt_pattern(s: &str) -> Option<usize> {
@@ -2582,6 +2813,8 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
 
     let mut cards = Vec::new();
     let mut freq: HashMap<String, usize> = HashMap::new();
+    let mut parse_warning_patterns: BTreeMap<(String, String), ParseWarningPatternAccumulator> =
+        BTreeMap::new();
     let mut coverage_by_format_accumulators: BTreeMap<String, (usize, usize)> = LegalityFormat::ALL
         .into_iter()
         .map(|format| (format.as_key().to_string(), (0, 0)))
@@ -2634,6 +2867,16 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
             *freq.entry(m.clone()).or_default() += 1;
         }
 
+        let legal_formats: Vec<&'static str> = LegalityFormat::ALL
+            .into_iter()
+            .filter_map(|format| {
+                card_db
+                    .legality_status(key, format)
+                    .is_some_and(|status| status.is_legal())
+                    .then_some(format.as_key())
+            })
+            .collect();
+
         for format in LegalityFormat::ALL {
             if card_db
                 .legality_status(key, format)
@@ -2652,19 +2895,30 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
         let mut gap_details = extract_gap_details(&parse_details);
         // Append parse-warning gaps so they appear in per-card gap reporting.
         for warning in &face.parse_warnings {
-            if warning.starts_with("target-fallback") {
-                let handler = if warning.contains("trigger subject") {
+            if let crate::parser::oracle_ir::diagnostic::OracleDiagnostic::TargetFallback {
+                context,
+                ..
+            } = warning
+            {
+                let handler = if context.contains("trigger subject") {
                     "ParseWarning:trigger-subject".to_string()
                 } else {
                     "ParseWarning:target-fallback".to_string()
                 };
                 gap_details.push(GapDetail {
                     handler,
-                    source_text: Some(warning.clone()),
+                    source_text: Some(warning.to_string()),
                 });
             }
         }
         let gap_count = gap_details.len();
+        for warning in &face.parse_warnings {
+            let (category, pattern) = parse_warning_pattern(warning, face.oracle_text.as_deref());
+            parse_warning_patterns
+                .entry((category, pattern))
+                .or_default()
+                .push(&face.name, supported, gap_count == 1, &legal_formats);
+        }
 
         let printings = card_db
             .printings_for(key)
@@ -2930,6 +3184,30 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
         })
         .collect();
 
+    let mut parse_warning_patterns: Vec<ParseWarningPattern> = parse_warning_patterns
+        .into_iter()
+        .map(|((category, pattern), acc)| ParseWarningPattern {
+            category,
+            pattern,
+            warning_count: acc.warning_count,
+            card_count: acc.cards.len(),
+            otherwise_supported_cards: acc.otherwise_supported_cards.len(),
+            single_gap_cards: acc.single_gap_cards.len(),
+            single_gap_by_format: acc.single_gap_by_format,
+            example_cards: acc.example_cards,
+        })
+        .collect();
+    parse_warning_patterns.sort_by(|left, right| {
+        right
+            .otherwise_supported_cards
+            .cmp(&left.otherwise_supported_cards)
+            .then_with(|| right.single_gap_cards.cmp(&left.single_gap_cards))
+            .then_with(|| right.warning_count.cmp(&left.warning_count))
+            .then_with(|| left.category.cmp(&right.category))
+            .then_with(|| left.pattern.cmp(&right.pattern))
+    });
+    parse_warning_patterns.truncate(50);
+
     CoverageSummary {
         total_cards,
         supported_cards,
@@ -2940,6 +3218,8 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
         cards,
         top_gaps,
         gap_bundles,
+        parse_warning_patterns,
+        diagnostics: BTreeMap::new(),
     }
 }
 
@@ -3246,33 +3526,24 @@ fn check_resolver_features(face: &CardFace, missing: &mut Vec<String>) {
 
 /// Target-fallback warnings indicate degraded targeting (TargetFilter::Any instead of a
 /// specific filter). Cards with these have silently incorrect behavior at runtime.
-fn check_parse_warnings(warnings: &[String], missing: &mut Vec<String>) {
+fn check_parse_warnings(
+    warnings: &[crate::parser::oracle_ir::diagnostic::OracleDiagnostic],
+    missing: &mut Vec<String>,
+) {
+    use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
     for warning in warnings {
-        if warning.starts_with("target-fallback") {
-            // Extract the sub-category for groupable gap labels:
-            // "target-fallback: parse_target could not classify 'foo'" → "ParseWarning:parse_target"
-            // "target-fallback: trigger subject parse fell back..." → "ParseWarning:trigger-subject"
-            let label = if warning.contains("trigger subject") {
-                "ParseWarning:trigger-subject".to_string()
-            } else if warning.contains("parse_target could not classify") {
-                "ParseWarning:target-fallback".to_string()
-            } else {
-                format!(
-                    "ParseWarning:{}",
-                    warning
-                        .split(':')
-                        .nth(1)
-                        .unwrap_or("unknown")
-                        .trim()
-                        .split('\'')
-                        .next()
-                        .unwrap_or("unknown")
-                        .trim()
-                )
-            };
-            if !missing.contains(&label) {
-                missing.push(label);
+        let label = match warning {
+            OracleDiagnostic::TargetFallback { context, .. } => {
+                if context.contains("trigger subject") {
+                    "ParseWarning:trigger-subject".to_string()
+                } else {
+                    "ParseWarning:target-fallback".to_string()
+                }
             }
+            _ => continue,
+        };
+        if !missing.contains(&label) {
+            missing.push(label);
         }
     }
 }
@@ -4148,7 +4419,7 @@ fn extract_quantity_features(qty: &QuantityExpr, features: &mut HashMap<String, 
         QuantityExpr::Offset { inner, .. } | QuantityExpr::Multiply { inner, .. } => {
             extract_quantity_features(inner, features);
         }
-        QuantityExpr::HalfRounded { inner, .. } => {
+        QuantityExpr::DivideRounded { inner, .. } => {
             extract_quantity_features(inner, features);
         }
         QuantityExpr::Sum { exprs } => {
@@ -4251,6 +4522,10 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         AbilityCondition::DayNightIs { .. } => ("DayNightIs", Handled),
         // CR 603.4: Per-ability per-turn resolution counter — handled by evaluate_condition.
         AbilityCondition::NthResolutionThisTurn { .. } => ("NthResolutionThisTurn", Handled),
+        AbilityCondition::CostPaidObjectMatchesFilter { .. } => {
+            ("CostPaidObjectMatchesFilter", Handled)
+        }
+        AbilityCondition::SourceLacksKeyword { .. } => ("SourceLacksKeyword", Handled),
     }
 }
 
@@ -4276,36 +4551,42 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::Target => ("TargetPower", Handled),
             ObjectScope::Recipient => ("RecipientPower", Handled),
             ObjectScope::EventSource => ("EventSourcePower", Handled),
+            ObjectScope::CostPaidObject => ("CostPaidObjectPower", Handled),
         },
         QuantityRef::Toughness { scope } => match scope {
             ObjectScope::Source => ("SelfToughness", Handled),
             ObjectScope::Target => ("TargetToughness", Handled),
             ObjectScope::Recipient => ("RecipientToughness", Handled),
             ObjectScope::EventSource => ("EventSourceToughness", Handled),
+            ObjectScope::CostPaidObject => ("CostPaidObjectToughness", Handled),
         },
         QuantityRef::ObjectManaValue { scope } => match scope {
             ObjectScope::Source => ("SelfManaValue", Handled),
             ObjectScope::Target => ("TargetManaValue", Handled),
             ObjectScope::Recipient => ("RecipientManaValue", Handled),
             ObjectScope::EventSource => ("EventSourceManaValue", Handled),
+            ObjectScope::CostPaidObject => ("CostPaidObjectManaValue", Handled),
         },
         QuantityRef::ObjectColorCount { scope } => match scope {
             ObjectScope::Source => ("SourceObjectColorCount", Handled),
             ObjectScope::Target => ("TargetObjectColorCount", Handled),
             ObjectScope::Recipient => ("RecipientObjectColorCount", Handled),
             ObjectScope::EventSource => ("EventSourceObjectColorCount", Handled),
+            ObjectScope::CostPaidObject => ("CostPaidObjectColorCount", Handled),
         },
         QuantityRef::ObjectNameWordCount { scope } => match scope {
             ObjectScope::Source => ("SourceObjectNameWordCount", Handled),
             ObjectScope::Target => ("TargetObjectNameWordCount", Handled),
             ObjectScope::Recipient => ("RecipientObjectNameWordCount", Handled),
             ObjectScope::EventSource => ("EventSourceObjectNameWordCount", Handled),
+            ObjectScope::CostPaidObject => ("CostPaidObjectNameWordCount", Handled),
         },
         QuantityRef::ManaSymbolsInManaCost { scope, .. } => match scope {
             ObjectScope::Source => ("SourceManaSymbolsInManaCost", Handled),
             ObjectScope::Target => ("TargetManaSymbolsInManaCost", Handled),
             ObjectScope::Recipient => ("RecipientManaSymbolsInManaCost", Handled),
             ObjectScope::EventSource => ("EventSourceManaSymbolsInManaCost", Handled),
+            ObjectScope::CostPaidObject => ("CostPaidObjectManaSymbolsInManaCost", Handled),
         },
         QuantityRef::SelfManaValue => ("SelfManaValue", Handled),
         QuantityRef::Aggregate { .. } => ("Aggregate", Handled),
@@ -4325,7 +4606,6 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::EventContextSourcePower => ("EventContextSourcePower", Handled),
         QuantityRef::EventContextSourceToughness => ("EventContextSourceToughness", Handled),
         QuantityRef::EventContextSourceManaValue => ("EventContextSourceManaValue", Handled),
-        QuantityRef::CostPaidObjectManaValue => ("CostPaidObjectManaValue", Handled),
         QuantityRef::SpellsCastThisTurn { .. } => ("SpellsCastThisTurn", Handled),
         QuantityRef::EnteredThisTurn { .. } => ("EnteredThisTurn", Handled),
         QuantityRef::CrimesCommittedThisTurn => ("CrimesCommittedThisTurn", Handled),
@@ -4333,7 +4613,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::ZoneChangeCountThisTurn { .. } => ("ZoneChangeCountThisTurn", Handled),
         QuantityRef::TurnsTaken => ("TurnsTaken", Unhandled),
         QuantityRef::ChosenNumber => ("ChosenNumber", Unhandled),
-        QuantityRef::AttackedThisTurn => ("AttackedThisTurn", Unhandled),
+        QuantityRef::AttackedThisTurn => ("AttackedThisTurn", Handled),
         QuantityRef::DescendedThisTurn => ("DescendedThisTurn", Unhandled),
         QuantityRef::SpellsCastLastTurn => ("SpellsCastLastTurn", Unhandled),
         QuantityRef::CounterAddedThisTurn { .. } => ("CounterAddedThisTurn", Handled),
@@ -4364,6 +4644,7 @@ fn player_filter_feature(scope: &PlayerFilter) -> (&'static str, FeatureSupport)
     match scope {
         PlayerFilter::All => ("All", Handled),
         PlayerFilter::Opponent => ("Opponent", Handled),
+        PlayerFilter::DefendingPlayer => ("DefendingPlayer", Handled),
         PlayerFilter::OpponentLostLife => ("OpponentLostLife", Handled),
         PlayerFilter::OpponentGainedLife => ("OpponentGainedLife", Handled),
         PlayerFilter::HighestSpeed => ("HighestSpeed", Handled),
@@ -7116,6 +7397,7 @@ mod tests {
             parse_warnings: vec![],
             brawl_commander: false,
             metadata: Default::default(),
+            rarities: Default::default(),
         }
     }
 

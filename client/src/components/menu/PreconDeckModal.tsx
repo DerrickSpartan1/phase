@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 
-import { useDecks, type DeckEntry } from "../../hooks/useDecks";
+import { isCommanderPreconDeck, useDecks, type DeckEntry } from "../../hooks/useDecks";
 import { preconExists, savePreconDeck } from "../../services/preconDecks";
 import { menuButtonClass } from "./buttonStyles";
 
@@ -63,6 +63,7 @@ export function PreconDeckModal({ open, onClose, onImported }: PreconDeckModalPr
     const q = query.trim().toLowerCase();
     const counts = new Map<string, number>();
     for (const d of Object.values(decks)) {
+      if (!isCommanderPreconDeck(d)) continue;
       if (!matchesQuery(d, q)) continue;
       counts.set(d.type, (counts.get(d.type) ?? 0) + 1);
     }
@@ -79,6 +80,7 @@ export function PreconDeckModal({ open, onClose, onImported }: PreconDeckModalPr
     const q = query.trim().toLowerCase();
     return Object.entries(decks)
       .filter(([, d]) => {
+        if (!isCommanderPreconDeck(d)) return false;
         if (typeFilter !== ALL_TYPES && d.type !== typeFilter) return false;
         return matchesQuery(d, q);
       })
@@ -183,7 +185,7 @@ export function PreconDeckModal({ open, onClose, onImported }: PreconDeckModalPr
               Sourced from MTGJSON AllDeckFiles — every WotC-printed precon.
               {decks && (
                 <span className="ml-1 text-slate-500">
-                  · {Object.keys(decks).length} total
+                  · {Object.values(decks).filter(isCommanderPreconDeck).length} total
                 </span>
               )}
             </p>

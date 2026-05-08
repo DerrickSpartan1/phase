@@ -51,13 +51,15 @@
 //! produce the correct AST. The shell treats these as opaque and leaves the
 //! `you may ` prefix attached, deferring to those parsers.
 
-use nom::bytes::complete::tag;
+use crate::parser::oracle_nom::error::OracleError;
+use nom::branch::alt;
+use nom::bytes::complete::{tag, take_until};
 use nom::combinator::value;
 use nom::Parser;
-use nom_language::error::VerboseError;
 
 use super::oracle_effect::conditions::strip_leading_general_conditional;
 use super::oracle_effect::strip_trailing_duration;
+use super::oracle_ir::context::ParseContext;
 use super::oracle_nom::bridge::nom_on_lower;
 use crate::types::ability::{AbilityCondition, Duration};
 
@@ -163,7 +165,7 @@ fn peel_inner(text: String, mut ctx: ClauseContext) -> (String, ClauseContext) {
     // the same `parse_inner_condition` pipeline that the chunk loop uses
     // is the single authority for condition recognition.
     if ctx.condition.is_none() {
-        let (cond, rest) = strip_leading_general_conditional(&text);
+        let (cond, rest) = strip_leading_general_conditional(&text, &mut ParseContext::default());
         if let Some(cond) = cond {
             ctx.condition = Some(cond);
             return peel_inner(rest, ctx);
@@ -181,7 +183,7 @@ fn peel_inner(text: String, mut ctx: ClauseContext) -> (String, ClauseContext) {
 fn strip_optional_prefix(text: &str) -> Option<String> {
     let lower = text.to_lowercase();
     let (_, rest) = nom_on_lower(text, &lower, |i| {
-        value((), tag::<_, _, VerboseError<&str>>("you may ")).parse(i)
+        value((), tag::<_, _, OracleError<'_>>("you may ")).parse(i)
     })?;
     let rest_lower = rest.to_lowercase();
     if is_specialized_you_may_phrase(&rest_lower) {
@@ -202,7 +204,7 @@ fn is_specialized_duration_carrier(text_lower: &str) -> bool {
     use nom::branch::alt;
     use nom::bytes::complete::tag;
     use nom::combinator::value;
-    let head: nom::IResult<&str, (), VerboseError<&str>> = alt((
+    let head: nom::IResult<&str, (), OracleError<'_>> = alt((
         // CR 400.7i — impulse-draw bare form (post strip_optional_effect_prefix
         // in the chunk loop). `try_parse_play_from_exile` requires the
         // duration suffix to disambiguate vs. `Effect::CastFromZone`.
@@ -233,32 +235,46 @@ fn is_specialized_duration_carrier(text_lower: &str) -> bool {
 /// the parser. Stripping the prefix in front of these would prevent the
 /// dedicated parser from matching its full pattern.
 fn is_specialized_you_may_phrase(rest_lower: &str) -> bool {
-    const SPECIALIZED: &[&str] = &[
+    let head = alt((
         // "you may have target creature get ..." — causative
-        "have ",
+        value((), tag::<_, _, OracleError<'_>>("have ")),
         // "you may cast ... as though ..." — static permission grant
-        "cast ",
+        value((), tag::<_, _, OracleError<'_>>("cast ")),
         // "you may play that card ..." — impulse draw permission
-        "play ",
+        value((), tag::<_, _, OracleError<'_>>("play ")),
         // "you may choose new targets for ..." — retarget effect
-        "choose new targets ",
-        "choose new target ",
+        value((), tag::<_, _, OracleError<'_>>("choose new targets ")),
+        value((), tag::<_, _, OracleError<'_>>("choose new target ")),
         // "you may instead ..." — Dig alternative selection
-        "instead ",
+        value((), tag::<_, _, OracleError<'_>>("instead ")),
         // "you may repeat this process" — repetition directive
-        "repeat ",
+        value((), tag::<_, _, OracleError<'_>>("repeat ")),
         // "you may pay {X} rather than pay this spell's mana cost" — alt cost
-        "pay ",
+        value((), tag::<_, _, OracleError<'_>>("pay ")),
         // "you may search ... for ..." — search-with-may; specialized search parser
-        "search ",
+        value((), tag::<_, _, OracleError<'_>>("search ")),
         // "you may reveal a [type] card from your hand" — reveal-with-may
-        "reveal ",
+        value((), tag::<_, _, OracleError<'_>>("reveal ")),
         // "you may look at ..." — peek-with-may
-        "look ",
-        // "you may put N of those cards/them ..." — Dig-keep / put-from-among
-        "put ",
-    ];
-    SPECIALIZED.iter().any(|p| rest_lower.starts_with(p))
+        value((), tag::<_, _, OracleError<'_>>("look ")),
+    ))
+    .parse(rest_lower);
+    head.is_ok() || is_specialized_you_may_put_phrase(rest_lower)
+}
+
+fn is_specialized_you_may_put_phrase(rest_lower: &str) -> bool {
+    let Ok((after_put, _)) = tag::<_, _, OracleError<'_>>("put ").parse(rest_lower) else {
+        return false;
+    };
+    take_until::<_, _, OracleError<'_>>("from among")
+        .parse(after_put)
+        .is_ok()
+        || take_until::<_, _, OracleError<'_>>(" of them")
+            .parse(after_put)
+            .is_ok()
+        || take_until::<_, _, OracleError<'_>>(" of those cards")
+            .parse(after_put)
+            .is_ok()
 }
 
 #[cfg(test)]
@@ -298,6 +314,26 @@ mod tests {
     fn peel_skips_specialized_you_may_cast() {
         let (peeled, ctx) = peel_clause("you may cast that card");
         assert_eq!(peeled, "you may cast that card");
+        assert!(!ctx.optional);
+    }
+
+    #[test]
+    fn peel_optional_prefix_strips_generic_you_may_put() {
+        let input =
+            "you may put a construct, robot, or vehicle card from your hand onto the battlefield";
+        let (peeled, ctx) = peel_clause(input);
+        assert_eq!(
+            peeled,
+            "put a construct, robot, or vehicle card from your hand onto the battlefield"
+        );
+        assert!(ctx.optional);
+    }
+
+    #[test]
+    fn peel_skips_specialized_you_may_put_from_among() {
+        let input = "you may put a creature card from among them onto the battlefield";
+        let (peeled, ctx) = peel_clause(input);
+        assert_eq!(peeled, input);
         assert!(!ctx.optional);
     }
 

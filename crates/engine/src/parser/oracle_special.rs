@@ -1,9 +1,9 @@
+use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::tag;
 use nom::combinator::opt;
 use nom::combinator::value;
 use nom::Parser;
-use nom_language::error::VerboseError;
 
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, Comparator, DieResultBranch, Effect, SolveCondition,
@@ -85,7 +85,7 @@ pub(super) fn parse_defiler_cost_reduction(
     let (rest, mana_reduction) =
         parse_defiler_reduction_sentence(reduction_text.trim(), color).ok()?;
     let (rest, mana_limit) = opt((
-        tag::<_, _, VerboseError<&str>>(". this effect reduces only the amount of "),
+        tag::<_, _, OracleError<'_>>(". this effect reduces only the amount of "),
         parse_defiler_color,
         tag(" mana you pay"),
     ))
@@ -96,7 +96,7 @@ pub(super) fn parse_defiler_cost_reduction(
             return None;
         }
     }
-    let (rest, _) = opt(tag::<_, _, VerboseError<&str>>(".")).parse(rest).ok()?;
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>(".")).parse(rest).ok()?;
     if !rest.is_empty() {
         return None;
     }
@@ -307,16 +307,13 @@ fn parse_roll_die_sides(lower: &str) -> Option<u8> {
 
 /// CR 706: Parse word-form die patterns like "roll a six-sided die".
 fn parse_roll_die_sides_word_form(lower: &str) -> Option<u8> {
-    let (rest, _) = alt((tag::<_, _, VerboseError<&str>>("roll a "), tag("rolls a ")))
+    let (rest, _) = alt((tag::<_, _, OracleError<'_>>("roll a "), tag("rolls a ")))
         .parse(lower)
         .ok()?;
     let (_, sides) = alt((
         value(
             4_u8,
-            alt((
-                tag::<_, _, VerboseError<&str>>("four-sided"),
-                tag("4-sided"),
-            )),
+            alt((tag::<_, _, OracleError<'_>>("four-sided"), tag("4-sided"))),
         ),
         value(6, alt((tag("six-sided"), tag("6-sided")))),
         value(8, alt((tag("eight-sided"), tag("8-sided")))),
@@ -375,7 +372,7 @@ pub(super) fn parse_cumulative_upkeep_keyword(line: &str) -> Option<Keyword> {
         value(
             (),
             nom::sequence::pair(
-                tag::<_, _, VerboseError<&str>>("cumulative upkeep"),
+                tag::<_, _, OracleError<'_>>("cumulative upkeep"),
                 tag("\u{2014}"),
             ),
         )

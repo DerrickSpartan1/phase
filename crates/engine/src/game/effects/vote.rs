@@ -146,6 +146,8 @@ pub fn resolve_tally(
             targets: Vec::new(),
             source_id,
             controller,
+            original_controller: None,
+            scoped_player: None,
             kind: per_choice_effect[idx].kind,
             sub_ability: per_choice_effect[idx]
                 .sub_ability
@@ -168,8 +170,9 @@ pub fn resolve_tally(
             distribution: None,
             player_scope: None,
             chosen_x: None,
-            cost_paid_object_mana_value: None,
+            cost_paid_object: None,
             ability_index: None,
+            may_trigger_origin: None,
         };
         resolve_ability_chain(state, &chain, events, 0)?;
     }
@@ -193,6 +196,8 @@ fn resolved_from_def(
         targets: Vec::new(),
         source_id,
         controller,
+        original_controller: None,
+        scoped_player: None,
         kind: def.kind,
         sub_ability: def
             .sub_ability
@@ -213,8 +218,9 @@ fn resolved_from_def(
         distribution: None,
         player_scope: None,
         chosen_x: None,
-        cost_paid_object_mana_value: None,
+        cost_paid_object: None,
         ability_index: None,
+        may_trigger_origin: None,
     }
 }
 
@@ -324,6 +330,8 @@ mod tests {
             targets: vec![],
             source_id: ObjectId(1),
             controller,
+            original_controller: None,
+            scoped_player: None,
             kind: AbilityKind::Spell,
             sub_ability: None,
             else_ability: None,
@@ -341,8 +349,9 @@ mod tests {
             distribution: None,
             player_scope: None,
             chosen_x: None,
-            cost_paid_object_mana_value: None,
+            cost_paid_object: None,
             ability_index: None,
+            may_trigger_origin: None,
         };
 
         let mut events = Vec::new();

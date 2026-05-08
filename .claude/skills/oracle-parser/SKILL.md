@@ -586,35 +586,66 @@ The `crates/engine/src/parser/swallow_check.rs` module audits each card's parsed
 # Count total active warnings
 jq -r '[.[] | .parse_warnings // [] | .[]] | length' client/public/card-data.json
 
-# Top warning classes by frequency
-jq -r '[.[] | .parse_warnings // [] | .[]] | map(split(":")[0:2] | join(":")) |
-       group_by(.) | map({prefix: .[0], count: length}) | sort_by(.count) | reverse' \
-       client/public/card-data.json
+# Top clustered warning patterns by likely shared fix.
+cargo run -p engine --bin coverage-report -- data --brief \
+  --write-warning-patterns /tmp/parser-warning-patterns.json >/tmp/coverage.json
+jq -r '
+  [.[] | select(.category=="swallowed-clause")]
+  | sort_by(-.otherwise_supported_cards, -.card_count)
+  | .[0:25][]
+  | "\(.otherwise_supported_cards) otherwise / \(.card_count) cards / \(.single_gap_cards) single | \(.pattern) | \(.example_cards|join(", "))"
+' /tmp/parser-warning-patterns.json
 
-# Sample cards in a specific class
-jq -r '[.[] | .parse_warnings // [] | .[] | select(startswith("Swallow:DynamicQty"))] | .[0:5]' \
-       client/public/card-data.json
+# Drill down into one exact warning pattern. This uses the same clustering
+# function as parser-warning-patterns.json and includes support status,
+# gap count, warning text, parsed labels, and gap details.
+cargo run -p engine --bin coverage-report -- data \
+  --warning-category swallowed-clause \
+  --warning-pattern 'Replacement_Instead: instead' \
+  --warning-limit 20 >/tmp/warning-drilldown.json
+
+# Drill down into a broader detector family when exact-pattern slices are too narrow.
+cargo run -p engine --bin coverage-report -- data \
+  --warning-detector Replacement_Instead \
+  --warning-limit 20 >/tmp/warning-drilldown.json
+
+# Include the full parse_details tree and exported CardFace JSON when needed.
+cargo run -p engine --bin coverage-report -- data \
+  --warning-detector DynamicQty \
+  --warning-full \
+  --warning-limit 5 >/tmp/warning-drilldown-full.json
 ```
 
 **Detector class prefixes** (one row per detector in `swallow_check.rs`):
 
 | Prefix | What it flags |
 |---|---|
-| `Swallow:Condition_If` | "if <condition>" present in text but no `condition`/`constraint`/`if_clause` slot in AST |
-| `Swallow:Condition_Unless` | "unless …" not bound to `unless_filter` / `unless_*` slot |
-| `Swallow:Condition_AsLongAs` | "as long as …" not bound to a conditional static |
-| `Swallow:DynamicQty` | "for each / equal to / the number of / twice / half" present but AST has only `Fixed` quantity values — the canonical **count parsed but routed downstream as Fixed** bug class |
-| `Swallow:Duration_ThisTurn` / `_UntilEndOfTurn` / `_NextTurn` | duration phrase present but no `duration` slot populated |
-| `Swallow:Optional_YouMay` / `_MayHave` | "you may …" / "may have it …" not bound to the optional flag |
-| `Swallow:Replacement_Instead` | " instead" present but no replacement definition emitted |
-| `Swallow:ActivateOnlyDuring` / `:ActivateLimit` | activation timing/limit phrase not bound to a restriction slot |
-| `Swallow:APNAP` | "starting with you" / "in turn order" not bound to order metadata |
+| `Condition_If` | "if <condition>" present in text but no `condition`/`constraint`/`if_clause` slot in AST |
+| `Condition_Unless` | "unless …" not bound to `unless_filter` / `unless_*` slot |
+| `Condition_AsLongAs` | "as long as …" not bound to a conditional static |
+| `DynamicQty` | "for each / equal to / the number of / twice / half" present but AST has only `Fixed` quantity values — the canonical **count parsed but routed downstream as Fixed** bug class |
+| `Duration_ThisTurn` / `_UntilEndOfTurn` / `_NextTurn` | duration phrase present but no `duration` slot populated |
+| `Optional_YouMay` / `_MayHave` | "you may …" / "may have it …" not bound to the optional flag |
+| `Replacement_Instead` | " instead" present but no replacement definition emitted or the detector has a false positive because the AST represented the replacement through another supported structure |
+| `ActivateOnlyDuring` / `ActivateLimit` | activation timing/limit phrase not bound to a restriction slot |
+| `APNAP` | "starting with you" / "in turn order" not bound to order metadata |
 | `target-fallback:` | secondary class — `parse_target` couldn't classify a noun phrase, or a downstream chomping loop encountered an unmatched filter suffix |
 
+Current `card-data.json` stores parse warnings as structured diagnostics, not legacy strings:
+
+```json
+{ "type": "SwallowedClause", "detector": "Replacement_Instead", "description": "...", "line_index": 0 }
+```
+
+Use `--warning-detector <detector>` for broad-family triage and `--warning-pattern '<detector>: <normalized excerpt>'` for exact shared-fix slices. A high `supported_cards` count in the drilldown means the warning is likely detector noise or an already-parsed semantic that `swallow_check.rs` does not recognize yet; inspect `parsed_labels` before adding parser behavior.
+
 **Workflow:**
-1. When fixing a swallow, identify the dispatch site that *recognized* the marker but failed to either capture or chomp it. The fix is almost always at one of two places: the upstream recognition (route through the right `try_parse_*` interceptor) or the downstream chomping loop (add a missing arm). The peek-vs-chomp pitfall in §10 is the recurring root cause.
-2. After fixing, regenerate (`./scripts/gen-card-data.sh`) and recount; warnings should drop by exactly the affected class size.
-3. **Suppression rule** — `swallow_check.rs` skips all detectors when ANY ability on the card was already `Effect::Unimplemented` (the gap is reported there); only partial-parse cards run the full detector suite. So a "5-card drop" in `Swallow:DynamicQty` may also un-mute additional detectors on the same cards.
+1. Start with `parser-warning-patterns.json` sorted by `otherwise_supported_cards`; this finds the largest likely false-positive or minor-chomp groups.
+2. Run `coverage-report --warning-pattern ...` or `--warning-detector ...` and inspect `supported`, `gap_count`, `parsed_labels`, and `gap_details` before editing parser code.
+3. Classify the pattern: detector false positive, parsed primary effect with missing modifier, or real parser gap.
+4. When fixing a real swallow, identify the dispatch site that *recognized* the marker but failed to either capture or chomp it. The fix is almost always at one of two places: the upstream recognition (route through the right `try_parse_*` interceptor) or the downstream chomping loop (add a missing arm). The peek-vs-chomp pitfall in §10 is the recurring root cause.
+5. After fixing, regenerate (`./scripts/gen-card-data.sh`) and rerun the same drilldown; warnings should drop by exactly the affected class size unless other detectors were un-muted.
+6. **Suppression rule** — `swallow_check.rs` may skip detectors when a card already has stronger parser failures; fixing one issue can un-mute additional detector warnings on the same cards.
 
 **Companion Python audit:** `scripts/swallow_audit.py` runs the same heuristics over `coverage-data.json` independently of the Rust runtime. Use it for cross-checking, or for exploring novel detector classes before promoting them to `swallow_check.rs`.
 

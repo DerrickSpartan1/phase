@@ -1,11 +1,11 @@
 use std::str::FromStr;
 
+use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::combinator::value;
 use nom::sequence::terminated;
 use nom::Parser;
-use nom_language::error::{VerboseError, VerboseErrorKind};
 
 use super::oracle_nom::condition as nom_condition;
 use super::oracle_nom::primitives as nom_primitives;
@@ -43,7 +43,7 @@ fn parse_compound_condition(text: &str) -> Option<ParsedCondition> {
     if let Some(conditions) = parse_connector_split(text, " or ") {
         return Some(ParsedCondition::Or { conditions });
     }
-    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("not ").parse(text) {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("not ").parse(text) {
         let inner = parse_condition_text(rest)?;
         return Some(ParsedCondition::Not {
             condition: Box::new(inner),
@@ -107,7 +107,7 @@ fn parse_condition_text(text: &str) -> Option<ParsedCondition> {
 
     if value(
         (),
-        tag::<_, _, VerboseError<&str>>("you have the city's blessing"),
+        tag::<_, _, OracleError<'_>>("you have the city's blessing"),
     )
     .parse(text)
     .is_ok()
@@ -151,7 +151,7 @@ fn parse_source_condition(text: &str) -> Option<ParsedCondition> {
     //   "enchanted <noun>"   — Aura-attached source predicate
     //   "from your <zone>"   — zone-based source predicate
     if alt((
-        tag::<_, _, VerboseError<&str>>("this "),
+        tag::<_, _, OracleError<'_>>("this "),
         tag("enchanted "),
         tag("from your "),
         tag("~'s "),
@@ -175,7 +175,7 @@ fn parse_source_condition(text: &str) -> Option<ParsedCondition> {
     }
     // "enchanted [type] is untapped"
     if text.contains("is untapped") {
-        if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("enchanted ").parse(text) {
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("enchanted ").parse(text) {
             if let Some(type_text) = rest.strip_suffix(" is untapped") {
                 if let Some(core_type) = parse_core_type_word(type_text) {
                     return Some(ParsedCondition::SourceUntappedAttachedTo {
@@ -187,7 +187,7 @@ fn parse_source_condition(text: &str) -> Option<ParsedCondition> {
     }
     // "this creature doesn't have [keyword]" / "~ doesn't have [keyword]"
     if let Ok((keyword_text, _)) = alt((
-        tag::<_, _, VerboseError<&str>>("this creature doesn't have "),
+        tag::<_, _, OracleError<'_>>("this creature doesn't have "),
         tag("~ doesn't have "),
     ))
     .parse(text)
@@ -199,7 +199,7 @@ fn parse_source_condition(text: &str) -> Option<ParsedCondition> {
     }
     // "this creature is [color]" / "~ is [color]"
     if let Ok((color_text, _)) = alt((
-        tag::<_, _, VerboseError<&str>>("this creature is "),
+        tag::<_, _, OracleError<'_>>("this creature is "),
         tag("~ is "),
     ))
     .parse(text)
@@ -226,13 +226,13 @@ fn parse_source_condition(text: &str) -> Option<ParsedCondition> {
 
 fn parse_source_power_threshold(text: &str) -> Option<i32> {
     let (rest, _) = alt((
-        tag::<_, _, VerboseError<&str>>("this creature's power is "),
+        tag::<_, _, OracleError<'_>>("this creature's power is "),
         tag("~'s power is "),
     ))
     .parse(text)
     .ok()?;
     let (rest, power) = nom_primitives::parse_number(rest).ok()?;
-    let (rest, _) = tag::<_, _, VerboseError<&str>>(" or greater")
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" or greater")
         .parse(rest)
         .ok()?;
     rest.trim().is_empty().then_some(power as i32)
@@ -241,7 +241,7 @@ fn parse_source_power_threshold(text: &str) -> Option<i32> {
 fn parse_you_control_condition(text: &str) -> Option<ParsedCondition> {
     // "you control a [subtype] or there is a [subtype] card in your graveyard"
     if text.contains(" or there is a ") && text.contains(" card in your graveyard") {
-        if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("you control a ").parse(text) {
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("you control a ").parse(text) {
             if let Some(subtype) = rest.split(" or ").next() {
                 return Some(ParsedCondition::YouControlSubtypeOrGraveyardCardSubtype {
                     subtype: subtype.to_string(),
@@ -280,7 +280,7 @@ fn parse_you_control_condition(text: &str) -> Option<ParsedCondition> {
         return Some(ParsedCondition::YouControlSnowPermanentCountAtLeast { count });
     }
     // "you control N or more [color] permanents" / "you control N or more [core type]s"
-    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("you control ").parse(text) {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("you control ").parse(text) {
         if let Some((count_text, type_text)) = rest.split_once(" or more ") {
             if let Some(count) = parse_count_word(count_text) {
                 let type_text = type_text.trim().trim_end_matches('.');
@@ -311,7 +311,7 @@ fn parse_you_control_condition(text: &str) -> Option<ParsedCondition> {
     }
     // "you control a creature with [keyword]"
     if let Ok((keyword_text, _)) = alt((
-        tag::<_, _, VerboseError<&str>>("you control a creature with "),
+        tag::<_, _, OracleError<'_>>("you control a creature with "),
         tag("you control a creature that has "),
     ))
     .parse(text)
@@ -322,7 +322,7 @@ fn parse_you_control_condition(text: &str) -> Option<ParsedCondition> {
         }
     }
     // "you control a/another legendary creature"
-    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("you control ").parse(text) {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("you control ").parse(text) {
         if rest.contains("legendary creature") {
             return Some(ParsedCondition::YouControlLegendaryCreature);
         }
@@ -331,7 +331,7 @@ fn parse_you_control_condition(text: &str) -> Option<ParsedCondition> {
         }
     }
     // "you control fewer creatures than each opponent"
-    if tag::<_, _, VerboseError<&str>>("you control fewer creatures than")
+    if tag::<_, _, OracleError<'_>>("you control fewer creatures than")
         .parse(text)
         .is_ok()
     {
@@ -346,14 +346,14 @@ fn parse_you_control_condition(text: &str) -> Option<ParsedCondition> {
         });
     }
     // "you control no creatures"
-    if tag::<_, _, VerboseError<&str>>("you control no creatures")
+    if tag::<_, _, OracleError<'_>>("you control no creatures")
         .parse(text)
         .is_ok()
     {
         return Some(ParsedCondition::YouControlNoCreatures);
     }
     if let Ok((rest, _)) = alt((
-        tag::<_, _, VerboseError<&str>>("you control an "),
+        tag::<_, _, OracleError<'_>>("you control an "),
         tag("you control a "),
     ))
     .parse(text)
@@ -365,7 +365,7 @@ fn parse_you_control_condition(text: &str) -> Option<ParsedCondition> {
         }
     }
     if let Ok((rest, _)) = alt((
-        tag::<_, _, VerboseError<&str>>("you control an "),
+        tag::<_, _, OracleError<'_>>("you control an "),
         tag("you control a "),
     ))
     .parse(text)
@@ -386,12 +386,12 @@ fn parse_you_control_condition(text: &str) -> Option<ParsedCondition> {
 
 fn parse_zone_card_condition(text: &str) -> Option<ParsedCondition> {
     // "there are N or more ..." forms
-    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("there are ").parse(text) {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("there are ").parse(text) {
         if let Some((count, after_num)) = super::oracle_util::parse_number(rest) {
             let count = count as usize;
             // "there are N or more card types among cards in your <zone>"
             if let Ok((zone_text, _)) =
-                tag::<_, _, VerboseError<&str>>("or more card types among cards ").parse(after_num)
+                tag::<_, _, OracleError<'_>>("or more card types among cards ").parse(after_num)
             {
                 if let Some((_, zone)) = extract_zone_from_suffix(zone_text) {
                     return Some(ParsedCondition::ZoneCardTypeCountAtLeast { zone, count });
@@ -399,7 +399,7 @@ fn parse_zone_card_condition(text: &str) -> Option<ParsedCondition> {
             }
             // "there are N or more cards in your <zone>"
             if let Ok((zone_text, _)) =
-                tag::<_, _, VerboseError<&str>>("or more cards ").parse(after_num)
+                tag::<_, _, OracleError<'_>>("or more cards ").parse(after_num)
             {
                 if let Some((_, zone)) = extract_zone_from_suffix(zone_text) {
                     return Some(ParsedCondition::ZoneCardCountAtLeast { zone, count });
@@ -407,7 +407,7 @@ fn parse_zone_card_condition(text: &str) -> Option<ParsedCondition> {
             }
         }
         // "there are no <subtype> cards in your <zone>"
-        if let Ok((no_rest, _)) = tag::<_, _, VerboseError<&str>>("no ").parse(rest) {
+        if let Ok((no_rest, _)) = tag::<_, _, OracleError<'_>>("no ").parse(rest) {
             if let Some((subtype, zone)) = parse_subtype_zone_suffix(no_rest, " cards ") {
                 return Some(ParsedCondition::ZoneSubtypeCardCountAtLeast {
                     zone,
@@ -418,7 +418,7 @@ fn parse_zone_card_condition(text: &str) -> Option<ParsedCondition> {
         }
     }
     // "there is an <subtype> card in your <zone>"
-    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("there is an ").parse(text) {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("there is an ").parse(text) {
         if let Some((subtype, zone)) = parse_subtype_zone_suffix(rest, " card ") {
             return Some(ParsedCondition::ZoneSubtypeCardCountAtLeast {
                 zone,
@@ -428,7 +428,7 @@ fn parse_zone_card_condition(text: &str) -> Option<ParsedCondition> {
         }
     }
     // "two or more <subtype> cards are in your <zone>"
-    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("two or more ").parse(text) {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("two or more ").parse(text) {
         if let Some((subtype, zone)) = parse_subtype_zone_suffix(rest, " cards are ") {
             return Some(ParsedCondition::ZoneSubtypeCardCountAtLeast {
                 zone,
@@ -466,20 +466,20 @@ fn parse_hand_condition(text: &str) -> Option<ParsedCondition> {
         return None;
     }
     // "you have no cards in hand"
-    if tag::<_, _, VerboseError<&str>>("you have no cards")
+    if tag::<_, _, OracleError<'_>>("you have no cards")
         .parse(text)
         .is_ok()
     {
         return Some(ParsedCondition::HandSizeExact { count: 0 });
     }
-    if tag::<_, _, VerboseError<&str>>("you have one or fewer cards in hand")
+    if tag::<_, _, OracleError<'_>>("you have one or fewer cards in hand")
         .parse(text)
         .is_ok()
     {
         return Some(ParsedCondition::HandSizeOneOf { counts: vec![0, 1] });
     }
     // "you have more cards in hand than each opponent"
-    if tag::<_, _, VerboseError<&str>>("you have more cards in hand than")
+    if tag::<_, _, OracleError<'_>>("you have more cards in hand than")
         .parse(text)
         .is_ok()
     {
@@ -494,7 +494,7 @@ fn parse_hand_condition(text: &str) -> Option<ParsedCondition> {
         });
     }
     // "you have exactly N or M cards in hand"
-    if let Some(rest) = tag::<_, _, VerboseError<&str>>("you have exactly ")
+    if let Some(rest) = tag::<_, _, OracleError<'_>>("you have exactly ")
         .parse(text)
         .ok()
         .and_then(|(rest, _)| rest.strip_suffix(" cards in hand"))
@@ -533,7 +533,7 @@ fn parse_event_condition(text: &str) -> Option<ParsedCondition> {
     }
 
     // "an opponent [verb phrase]" — prefix dispatch
-    if let Ok((verb_phrase, _)) = tag::<_, _, VerboseError<&str>>("an opponent ").parse(text) {
+    if let Ok((verb_phrase, _)) = tag::<_, _, OracleError<'_>>("an opponent ").parse(text) {
         if let Ok((_, condition)) = parse_opponent_event(verb_phrase) {
             return Some(condition);
         }
@@ -550,7 +550,7 @@ fn parse_event_condition(text: &str) -> Option<ParsedCondition> {
     // "you've been attacked this step"
     if let Ok((_, _)) = alt((
         terminated(
-            tag::<_, _, VerboseError<&str>>("you've been attacked"),
+            tag::<_, _, OracleError<'_>>("you've been attacked"),
             tag(" this step"),
         ),
         terminated(tag("been attacked"), tag(" this step")),
@@ -576,7 +576,7 @@ fn parse_event_condition(text: &str) -> Option<ParsedCondition> {
         value(
             (),
             terminated(
-                tag::<_, _, VerboseError<&str>>("you cast a noncreature spell"),
+                tag::<_, _, OracleError<'_>>("you cast a noncreature spell"),
                 tag(" this turn"),
             ),
         ),
@@ -599,7 +599,7 @@ fn parse_event_condition(text: &str) -> Option<ParsedCondition> {
         value(
             (),
             terminated(
-                tag::<_, _, VerboseError<&str>>("you've cast another spell"),
+                tag::<_, _, OracleError<'_>>("you've cast another spell"),
                 tag(" this turn"),
             ),
         ),
@@ -619,7 +619,7 @@ fn parse_event_condition(text: &str) -> Option<ParsedCondition> {
         value(
             (),
             terminated(
-                tag::<_, _, VerboseError<&str>>("you discarded a card"),
+                tag::<_, _, OracleError<'_>>("you discarded a card"),
                 tag(" this turn"),
             ),
         ),
@@ -639,7 +639,7 @@ fn parse_event_condition(text: &str) -> Option<ParsedCondition> {
         value(
             (),
             terminated(
-                tag::<_, _, VerboseError<&str>>("you sacrificed an artifact"),
+                tag::<_, _, OracleError<'_>>("you sacrificed an artifact"),
                 tag(" this turn"),
             ),
         ),
@@ -662,13 +662,11 @@ fn parse_event_condition(text: &str) -> Option<ParsedCondition> {
     None
 }
 
-fn parse_you_cast_spell_this_turn(
-    text: &str,
-) -> nom::IResult<&str, TargetFilter, VerboseError<&str>> {
+fn parse_you_cast_spell_this_turn(text: &str) -> nom::IResult<&str, TargetFilter, OracleError<'_>> {
     let (rest, _) = alt((
-        tag::<_, _, VerboseError<&str>>("you've cast another "),
+        tag::<_, _, OracleError<'_>>("you've cast another "),
         tag("you cast another "),
-        tag::<_, _, VerboseError<&str>>("you've cast an "),
+        tag::<_, _, OracleError<'_>>("you've cast an "),
         tag("you cast an "),
         tag("you've cast a "),
         tag("you cast a "),
@@ -676,18 +674,17 @@ fn parse_you_cast_spell_this_turn(
     .parse(text)?;
     let (rest, type_text) = take_until(" spell this turn").parse(rest)?;
     let Some(filter) = nom_condition::parse_spell_history_filter(type_text) else {
-        return Err(nom::Err::Error(VerboseError {
-            errors: vec![(text, VerboseErrorKind::Nom(nom::error::ErrorKind::Tag))],
-        }));
+        return Err(nom::Err::Error(nom::error::Error::new(
+            text,
+            nom::error::ErrorKind::Fail,
+        )));
     };
     let (rest, _) = tag(" spell this turn").parse(rest)?;
     Ok((rest, filter))
 }
 
 /// "an opponent [verb phrase]" → typed condition
-fn parse_opponent_event(
-    verb_phrase: &str,
-) -> nom::IResult<&str, ParsedCondition, VerboseError<&str>> {
+fn parse_opponent_event(verb_phrase: &str) -> nom::IResult<&str, ParsedCondition, OracleError<'_>> {
     alt((
         value(
             ParsedCondition::PlayerCountAtLeast {
@@ -716,9 +713,7 @@ fn parse_opponent_event(
 }
 
 /// "you [action] this turn" — exact structural matching with terminated()
-fn parse_you_event_this_turn(
-    text: &str,
-) -> nom::IResult<&str, ParsedCondition, VerboseError<&str>> {
+fn parse_you_event_this_turn(text: &str) -> nom::IResult<&str, ParsedCondition, OracleError<'_>> {
     alt((
         value(
             ParsedCondition::YouAttackedThisTurn,
@@ -743,7 +738,7 @@ fn parse_you_event_this_turn(
 /// "[type] enter(ed) the battlefield under your control this turn"
 fn parse_etb_this_turn_condition(
     text: &str,
-) -> nom::IResult<&str, ParsedCondition, VerboseError<&str>> {
+) -> nom::IResult<&str, ParsedCondition, OracleError<'_>> {
     alt((
         value(
             ParsedCondition::YouHadCreatureEnterThisTurn,
@@ -774,20 +769,19 @@ fn scan_contains_tag(text: &str, phrase: &str) -> bool {
 
 /// Scan source condition text for state keywords at word boundaries using nom.
 /// Matches "[subject] is attacking", "[subject] is blocked", "[subject] suspended", etc.
-fn scan_source_state(text: &str) -> nom::IResult<&str, ParsedCondition, VerboseError<&str>> {
+fn scan_source_state(text: &str) -> nom::IResult<&str, ParsedCondition, OracleError<'_>> {
     // scan_at_word_boundaries returns Option<ParsedCondition> — wrap into IResult
     match super::oracle_nom::primitives::scan_at_word_boundaries(text, parse_source_state_keyword) {
         Some(condition) => Ok(("", condition)),
-        None => Err(nom::Err::Error(VerboseError {
-            errors: vec![(text, VerboseErrorKind::Context("no source state"))],
-        })),
+        None => Err(nom::Err::Error(nom::error::Error::new(
+            text,
+            nom::error::ErrorKind::Fail,
+        ))),
     }
 }
 
 /// Nom combinator: match source state keywords at the current position.
-fn parse_source_state_keyword(
-    input: &str,
-) -> nom::IResult<&str, ParsedCondition, VerboseError<&str>> {
+fn parse_source_state_keyword(input: &str) -> nom::IResult<&str, ParsedCondition, OracleError<'_>> {
     alt((
         value(
             ParsedCondition::SourceIsAttackingOrBlocking,
@@ -846,7 +840,7 @@ fn parse_color_word(text: &str) -> Option<ManaColor> {
 }
 
 fn parse_creature_pt_condition(text: &str) -> Option<(i32, i32)> {
-    let stats = tag::<_, _, VerboseError<&str>>("you control a ")
+    let stats = tag::<_, _, OracleError<'_>>("you control a ")
         .parse(text)
         .ok()
         .and_then(|(rest, _)| rest.strip_suffix(" creature"))?;
@@ -856,7 +850,7 @@ fn parse_creature_pt_condition(text: &str) -> Option<(i32, i32)> {
 
 fn parse_counter_requirement(text: &str) -> Option<(CounterType, u32)> {
     if let Some(counter_name) = alt((
-        tag::<_, _, VerboseError<&str>>("~ has "),
+        tag::<_, _, OracleError<'_>>("~ has "),
         tag("this artifact has "),
         tag("this enchantment has "),
     ))
@@ -874,7 +868,7 @@ fn parse_counter_requirement(text: &str) -> Option<(CounterType, u32)> {
     // the canonical normalized "~" token (the upstream parser rewrites
     // self-noun phrases like "this artifact" to "~" before reaching here) or
     // the un-normalized "this artifact" / "this enchantment" form.
-    if let Some(counter_name) = tag::<_, _, VerboseError<&str>>("there are ")
+    if let Some(counter_name) = tag::<_, _, OracleError<'_>>("there are ")
         .parse(text)
         .ok()
         .and_then(|(rest, _)| {
@@ -893,7 +887,7 @@ fn parse_counter_requirement(text: &str) -> Option<(CounterType, u32)> {
 }
 
 fn parse_counter_absence_requirement(text: &str) -> Option<CounterType> {
-    tag::<_, _, VerboseError<&str>>("there are no ")
+    tag::<_, _, OracleError<'_>>("there are no ")
         .parse(text)
         .ok()
         .and_then(|(rest, _)| {
@@ -906,7 +900,7 @@ fn parse_counter_absence_requirement(text: &str) -> Option<CounterType> {
 
 fn parse_you_control_land_subtypes(text: &str) -> Option<Vec<String>> {
     let rest = alt((
-        tag::<_, _, VerboseError<&str>>("you control an "),
+        tag::<_, _, OracleError<'_>>("you control an "),
         tag("you control a "),
     ))
     .parse(text)
@@ -940,7 +934,7 @@ fn parse_you_control_land_subtypes(text: &str) -> Option<Vec<String>> {
 }
 
 fn parse_you_control_subtype_count(text: &str) -> Option<(usize, String)> {
-    let (rest, _) = tag::<_, _, VerboseError<&str>>("you control ")
+    let (rest, _) = tag::<_, _, OracleError<'_>>("you control ")
         .parse(text)
         .ok()?;
     let (minimum_text, subtype_text) = rest.split_once(" or more ")?;

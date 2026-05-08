@@ -14,6 +14,8 @@ use super::turn_control;
 /// viewer is explicitly allowed to see them.
 pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState {
     let mut filtered = state.clone();
+    filtered.pending_begin_game_abilities.clear();
+    filtered.resolving_begin_game_abilities = false;
     let can_view_private_for_player = |player: PlayerId| {
         player == viewer
             || (player == state.active_player
@@ -82,6 +84,12 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     } else {
         HashSet::new()
     };
+    let drawn_choice_hand_cards: HashSet<ObjectId> =
+        if let WaitingFor::DrawnThisTurnTopdeckChoice { ref cards, .. } = filtered.waiting_for {
+            cards.iter().copied().collect()
+        } else {
+            HashSet::new()
+        };
 
     let all_library_ids: Vec<ObjectId> = filtered
         .players
@@ -98,7 +106,10 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
             // contain dig cards, so the exclusion still applies.
             || (state.revealed_cards.contains(&obj_id)
                 && !manifest_dread_cards.contains(&obj_id));
-        if !visible && !effect_zone_hand_cards.contains(&obj_id) {
+        if !visible
+            && !effect_zone_hand_cards.contains(&obj_id)
+            && !drawn_choice_hand_cards.contains(&obj_id)
+        {
             hide_card(&mut filtered, obj_id);
         }
     }
@@ -269,12 +280,38 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
             };
         }
     }
+    if let WaitingFor::DrawnThisTurnTopdeckChoice {
+        player,
+        ref cards,
+        count,
+        min_count,
+        life_payment,
+        source_id,
+    } = state.waiting_for
+    {
+        if !can_view_private_for_player(player) {
+            filtered.waiting_for = WaitingFor::DrawnThisTurnTopdeckChoice {
+                player,
+                cards: cards.iter().map(|_| ObjectId(0)).collect(),
+                count,
+                min_count,
+                life_payment,
+                source_id,
+            };
+        }
+    }
 
     filtered.auto_pass.retain(|pid, _| *pid == viewer);
     filtered.phase_stops.retain(|pid, _| *pid == viewer);
     filtered
+        .may_trigger_auto_choices
+        .retain(|record| record.key.player == viewer);
+    filtered
         .lands_tapped_for_mana
         .retain(|pid, _| *pid == viewer);
+    filtered
+        .cards_drawn_this_turn
+        .retain(|pid, _| can_view_private_for_player(*pid));
 
     // CR 601.2 + CR 408: A spell being cast is on the stack and is public information —
     // caster, targets, chosen X values, and pending mana payment are all visible to
@@ -327,7 +364,10 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{Effect, ResolvedAbility};
     use crate::types::format::FormatConfig;
-    use crate::types::game_state::{CastingVariant, PendingCast};
+    use crate::types::game_state::{
+        AutoMayChoice, CastingVariant, MayTriggerAutoChoiceKey, MayTriggerOrigin,
+        PendingBeginGameAbility, PendingCast,
+    };
     use crate::types::identifiers::CardId;
     use crate::types::mana::ManaCost;
     use crate::types::zones::{ExileCostSourceZone, Zone};
@@ -357,9 +397,37 @@ mod tests {
             distribute: None,
             origin_zone: crate::types::zones::Zone::Hand,
             additional_cost_flow: None,
+            deferred_modal_choice: None,
+            declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
         })
+    }
+
+    #[test]
+    fn filters_other_players_may_trigger_auto_choices() {
+        let mut state = GameState::new_two_player(42);
+        state.set_may_trigger_auto_choice(
+            MayTriggerAutoChoiceKey {
+                player: PlayerId(0),
+                source_id: ObjectId(10),
+                origin: MayTriggerOrigin::Printed { trigger_index: 0 },
+            },
+            AutoMayChoice::Accept,
+        );
+        state.set_may_trigger_auto_choice(
+            MayTriggerAutoChoiceKey {
+                player: PlayerId(1),
+                source_id: ObjectId(11),
+                origin: MayTriggerOrigin::Printed { trigger_index: 0 },
+            },
+            AutoMayChoice::Decline,
+        );
+
+        let filtered = filter_state_for_viewer(&state, PlayerId(0));
+
+        assert_eq!(filtered.may_trigger_auto_choices.len(), 1);
+        assert_eq!(filtered.may_trigger_auto_choices[0].key.player, PlayerId(0));
     }
 
     #[test]
@@ -393,6 +461,39 @@ mod tests {
             filtered.objects.get(&card_id).map(|obj| obj.name.as_str()),
             Some("Hidden Tutor Target")
         );
+    }
+
+    #[test]
+    fn filtered_state_hides_pending_begin_game_queue() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(0),
+            "Opening Hand Card".to_string(),
+            Zone::Hand,
+        );
+        state
+            .pending_begin_game_abilities
+            .push(PendingBeginGameAbility {
+                ability: ResolvedAbility::new(
+                    Effect::Unimplemented {
+                        name: "Hidden Begin Game Ability".to_string(),
+                        description: None,
+                    },
+                    vec![],
+                    source,
+                    PlayerId(0),
+                ),
+            });
+        state.resolving_begin_game_abilities = true;
+
+        let filtered = filter_state_for_viewer(&state, PlayerId(1));
+
+        assert!(filtered.pending_begin_game_abilities.is_empty());
+        assert!(!filtered.resolving_begin_game_abilities);
+        assert_eq!(state.pending_begin_game_abilities.len(), 1);
+        assert!(state.resolving_begin_game_abilities);
     }
 
     #[test]
@@ -600,6 +701,55 @@ mod tests {
                 assert_eq!(pending_cast.object_id, ObjectId(50));
             }
             other => panic!("expected ExileForCost, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn drawn_this_turn_choice_private_tracking_is_hidden_from_non_controller() {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let card_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Drawn Secret".to_string(),
+            Zone::Hand,
+        );
+        state
+            .cards_drawn_this_turn
+            .insert(PlayerId(1), vec![card_id]);
+        state.waiting_for = WaitingFor::DrawnThisTurnTopdeckChoice {
+            player: PlayerId(1),
+            cards: vec![card_id],
+            count: 1,
+            min_count: 0,
+            life_payment: 4,
+            source_id: ObjectId(99),
+        };
+
+        let filtered_self = filter_state_for_viewer(&state, PlayerId(1));
+        assert_eq!(
+            filtered_self.cards_drawn_this_turn.get(&PlayerId(1)),
+            Some(&vec![card_id])
+        );
+        match filtered_self.waiting_for {
+            WaitingFor::DrawnThisTurnTopdeckChoice { cards, .. } => {
+                assert_eq!(cards, vec![card_id]);
+            }
+            other => panic!("expected DrawnThisTurnTopdeckChoice, got {other:?}"),
+        }
+
+        let filtered_opp = filter_state_for_viewer(&state, PlayerId(2));
+        assert!(
+            !filtered_opp
+                .cards_drawn_this_turn
+                .contains_key(&PlayerId(1)),
+            "opponents must not learn which hidden hand cards were drawn this turn"
+        );
+        match filtered_opp.waiting_for {
+            WaitingFor::DrawnThisTurnTopdeckChoice { cards, .. } => {
+                assert_eq!(cards, vec![ObjectId(0)]);
+            }
+            other => panic!("expected DrawnThisTurnTopdeckChoice, got {other:?}"),
         }
     }
 

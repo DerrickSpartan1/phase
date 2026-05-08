@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+DATA_DIR="data/scryfall"
+ARTWORK_FILE="$DATA_DIR/unique-artwork.json"
+OUTPUT="client/public/scryfall-printings.json"
+
+echo "=== Scryfall Printings Generation ==="
+
+if [ ! -f "$ARTWORK_FILE" ]; then
+  echo "Downloading Scryfall unique-artwork bulk data..."
+  mkdir -p "$DATA_DIR"
+  DOWNLOAD_URI=$(curl -s "https://api.scryfall.com/bulk-data" \
+    | jq -r '.data[] | select(.type == "unique_artwork") | .download_uri')
+  curl -L -o "$ARTWORK_FILE" "$DOWNLOAD_URI"
+  echo "Downloaded $ARTWORK_FILE."
+fi
+
+if [ -f "$OUTPUT" ]; then
+  echo "Skipping generation — $OUTPUT already exists (delete to regenerate)."
+  exit 0
+fi
+
+echo "Generating $OUTPUT..."
+mkdir -p "$(dirname "$OUTPUT")"
+
+# Build a printings index keyed by oracle_id.
+#
+# Only cards with >1 unique artwork are included (nothing to pick from
+# otherwise). Each oracle_id maps to an array of PrintingEntry objects
+# sorted by released_at descending (newest first).
+#
+# DFC handling: when top-level image_uris is null, per-face URLs are
+# extracted from card_faces[].image_uris.
+#
+# Non-playable layouts (token, emblem, art_series, etc.) are excluded.
+NON_PLAYABLE='["token","double_faced_token","emblem","art_series","vanguard","scheme","planar","augment","host"]'
+
+jq -c --argjson exclude "$NON_PLAYABLE" '
+  [.[] |
+    select(.oracle_id != null) |
+    select(.layout as $l | $exclude | index($l) | not) |
+    {
+      oracle_id: .oracle_id,
+      entry: {
+        id: .id,
+        set: .set,
+        set_name: .set_name,
+        collector_number: .collector_number,
+        released_at: .released_at,
+        border_color: .border_color,
+        frame_effects: (.frame_effects // []),
+        full_art: (.full_art // false),
+        faces: (if .card_faces then
+          [.card_faces[] | {
+            normal: (.image_uris.normal // null),
+            art_crop: (.image_uris.art_crop // null)
+          }]
+        else
+          [{normal: .image_uris.normal, art_crop: .image_uris.art_crop}]
+        end)
+      }
+    }
+  ] |
+  group_by(.oracle_id) |
+  [.[] | select(length > 1)] |
+  map({
+    key: .[0].oracle_id,
+    value: ([.[].entry] | sort_by(.released_at) | reverse)
+  }) |
+  from_entries
+' "$ARTWORK_FILE" > "$OUTPUT"
+
+ENTRY_COUNT=$(jq 'length' "$OUTPUT")
+FILE_SIZE=$(du -h "$OUTPUT" | cut -f1)
+echo "Generated $OUTPUT ($FILE_SIZE, $ENTRY_COUNT oracle_ids with multiple artworks)"

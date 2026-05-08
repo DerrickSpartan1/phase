@@ -11,8 +11,8 @@ use engine::game::engine::apply;
 use engine::game::{
     evaluate_deck_compatibility, filter_state_for_viewer, finalize_public_state,
     is_commander_eligible, load_and_hydrate_decks, rehydrate_game_from_card_db, resolve_deck_list,
-    start_game, start_game_with_starting_player, validate_deck_for_format,
-    DeckCompatibilityRequest, DeckList,
+    start_game, start_game_with_starting_player, validate_name_deck_for_format,
+    DeckCompatibilityRequest, DeckList, PlayerDeckList,
 };
 use engine::types::format::{FormatConfig, GameFormat};
 use engine::types::identifiers::ObjectId;
@@ -21,7 +21,7 @@ use engine::types::match_config::MatchConfig;
 use engine::types::{GameAction, GameState, PlayerId};
 
 use engine::game::deck_loading::PlayerDeckPayload;
-use engine::game::{resolve_player_deck_list, PlayerDeckList};
+use engine::game::resolve_player_deck_list;
 use engine::starter_decks;
 use phase_ai::deck_profile::{ArchetypeClassification, DeckArchetype, DeckProfile};
 use seat_reducer::types::{DeckChoice, DeckResolver, ReducerCtx, SeatMutation, SeatState};
@@ -424,6 +424,7 @@ pub fn initialize_game(
     let game_format = format_config.format;
 
     let mut state = GameState::new(format_config, count, seed);
+    state.debug_mode = true;
     state.match_config = if !match_config_js.is_null() && !match_config_js.is_undefined() {
         serde_wasm_bindgen::from_value::<MatchConfig>(match_config_js)
             .unwrap_or_else(|_| MatchConfig::default())
@@ -438,16 +439,43 @@ pub fn initialize_game(
                 let borrow = cell.borrow();
                 let db = borrow.as_ref()?;
 
-                // Validate player deck against the selected format before loading
-                let validation_request = DeckCompatibilityRequest {
-                    main_deck: deck_list.player.main_deck.clone(),
-                    sideboard: deck_list.player.sideboard.clone(),
-                    commander: deck_list.player.commander.clone(),
-                    selected_format: Some(game_format),
-                    selected_match_type: None,
-                };
-                if let Err(reasons) = validate_deck_for_format(db, &validation_request) {
-                    return Some(reasons);
+                for (seat, deck) in [
+                    ("Player".to_string(), &deck_list.player),
+                    ("AI opponent".to_string(), &deck_list.opponent),
+                ] {
+                    if let Err(reasons) = validate_name_deck_for_format(
+                        db,
+                        &deck.main_deck,
+                        &deck.sideboard,
+                        &deck.commander,
+                        game_format,
+                        Some(state.match_config.match_type),
+                    ) {
+                        return Some(
+                            reasons
+                                .into_iter()
+                                .map(|reason| format!("{seat} deck: {reason}"))
+                                .collect(),
+                        );
+                    }
+                }
+                for (idx, deck) in deck_list.ai_decks.iter().enumerate() {
+                    let seat = format!("AI player {}", idx + 2);
+                    if let Err(reasons) = validate_name_deck_for_format(
+                        db,
+                        &deck.main_deck,
+                        &deck.sideboard,
+                        &deck.commander,
+                        game_format,
+                        Some(state.match_config.match_type),
+                    ) {
+                        return Some(
+                            reasons
+                                .into_iter()
+                                .map(|reason| format!("{seat} deck: {reason}"))
+                                .collect(),
+                        );
+                    }
                 }
 
                 let mut payload = resolve_deck_list(db, &deck_list);
@@ -512,12 +540,74 @@ pub fn submit_action(actor: u8, action: JsValue) -> JsValue {
     };
     let actor = PlayerId(actor);
 
+    if matches!(action, GameAction::Debug(_)) && is_multiplayer_mode() {
+        return JsValue::from_str("Engine error: debug actions disabled in multiplayer");
+    }
+
+    if let GameAction::Debug(engine::types::actions::DebugAction::CreateCard {
+        ref card_name,
+        owner,
+        zone,
+    }) = action
+    {
+        return handle_debug_create_card(card_name, owner, zone);
+    }
+
     match with_state_mut(|state| match apply(state, actor, action) {
         Ok(result) => to_js(&result),
         Err(e) => {
             let error_msg = format!("Engine error: {}", e);
             JsValue::from_str(&error_msg)
         }
+    }) {
+        Ok(val) => val,
+        Err(e) => e,
+    }
+}
+
+fn handle_debug_create_card(
+    card_name: &str,
+    owner: PlayerId,
+    zone: engine::types::zones::Zone,
+) -> JsValue {
+    let face = CARD_DB.with(|cell| {
+        let db = cell.borrow();
+        let Some(db) = db.as_ref() else {
+            return Err("Engine error: card database not loaded");
+        };
+        match db.get_face_by_name(card_name) {
+            Some(face) => Ok(face.clone()),
+            None => Err("Engine error: card not found in database"),
+        }
+    });
+    let face = match face {
+        Ok(f) => f,
+        Err(msg) => return JsValue::from_str(msg),
+    };
+    match with_state_mut(|state| {
+        if !state.debug_mode {
+            return JsValue::from_str(
+                "Engine error: Debug actions require debug_mode to be enabled",
+            );
+        }
+        if !state.players.iter().any(|p| p.id == owner) {
+            return JsValue::from_str("Engine error: Debug: invalid owner player id");
+        }
+        let card_id = engine::types::identifiers::CardId(state.next_object_id);
+        let obj_id =
+            engine::game::zones::create_object(state, card_id, owner, face.name.clone(), zone);
+        let obj = state.objects.get_mut(&obj_id).expect("just created");
+        engine::game::printed_cards::apply_card_face_to_object(obj, &face);
+        state.layers_dirty = true;
+        engine::game::public_state::bump_state_revision(state);
+        engine::game::public_state::mark_public_state_all_dirty(state);
+        engine::game::public_state::finalize_public_state(state);
+        let result = engine::types::game_state::ActionResult {
+            events: vec![],
+            waiting_for: state.waiting_for.clone(),
+            log_entries: vec![],
+        };
+        to_js(&result)
     }) {
         Ok(val) => val,
         Err(e) => e,
@@ -693,6 +783,7 @@ pub fn restore_game_state(json_str: &str) -> Result<(), JsValue> {
     let mut state: GameState = serde_json::from_str(json_str)
         .map_err(|e| JsValue::from_str(&format!("Failed to deserialize GameState: {}", e)))?;
     state.rng = ChaCha20Rng::seed_from_u64(state.rng_seed);
+    state.debug_mode = true;
     CARD_DB.with(|cell| {
         if let Some(db) = cell.borrow().as_ref() {
             rehydrate_game_from_card_db(&mut state, db);
@@ -853,6 +944,168 @@ pub fn select_action_from_scores(
         Some(action) => Ok(to_js(&action)),
         None => Ok(JsValue::NULL),
     }
+}
+
+/// Batch-resolve the stack by auto-passing priority for the requesting player
+/// and delegating to the AI for opponent decisions. Runs entirely inside WASM
+/// with no JS round-trips between resolutions — collapses the O(N) priority
+/// pass cycle into a single call.
+///
+/// `requester` is the human player seat (whose "Resolve All" click initiated
+/// this). `ai_seats_json` is a JSON array of `{ playerId, difficulty }` for
+/// each AI opponent.
+///
+/// Returns a `BatchResolveResult` with all accumulated events, the final
+/// `WaitingFor`, and a count of items resolved.
+///
+/// Stop conditions (all CR-compliant):
+/// - Stack empties
+/// - Stack grows beyond baseline (new triggers appeared — pause for human)
+/// - An interactive `WaitingFor` appears (target selection, scry, etc.)
+/// - An AI player chooses a non-pass action (response spell/ability)
+/// - Game ends
+/// - Safety cap reached (prevents infinite loops from cascading triggers)
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BatchResolveResult {
+    events: Vec<engine::types::events::GameEvent>,
+    waiting_for: engine::types::game_state::WaitingFor,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    log_entries: Vec<engine::types::log::GameLogEntry>,
+    items_resolved: u32,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AiSeatConfig {
+    player_id: u8,
+    difficulty: String,
+}
+
+#[wasm_bindgen]
+pub fn resolve_all(
+    requester: u8,
+    ai_seats_json: &str,
+    max_resolutions: u32,
+) -> Result<JsValue, JsValue> {
+    let ai_seats: Vec<AiSeatConfig> = serde_json::from_str(ai_seats_json)
+        .map_err(|e| JsValue::from_str(&format!("Failed to deserialize AI seats: {e}")))?;
+
+    let requester = PlayerId(requester);
+    let resolution_cap = if max_resolutions == 0 {
+        u32::MAX
+    } else {
+        max_resolutions
+    };
+
+    with_state_mut(|state| {
+        let initial_stack_len = state.stack.len();
+        let mut all_events = Vec::new();
+        let mut all_log_entries = Vec::new();
+        let mut items_resolved: u32 = 0;
+        // Safety cap: 2 passes per player per stack item + headroom for new triggers
+        let max_iterations = initial_stack_len
+            .saturating_mul(state.players.len())
+            .saturating_mul(4)
+            .clamp(100, 20_000);
+
+        for _ in 0..max_iterations {
+            let wf = &state.waiting_for;
+
+            // Stop: game over
+            if matches!(wf, engine::types::game_state::WaitingFor::GameOver { .. }) {
+                break;
+            }
+
+            // Stop: non-priority interactive WaitingFor
+            let Some(acting) = wf.acting_player() else {
+                break;
+            };
+            if !matches!(wf, engine::types::game_state::WaitingFor::Priority { .. }) {
+                break;
+            }
+
+            // Stop: stack emptied
+            if state.stack.is_empty() {
+                break;
+            }
+
+            // Stop: stack grew beyond initial size (new triggers appeared)
+            if state.stack.len() > initial_stack_len {
+                break;
+            }
+
+            // Determine the action for the current priority holder
+            let action = if acting == requester {
+                // Human requested resolve-all — auto-pass
+                GameAction::PassPriority
+            } else if let Some(seat) = ai_seats.iter().find(|s| PlayerId(s.player_id) == acting) {
+                // AI player — ask the AI what to do
+                let ai_difficulty = match seat.difficulty.as_str() {
+                    "VeryEasy" => AiDifficulty::VeryEasy,
+                    "Easy" => AiDifficulty::Easy,
+                    "Medium" => AiDifficulty::Medium,
+                    "Hard" => AiDifficulty::Hard,
+                    "VeryHard" => AiDifficulty::VeryHard,
+                    _ => AiDifficulty::Medium,
+                };
+                let config = create_config_for_players(
+                    ai_difficulty,
+                    Platform::Wasm,
+                    state.players.len() as u8,
+                );
+                let mut rng = rand::rng();
+                match choose_action(state, acting, &config, &mut rng) {
+                    Some(action) => {
+                        if !matches!(action, GameAction::PassPriority) {
+                            // AI wants to respond — apply and stop
+                            if let Ok(result) = apply(state, acting, action) {
+                                all_events.extend(result.events);
+                                all_log_entries.extend(result.log_entries);
+                            }
+                            break;
+                        }
+                        GameAction::PassPriority
+                    }
+                    None => GameAction::PassPriority,
+                }
+            } else {
+                // Unknown seat — shouldn't happen, but pass to avoid deadlock
+                GameAction::PassPriority
+            };
+
+            // Track resolutions: a resolution happens when all players pass
+            // and the stack shrinks
+            let stack_before = state.stack.len();
+
+            match apply(state, acting, action) {
+                Ok(result) => {
+                    all_events.extend(result.events);
+                    all_log_entries.extend(result.log_entries);
+
+                    if state.stack.len() < stack_before {
+                        items_resolved += (stack_before - state.stack.len()) as u32;
+                        if items_resolved >= resolution_cap {
+                            break;
+                        }
+                    }
+
+                    // Stop: stack grew (new triggers from resolution)
+                    if state.stack.len() > initial_stack_len {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+
+        Ok(to_js(&BatchResolveResult {
+            events: all_events,
+            waiting_for: state.waiting_for.clone(),
+            log_entries: all_log_entries,
+            items_resolved,
+        }))
+    })?
 }
 
 /// Apply a seat mutation to a seat state, using the TLS card database for deck

@@ -6,12 +6,13 @@ import { ACTIVE_GAME_KEY, GAME_CHECKPOINTS_PREFIX, GAME_KEY_PREFIX } from "../co
 
 /** Snapshot of an AI seat's configuration at game-start time. The per-seat
  *  deck has already been baked into the engine's persisted `GameState`, so
- *  `deckName` is retained only as an informational label for UI/resume tooling.
+ *  `deckId` is retained only as an informational label for UI/resume tooling.
  *  `difficulty` is the load-bearing field: the AI controller needs it on resume
  *  to reconstruct the per-seat policy. */
 export interface AiSeatMeta {
   difficulty: string;
-  deckName: string | null;
+  deckId?: string | null;
+  deckName?: string | null;
 }
 
 export interface ActiveGameMeta {

@@ -140,13 +140,26 @@ pub enum ManaRestriction {
 }
 
 impl ManaRestriction {
+    fn matches_required_quality<'a>(
+        required: &str,
+        qualities: impl IntoIterator<Item = &'a String>,
+    ) -> bool {
+        let qualities = qualities.into_iter().collect::<Vec<_>>();
+        required.split(" or ").any(|alternative| {
+            alternative.split_whitespace().all(|part| {
+                qualities
+                    .iter()
+                    .any(|quality| quality.eq_ignore_ascii_case(part))
+            })
+        })
+    }
+
     /// Returns `true` if this restriction permits spending mana on the given spell.
     pub fn allows_spell(&self, meta: &SpellMeta) -> bool {
         match self {
-            ManaRestriction::OnlyForSpellType(required_type) => meta
-                .types
-                .iter()
-                .any(|t| t.eq_ignore_ascii_case(required_type)),
+            ManaRestriction::OnlyForSpellType(required_type) => {
+                Self::matches_required_quality(required_type, meta.types.iter())
+            }
             ManaRestriction::OnlyForCreatureType(required_subtype) => {
                 // Must be a creature spell AND have the required subtype
                 let is_creature = meta
@@ -164,14 +177,15 @@ impl ManaRestriction {
             // and subtypes (Elemental, Goblin, ...). Flamebraider's "Elemental" names
             // a creature subtype; "Artifact" would name a core type. The check treats
             // both buckets uniformly because Oracle text doesn't distinguish the two.
-            ManaRestriction::OnlyForTypeSpellsOrAbilities(required_type) => meta
-                .types
-                .iter()
-                .chain(meta.subtypes.iter())
-                .any(|t| t.eq_ignore_ascii_case(required_type)),
+            ManaRestriction::OnlyForTypeSpellsOrAbilities(required_type) => {
+                Self::matches_required_quality(
+                    required_type,
+                    meta.types.iter().chain(meta.subtypes.iter()),
+                )
+            }
             // Activation-only mana cannot be used to cast spells.
             ManaRestriction::OnlyForActivation => false,
-            // CR 106.12: X-cost restriction — conservatively disallow for spells.
+            // CR 106.6: X-cost restriction — conservatively disallow for spells.
             // Full X-cost detection requires ManaCost inspection at the call site.
             ManaRestriction::OnlyForXCosts => false,
             ManaRestriction::OnlyForSpellWithKeywordKind(required_keyword) => {
@@ -200,10 +214,12 @@ impl ManaRestriction {
             | ManaRestriction::OnlyForSpellWithKeywordKindFromZone(_, _) => false,
             // CR 106.6: The ability-activation half of the OR. "Elemental sources"
             // includes objects with creature type Elemental — consult subtypes too.
-            ManaRestriction::OnlyForTypeSpellsOrAbilities(required_type) => source_types
-                .iter()
-                .chain(source_subtypes.iter())
-                .any(|t| t.eq_ignore_ascii_case(required_type)),
+            ManaRestriction::OnlyForTypeSpellsOrAbilities(required_type) => {
+                Self::matches_required_quality(
+                    required_type,
+                    source_types.iter().chain(source_subtypes.iter()),
+                )
+            }
             // Activation-only mana always allows ability activation.
             ManaRestriction::OnlyForActivation => true,
             // X-cost mana can be used for abilities with {X} in their cost.
@@ -1148,6 +1164,35 @@ mod tests {
         assert!(!restriction.allows_spell(&plain_instant));
     }
 
+    // CR 105.2c + CR 106.6: "colorless Eldrazi" is a compound quality phrase.
+    // Both the colorless quality and Eldrazi subtype must be true.
+    #[test]
+    fn restriction_type_or_ability_requires_all_compound_spell_qualities() {
+        let restriction =
+            ManaRestriction::OnlyForTypeSpellsOrAbilities("Colorless Eldrazi".to_string());
+        let colorless_eldrazi = SpellMeta {
+            types: vec!["Creature".to_string(), "Colorless".to_string()],
+            subtypes: vec!["Eldrazi".to_string()],
+            keyword_kinds: vec![],
+            cast_from_zone: None,
+        };
+        let colored_eldrazi = SpellMeta {
+            types: vec!["Creature".to_string()],
+            subtypes: vec!["Eldrazi".to_string()],
+            keyword_kinds: vec![],
+            cast_from_zone: None,
+        };
+        let colorless_construct = SpellMeta {
+            types: vec!["Artifact".to_string(), "Colorless".to_string()],
+            subtypes: vec!["Construct".to_string()],
+            keyword_kinds: vec![],
+            cast_from_zone: None,
+        };
+        assert!(restriction.allows_spell(&colorless_eldrazi));
+        assert!(!restriction.allows_spell(&colored_eldrazi));
+        assert!(!restriction.allows_spell(&colorless_construct));
+    }
+
     // CR 106.6: The ability-activation half of the OR. An Elemental permanent is a
     // source whose subtypes include "Elemental"; activation must be permitted.
     #[test]
@@ -1166,6 +1211,23 @@ mod tests {
         let artifact_types = vec!["Artifact".to_string()];
         let no_subtypes: Vec<String> = vec![];
         assert!(artifact_restriction.allows_activation(&artifact_types, &no_subtypes));
+    }
+
+    // CR 105.2c + CR 106.6: The activation half uses the same compound-quality
+    // predicate as spell casting.
+    #[test]
+    fn restriction_type_or_ability_requires_all_compound_activation_qualities() {
+        let restriction =
+            ManaRestriction::OnlyForTypeSpellsOrAbilities("Colorless Eldrazi".to_string());
+        let colorless_creature_types = vec!["Creature".to_string(), "Colorless".to_string()];
+        let eldrazi_subtypes = vec!["Eldrazi".to_string()];
+        assert!(restriction.allows_activation(&colorless_creature_types, &eldrazi_subtypes));
+
+        let colored_creature_types = vec!["Creature".to_string()];
+        assert!(!restriction.allows_activation(&colored_creature_types, &eldrazi_subtypes));
+
+        let construct_subtypes = vec!["Construct".to_string()];
+        assert!(!restriction.allows_activation(&colorless_creature_types, &construct_subtypes));
     }
 
     #[test]

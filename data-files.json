@@ -4,7 +4,10 @@
   "coverage-data.json",
   "coverage-summary.json",
   "decks.json",
+  "draft-pools.json",
   "scryfall-data.json",
+  "scryfall-printings.json",
+  "scryfall-sets.json",
   "semantic-audit.json",
   "set-list.json"
 ]

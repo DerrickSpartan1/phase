@@ -15,7 +15,12 @@ import { BoardInteractionContext } from "./BoardInteractionContext.tsx";
 import { CombatLine } from "./CombatLine.tsx";
 import { PlayerArea } from "./PlayerArea.tsx";
 
-export function GameBoard() {
+interface GameBoardProps {
+  oppHud?: React.ReactNode;
+  playerHud?: React.ReactNode;
+}
+
+export function GameBoard({ oppHud, playerHud }: GameBoardProps) {
   const gameState = useGameStore((s) => s.gameState);
   const waitingFor = useGameStore((s) => s.waitingFor);
   const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
@@ -37,7 +42,7 @@ export function GameBoard() {
     return getOpponentIds(gameState, myId);
   }, [gameState, myId]);
 
-  const focusedId = focusedOpponent ?? (opponents.length === 1 ? opponents[0] : null);
+  const focusedId = focusedOpponent ?? opponents[0] ?? null;
   const playerBattlefieldView = useMemo(
     () => buildPlayerBattlefieldView(gameState, myId),
     [gameState, myId],
@@ -193,20 +198,22 @@ export function GameBoard() {
 
   return (
     <BoardInteractionContext.Provider value={boardInteractionState}>
-      <div className="relative flex min-h-0 flex-1 flex-col">
+      <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
         {/* Opponent area */}
         {is1v1 ? (
           <PlayerArea
             battlefieldView={focusedBattlefieldView ?? undefined}
             playerId={opponents[0]}
             mode="focused"
+            hud={oppHud}
           />
         ) : (
           <div className="flex min-h-0 flex-1 flex-col">
-            {focusedOpponent != null && opponents.includes(focusedOpponent) ? (
+            <div className="shrink-0">{oppHud}</div>
+            {focusedId != null ? (
               <PlayerArea
                 battlefieldView={focusedBattlefieldView ?? undefined}
-                playerId={focusedOpponent}
+                playerId={focusedId}
                 mode="focused"
               />
             ) : (
@@ -225,6 +232,7 @@ export function GameBoard() {
           mode="full"
           landColumnExtra={undoButton}
           creatureOverride={sortedPlayerCreatures}
+          hud={playerHud}
         />
       </div>
     </BoardInteractionContext.Provider>

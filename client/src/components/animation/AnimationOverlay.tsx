@@ -16,6 +16,7 @@ import { CastArcAnimation } from "./CastArcAnimation.tsx";
 import { DamageVignette } from "./DamageVignette.tsx";
 import { DeathShatter } from "./DeathShatter.tsx";
 import { FloatingNumber } from "./FloatingNumber.tsx";
+import { MillRevealAnimation } from "./MillRevealAnimation.tsx";
 import { ParticleCanvas } from "./ParticleCanvas.tsx";
 import type { ParticleCanvasHandle } from "./ParticleCanvas.tsx";
 import { applyScreenShake } from "./ScreenShake.tsx";
@@ -54,6 +55,13 @@ interface ActiveCastArc {
   mode: "cast" | "resolve-permanent" | "resolve-spell";
 }
 
+interface ActiveMillReveal {
+  id: number;
+  cards: { objectId: number; cardName: string; colors: string[] }[];
+  from: { x: number; y: number };
+  to: { x: number; y: number };
+}
+
 interface AnimationOverlayProps {
   containerRef: RefObject<HTMLDivElement | null>;
 }
@@ -62,6 +70,7 @@ let floatIdCounter = 0;
 let revealIdCounter = 0;
 let shatterIdCounter = 0;
 let castArcIdCounter = 0;
+let millRevealIdCounter = 0;
 
 export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
   const activeStep = useAnimationStore((s) => s.activeStep);
@@ -76,6 +85,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
   const [activeReveals, setActiveReveals] = useState<ActiveReveal[]>([]);
   const [activeShatters, setActiveShatters] = useState<ActiveShatter[]>([]);
   const [activeCastArcs, setActiveCastArcs] = useState<ActiveCastArc[]>([]);
+  const [activeMillReveals, setActiveMillReveals] = useState<ActiveMillReveal[]>([]);
 
   const vfxQuality = usePreferencesStore((s) => s.vfxQuality);
   const speedMultiplier = usePreferencesStore((s) => s.animationSpeedMultiplier);
@@ -327,6 +337,41 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
               const arcId = ++castArcIdCounter;
               setActiveCastArcs((prev) => [...prev, { id: arcId, from: stackPos, to: stackPos, cardName, mode: "resolve-spell" }]);
             }
+          } else if (fromZone === "Library" && toZone === "Graveyard") {
+            if (vfxQuality !== "minimal") {
+              const oldState = useGameStore.getState().gameState;
+              const newState = useAnimationStore.getState().animationNewState;
+              const millCards: { objectId: number; cardName: string; colors: string[] }[] = [];
+              for (const e of stepEffects) {
+                if (e.event.type !== "ZoneChanged") continue;
+                const d = e.event.data;
+                if (d.from !== "Library" || d.to !== "Graveyard") continue;
+                const obj = oldState?.objects[d.object_id] ?? newState?.objects[d.object_id];
+                millCards.push({ objectId: d.object_id, cardName: obj?.name ?? "Unknown", colors: getCardColors(obj?.color ?? []) });
+              }
+
+              // Deduplicate: only process once per step (first Library→Graveyard event triggers the batch)
+              if (object_id === millCards[0]?.objectId && millCards.length > 0) {
+                const obj = oldState?.objects[object_id] ?? newState?.objects[object_id];
+                const ownerId = obj?.owner ?? 0;
+
+                const libEl = document.querySelector(`[data-library-pile="${ownerId}"]`);
+                const gyEl = document.querySelector(`[data-graveyard-pile="${ownerId}"]`);
+                const libRect = libEl?.getBoundingClientRect();
+                const gyRect = gyEl?.getBoundingClientRect();
+
+                const hudFallback = getPlayerHudPosition(ownerId);
+                const fromPos = libRect
+                  ? { x: libRect.x + libRect.width / 2, y: libRect.y + libRect.height / 2 }
+                  : hudFallback;
+                const toPos = gyRect
+                  ? { x: gyRect.x + gyRect.width / 2, y: gyRect.y + gyRect.height / 2 }
+                  : hudFallback;
+
+                const id = ++millRevealIdCounter;
+                setActiveMillReveals((prev) => [...prev, { id, cards: millCards, from: fromPos, to: toPos }]);
+              }
+            }
           }
           break;
         }
@@ -396,6 +441,10 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
     setActiveCastArcs((prev) => prev.filter((a) => a.id !== id));
   }, []);
 
+  const handleMillRevealComplete = useCallback((id: number) => {
+    setActiveMillReveals((prev) => prev.filter((m) => m.id !== id));
+  }, []);
+
   return (
     <>
       {/* Death clones overlay (z-45) */}
@@ -463,6 +512,17 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
           cardName={arc.cardName}
           mode={arc.mode}
           onComplete={() => handleCastArcComplete(arc.id)}
+        />
+      ))}
+
+      {/* Mill reveal animations (z-45) */}
+      {activeMillReveals.map((mill) => (
+        <MillRevealAnimation
+          key={`mill-${mill.id}`}
+          cards={mill.cards}
+          from={mill.from}
+          to={mill.to}
+          onComplete={() => handleMillRevealComplete(mill.id)}
         />
       ))}
 

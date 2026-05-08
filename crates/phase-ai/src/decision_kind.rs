@@ -66,6 +66,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::DigChoice { .. }
         | WaitingFor::SurveilChoice { .. }
         | WaitingFor::RevealChoice { .. }
+        | WaitingFor::DrawnThisTurnTopdeckChoice { .. }
         | WaitingFor::DamageSourceChoice { .. }
         | WaitingFor::SearchChoice { .. }
         | WaitingFor::ChooseFromZoneChoice { .. }
@@ -87,6 +88,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::WarpCostChoice { .. }
         | WaitingFor::EvokeCostChoice { .. }
         | WaitingFor::OverloadCostChoice { .. }
+        | WaitingFor::BestowCostChoice { .. }
         | WaitingFor::ChooseRingBearer { .. }
         | WaitingFor::ChooseDungeon { .. }
         | WaitingFor::ChooseDungeonRoom { .. }
@@ -115,6 +117,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::VoteChoice { .. }
         | WaitingFor::CompanionReveal { .. }
         | WaitingFor::ChooseLegend { .. }
+        | WaitingFor::CommanderZoneChoice { .. }
         | WaitingFor::BattleProtectorChoice { .. }
         | WaitingFor::ProliferateChoice { .. }
         | WaitingFor::CategoryChoice { .. }
@@ -131,6 +134,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::MiracleReveal { .. }
         | WaitingFor::MiracleCastOffer { .. }
         | WaitingFor::MadnessCastOffer { .. }
+        | WaitingFor::ChooseOneOfBranch { .. }
         | WaitingFor::DiscardForManaAbility { .. }
         | WaitingFor::ExileFromBattlefieldForManaAbility { .. }
         | WaitingFor::PayManaAbilityMana { .. } => DecisionKind::ActivateAbility,

@@ -63,22 +63,42 @@ Empty `/tmp/batch.txt` → the quick-win pool for this format is exhausted for t
 
 ### Phase 1.5 — Alternative selector: swallow-warning batching
 
-When the parser-gap-analyzer pool is thin or you want to target a specific *anti-pattern class* (rather than verb-variation cards), batch by `parse_warnings` instead. The swallow detectors in `crates/engine/src/parser/swallow_check.rs` flag cards where the AST silently dropped Oracle text — `Swallow:Condition_If`, `Swallow:DynamicQty`, `Swallow:Duration_ThisTurn`, `Swallow:Optional_YouMay`, `Swallow:Condition_Unless`, `Swallow:Replacement_Instead`, etc. Each prefix is a recognition-without-binding bug class — fix the dispatch site once and the whole class flips.
+When the parser-gap-analyzer pool is thin or you want to target a specific *anti-pattern class* (rather than verb-variation cards), batch by `parse_warnings` instead. The swallow detectors in `crates/engine/src/parser/swallow_check.rs` flag cards where the AST silently dropped Oracle text — `Condition_If`, `DynamicQty`, `Duration_ThisTurn`, `Optional_YouMay`, `Condition_Unless`, `Replacement_Instead`, etc. Each detector is a recognition-without-binding bug class or a detector false positive; use the drilldown report before editing.
 
 ```bash
-# Batch 10 cards from a specific swallow class (uses fresh card-data.json — Phase 0 already regenerated it)
-CLASS='Swallow:DynamicQty'   # or Swallow:Condition_If, Swallow:Duration_ThisTurn, etc.
-jq -r --arg ex "$(cat /tmp/velocity-flipped.txt | tr '\n' '|')" --arg cls "$CLASS" '
-  to_entries[]
-  | select(.value.parse_warnings // [] | any(startswith($cls)))
-  | .key' client/public/card-data.json \
-  | grep -vxE "${ex%|}" | head -10 > /tmp/batch.txt
+# Rank exact warning patterns by likely shared fix.
+cargo run -p engine --bin coverage-report -- data --brief \
+  --write-warning-patterns /tmp/parser-warning-patterns.json >/tmp/coverage.json
+jq -r '
+  [.[] | select(.category=="swallowed-clause")]
+  | sort_by(-.otherwise_supported_cards, -.card_count)
+  | .[0:25][]
+  | "\(.otherwise_supported_cards) otherwise / \(.card_count) cards / \(.single_gap_cards) single | \(.pattern) | \(.example_cards|join(", "))"
+' /tmp/parser-warning-patterns.json
+
+# Drill into a detector family before choosing a batch.
+DETECTOR='Replacement_Instead'   # or DynamicQty, Condition_If, Duration_ThisTurn, etc.
+cargo run -p engine --bin coverage-report -- data \
+  --warning-detector "$DETECTOR" \
+  --warning-limit 25 >/tmp/warning-drilldown.json
+jq -r '.cards[] | [.name, .supported, .gap_count, (.parsed_labels|join("+"))] | @tsv' \
+  /tmp/warning-drilldown.json
+
+# Batch 10 cards from that drilldown, excluding cards already flipped this session.
+jq -r '.cards[].name | ascii_downcase' /tmp/warning-drilldown.json \
+  | grep -vxFf /tmp/velocity-flipped.txt \
+  | head -10 > /tmp/batch.txt
 ```
 
 Use this selector when:
 - A specific swallow prefix dominates the warning histogram (e.g., 750 `DynamicQty` cards) — fixing the dispatch site cascades across hundreds of cards.
 - You want to drive a metric down deliberately (e.g., "eliminate `Replacement_Instead` swallows this session").
 - The parser-gap-analyzer near-miss list is exhausted for the format.
+
+Interpretation rules:
+- High `supported_cards` / low `single_gap_cards` means the first pass is probably detector cleanup or minor chomp/capture work, not new engine support.
+- `supported: true` with plausible `parsed_labels` means do not add semantics blindly; inspect whether `swallow_check.rs` simply needs to recognize the existing AST shape.
+- `supported: false` with `gap_details` points to the real parser/engine primitive to fix; use the warning only as a clustering hint.
 
 The peek-vs-chomp anti-pattern (see `/oracle-parser` §10) is the recurring root cause — an upstream `scan_*` reads the marker without consuming, downstream loop re-encounters and warns. Diagnose by tracing one card end-to-end before editing.
 

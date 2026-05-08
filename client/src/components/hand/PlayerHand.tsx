@@ -11,7 +11,7 @@ import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { useCanActForWaitingState, usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
-import type { GameAction, ManaCost, ObjectId } from "../../adapter/types.ts";
+import type { ManaCost, ObjectId } from "../../adapter/types.ts";
 import { collectObjectActions } from "../../viewmodel/cardActionChoice.ts";
 import { DRAG_PLAY_THRESHOLD } from "../../hooks/useDragToCast.ts";
 
@@ -19,6 +19,29 @@ function getHandOverlap(handSize: number): string {
   if (handSize <= 5) return "calc(var(--card-w) * -0.25)";
   if (handSize <= 7) return "calc(var(--card-w) * -0.45)";
   return "calc(var(--card-w) * -0.6)";
+}
+
+interface HandSlotRect {
+  objectId: number;
+  left: number;
+  width: number;
+}
+
+export function computeHandInsertionSlot(
+  cards: HandSlotRect[],
+  clientX: number,
+  draggingId: number,
+): number | null {
+  if (cards.length === 0) return null;
+
+  const remaining = cards.filter((card) => card.objectId !== draggingId);
+  for (let slot = 0; slot < remaining.length; slot++) {
+    const card = remaining[slot];
+    const center = card.left + card.width / 2;
+    if (clientX < center) return slot;
+  }
+
+  return remaining.length;
 }
 
 export function PlayerHand() {
@@ -37,7 +60,6 @@ export function PlayerHand() {
   const [selectedCardId, setSelectedCardId] = useState<number | null>(null);
   const [draggingCardId, setDraggingCardId] = useState<number | null>(null);
 
-  const legalActions = useGameStore((s) => s.legalActions);
   const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
 
   // Hide the card being cast (shown on stack as preview during TargetSelection)
@@ -52,37 +74,9 @@ export function PlayerHand() {
     canActForWaitingState && s.waitingFor?.type === "Priority",
   );
 
-  // Build a set of object_ids that have PlayLand, CastSpell, Foretell, or
-  // CastSpellAsSneak legal actions. Sneak casts (CR 702.190a) originate from
-  // the hand via `hand_object` rather than `object_id`, so they need an
-  // explicit branch to light up the card's castable indicator.
-  // Coerce to Number since serde_wasm_bindgen may serialize u64 as BigInt.
   const playableObjectIds = useMemo(() => {
-    const ids = new Set<number>();
-    for (const action of legalActions) {
-      if (action.type === "PlayLand" || action.type === "CastSpell" || action.type === "Foretell") {
-        ids.add(
-          Number(
-            (action as Extract<GameAction, { type: "PlayLand" | "CastSpell" | "Foretell" }>).data.object_id,
-          ),
-        );
-      } else if (action.type === "CastSpellAsSneak") {
-        ids.add(Number(action.data.hand_object));
-      }
-    }
-    return ids;
-  }, [legalActions]);
-
-  // Build a set of object_ids that have ActivateAbility legal actions (Channel, etc.)
-  const activatableObjectIds = useMemo(() => {
-    const ids = new Set<number>();
-    for (const action of legalActions) {
-      if (action.type === "ActivateAbility") {
-        ids.add(Number(action.data.source_id));
-      }
-    }
-    return ids;
-  }, [legalActions]);
+    return new Set(Object.keys(legalActionsByObject ?? {}).map(Number));
+  }, [legalActionsByObject]);
 
   const playCard = useCallback(
     (objectId: number) => {
@@ -104,6 +98,39 @@ export function PlayerHand() {
     [hasPriority, objects, legalActionsByObject, inspectObject, setPendingAbilityChoice],
   );
 
+  const hoveredSlotRef = useRef<number | null>(null);
+
+  const computeSlotFromX = useCallback(
+    (clientX: number, draggingId: number): number | null => {
+      const container = handContainerRef.current;
+      if (!container) return null;
+      const cards = Array.from(
+        container.querySelectorAll<HTMLElement>("[data-card-hover]"),
+      );
+      return computeHandInsertionSlot(
+        cards.map((el) => {
+          const r = el.getBoundingClientRect();
+          return {
+            objectId: Number(el.dataset.objectId),
+            left: r.left,
+            width: r.width,
+          };
+        }),
+        clientX,
+        draggingId,
+      );
+    },
+    [],
+  );
+
+  const handleDrag = useCallback(
+    (objectId: number, info: PanInfo) => {
+      const slot = computeSlotFromX(info.point.x, objectId);
+      hoveredSlotRef.current = slot;
+    },
+    [computeSlotFromX],
+  );
+
   // Drag-to-play applies the same gesture rule as `useDragToCast` (the
   // Commander-zone single-cast path): release above DRAG_PLAY_THRESHOLD
   // while holding priority and outside the source zone. A React hook cannot
@@ -112,7 +139,6 @@ export function PlayerHand() {
   // definition of "how far up counts as a play."
   const handleDragEnd = useCallback(
     (objectId: number, _event: MouseEvent | TouchEvent | PointerEvent, info: PanInfo) => {
-      if (!hasPriority) return false;
       const bounds = handContainerRef.current?.getBoundingClientRect();
       const releasedInsideHand =
         bounds != null
@@ -120,16 +146,42 @@ export function PlayerHand() {
         && info.point.x <= bounds.right
         && info.point.y >= bounds.top
         && info.point.y <= bounds.bottom;
-      if (releasedInsideHand) return false;
+
+      // Reorder branch: released inside the hand, a different slot is hovered.
+      if (releasedInsideHand) {
+        const targetSlot = hoveredSlotRef.current;
+        hoveredSlotRef.current = null;
+        // Reorder is disabled while a cast is in progress: handObjects filters
+        // out `pendingObjectId`, so the DOM has N-1 slots but `player.hand`
+        // has N entries. The slot index from `computeSlotFromX` would map to
+        // the wrong position in the unfiltered hand.
+        if (pendingObjectId != null) return false;
+        if (targetSlot == null || !player) return false;
+        const currentOrder = player.hand.slice();
+        const fromIdx = currentOrder.indexOf(objectId as ObjectId);
+        if (fromIdx === -1 || fromIdx === targetSlot) return false;
+        const [moved] = currentOrder.splice(fromIdx, 1);
+        currentOrder.splice(targetSlot, 0, moved);
+        dispatchAction({ type: "ReorderHand", data: { order: currentOrder } });
+        return false;
+      }
+
+      // Play branch (unchanged from the existing implementation).
+      if (!hasPriority) return false;
       if (info.offset.y >= DRAG_PLAY_THRESHOLD) return false;
       playCard(objectId);
       return true;
     },
-    [hasPriority, playCard],
+    [hasPriority, playCard, player, pendingObjectId],
   );
 
   const handleCardClick = useCallback(
-    (objectId: number) => {
+    (objectId: number, e?: React.MouseEvent) => {
+      if (useUiStore.getState().debugInteractionMode && e) {
+        e.stopPropagation();
+        useUiStore.getState().openDebugContextMenu({ objectId, x: e.clientX, y: e.clientY });
+        return;
+      }
       if (isMobile) {
         setMobileHandOpen(true);
         return;
@@ -144,6 +196,7 @@ export function PlayerHand() {
 
   const handleCardDoubleClick = useCallback(
     (objectId: number) => {
+      if (useUiStore.getState().debugInteractionMode) return;
       if (!hasPriority) return;
       playCard(objectId);
       setSelectedCardId(null);
@@ -182,8 +235,8 @@ export function PlayerHand() {
   return (
     <div
       ref={handContainerRef}
-      className={`relative flex shrink-0 items-end justify-center overflow-visible px-4 py-1 ${
-        isCompactHeight ? "min-h-[40px]" : "min-h-[calc(var(--card-h)*1.4)]"
+      className={`relative flex items-end justify-center overflow-visible px-4 py-1 ${
+        isCompactHeight ? "min-h-[40px]" : "min-h-[calc(var(--card-h)*0.7)]"
       }`}
       style={{ perspective: "800px", zIndex: draggingCardId != null ? 30 : undefined }}
       onClick={handleContainerClick}
@@ -192,33 +245,10 @@ export function PlayerHand() {
         setSelectedCardId(null);
       }}
     >
-      {handObjects.length > 0 && (
-        <button
-          aria-label={`View full hand (${handObjects.length} cards)`}
-          className="absolute right-2 top-1 z-20 flex items-center gap-1.5 rounded-full border border-white/20 bg-slate-900/70 px-3 py-1 text-xs font-semibold text-white shadow-lg shadow-black/40 ring-1 ring-cyan-400/40 backdrop-blur-md transition hover:border-cyan-300/60 hover:bg-slate-800/80 hover:ring-cyan-300/70 active:scale-95"
-          onClick={(e) => { e.stopPropagation(); setMobileHandOpen(true); }}
-        >
-          <svg
-            aria-hidden="true"
-            viewBox="0 0 24 24"
-            className="h-3.5 w-3.5 text-cyan-300"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          >
-            <rect x="4" y="3" width="11" height="16" rx="2" />
-            <path d="M9 7l11 3-3 11-7-2" />
-          </svg>
-          <span>Hand</span>
-          <span className="tabular-nums text-cyan-300">{handObjects.length}</span>
-        </button>
-      )}
       <AnimatePresence>
         {handObjects.map((obj, i) => {
           const rotation = (i - center) * 6;
-          const isPlayable = hasPriority && (playableObjectIds.has(Number(obj.id)) || activatableObjectIds.has(Number(obj.id)));
+          const isPlayable = hasPriority && playableObjectIds.has(Number(obj.id));
 
           return (
             <HandCard
@@ -236,6 +266,7 @@ export function PlayerHand() {
               hasPriority={hasPriority}
               isMobile={isMobile}
               onDragEnd={handleDragEnd}
+              onDrag={handleDrag}
               onClick={handleCardClick}
               onDoubleClick={handleCardDoubleClick}
               isDragging={draggingCardId === obj.id}
@@ -268,7 +299,8 @@ interface HandCardProps {
   onDragStart: (id: number) => void;
   onDragStop: () => void;
   onDragEnd: (objectId: number, event: MouseEvent | TouchEvent | PointerEvent, info: PanInfo) => boolean;
-  onClick: (objectId: number) => void;
+  onDrag: (objectId: number, info: PanInfo) => void;
+  onClick: (objectId: number, e?: React.MouseEvent) => void;
   onDoubleClick: (objectId: number) => void;
   onMouseEnter: (id: number) => void;
   onMouseLeave: () => void;
@@ -291,6 +323,7 @@ const HandCard = memo(function HandCard({
   onDragStart: onDragStartProp,
   onDragStop,
   onDragEnd,
+  onDrag,
   onClick,
   onDoubleClick,
   onMouseEnter,
@@ -327,6 +360,8 @@ const HandCard = memo(function HandCard({
   return (
     <motion.div
       data-card-hover
+      data-object-id={objectId}
+      layout
       initial={{ opacity: 0, y: 40 }}
       animate={{
         opacity: 1,
@@ -336,7 +371,11 @@ const HandCard = memo(function HandCard({
       exit={{ opacity: 0, scale: 0.8 }}
       whileHover={{ y: -30 + arcOffset, scale: 1.08, zIndex: 30 }}
       whileDrag={{ scale: 1.05, zIndex: 9999 }}
-      transition={{ delay: index * 0.03, duration: 0.25 }}
+      transition={{
+        delay: index * 0.03,
+        duration: 0.25,
+        layout: { duration: 0.15, delay: 0 },
+      }}
       drag
       dragConstraints={false}
       dragElastic={0}
@@ -347,6 +386,7 @@ const HandCard = memo(function HandCard({
         inspectObject(null);
         onDragStartProp(objectId);
       }}
+      onDrag={(_event, info) => onDrag(objectId, info)}
       onDragEnd={(event, info) => {
         setDragging(false);
         onDragStop();
@@ -358,7 +398,7 @@ const HandCard = memo(function HandCard({
       onClick={(e) => {
         e.stopPropagation();
         if (longPressFired.current) { longPressFired.current = false; return; }
-        onClick(objectId);
+        onClick(objectId, e);
       }}
       onDoubleClick={(e) => {
         e.stopPropagation();

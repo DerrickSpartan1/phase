@@ -32,6 +32,7 @@ interface CardPreviewProps {
   backFaceName?: string | null;
   faceIndex?: number;
   position?: { x: number; y: number };
+  scryfallId?: string;
 }
 
 export function CardPreview({
@@ -39,6 +40,7 @@ export function CardPreview({
   backFaceName,
   faceIndex,
   position,
+  scryfallId,
 }: CardPreviewProps) {
   if (!cardName) return null;
 
@@ -48,6 +50,7 @@ export function CardPreview({
       backFaceName={backFaceName ?? null}
       faceIndex={faceIndex}
       position={position}
+      scryfallId={scryfallId}
     />
   );
 }
@@ -57,14 +60,17 @@ function CardPreviewInner({
   backFaceName: backFaceNameProp,
   faceIndex,
   position,
+  scryfallId,
 }: {
   cardName: string;
   backFaceName: string | null;
   faceIndex?: number;
   position?: { x: number; y: number };
+  scryfallId?: string;
 }) {
   const inspectedObjectId = useUiStore((s) => s.inspectedObjectId);
   const dismissPreview = useUiStore((s) => s.dismissPreview);
+  const showDebugId = useUiStore((s) => s.debugPanelOpen || s.debugInteractionMode);
   const obj = useGameStore((s) =>
     inspectedObjectId != null ? s.gameState?.objects[inspectedObjectId] ?? null : null,
   );
@@ -104,6 +110,7 @@ function CardPreviewInner({
     tokenFilters: isToken ? { power: obj?.power, toughness: obj?.toughness, colors: obj?.color } : undefined,
     oracleId: obj?.printed_ref?.oracle_id,
     faceName: obj?.printed_ref?.face_name,
+    scryfallId,
   });
   const classLevel = obj?.class_level;
   const previewRef = useRef<HTMLDivElement | null>(null);
@@ -274,6 +281,7 @@ function CardPreviewInner({
             ? `Hold Ctrl for ${isTransformed ? "front" : "back"} face`
             : null}
           altAvailable={Boolean(frontParseDetails || engineFrontFace)}
+          debugObjectId={showDebugId && inspectedObjectId != null ? inspectedObjectId : null}
         />
       )}
     </div>
@@ -332,6 +340,7 @@ function CardImagePreview({
   backFaceHint,
   altAvailable,
   mobileMode,
+  debugObjectId,
 }: {
   cardName: string;
   classLevel?: number | null;
@@ -342,6 +351,7 @@ function CardImagePreview({
   backFaceHint: string | null;
   altAvailable: boolean;
   mobileMode?: boolean;
+  debugObjectId?: number | null;
 }) {
   const sizeClass = mobileMode
     ? "max-h-[75vh] w-[40vw] max-w-[300px]"
@@ -379,6 +389,11 @@ function CardImagePreview({
                 {toRoman(classLevel)}
               </span>
             </div>
+          </div>
+        )}
+        {debugObjectId != null && (
+          <div className="absolute top-2 left-2 z-10 rounded bg-black/80 px-1.5 py-0.5 font-mono text-[11px] font-bold text-amber-300 ring-1 ring-amber-500/50">
+            ID: {debugObjectId}
           </div>
         )}
       </div>

@@ -255,6 +255,10 @@ fn controller_to_scope(c: &ControllerRef) -> ConvResult<ProhibitionScope> {
     match c {
         ControllerRef::You => Ok(ProhibitionScope::Controller),
         ControllerRef::Opponent => Ok(ProhibitionScope::Opponents),
+        ControllerRef::ScopedPlayer => Err(ConversionGap::EnginePrerequisiteMissing {
+            engine_type: "ProhibitionScope",
+            needed_variant: "ScopedPlayer".into(),
+        }),
         ControllerRef::TargetPlayer => Ok(ProhibitionScope::AllPlayers),
         ControllerRef::DefendingPlayer => Err(ConversionGap::EnginePrerequisiteMissing {
             engine_type: "ProhibitionScope",

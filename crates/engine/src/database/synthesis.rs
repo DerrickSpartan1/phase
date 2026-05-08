@@ -6,10 +6,11 @@ use crate::parser::oracle::{oracle_text_allows_commander, parse_oracle_text};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, CardPlayMode,
     CastVariantPaid, ChoiceType, ContinuousModification, ControllerRef, CounterTriggerFilter,
-    Duration, Effect, FilterProp, KickerVariant, ManaContribution, ManaProduction, NinjutsuVariant,
-    PtValue, QuantityExpr, ReplacementCondition, ReplacementDefinition, RuntimeHandler,
-    SearchSelectionConstraint, StaticDefinition, TargetFilter, TriggerCondition, TriggerDefinition,
-    TypeFilter, TypedFilter,
+    Duration, Effect, FilterProp, KickerVariant, ManaContribution, ManaProduction,
+    ModalSelectionCondition, ModalSelectionConstraint, NinjutsuVariant, PtValue, QuantityExpr,
+    ReplacementCondition, ReplacementDefinition, RuntimeHandler, SearchSelectionConstraint,
+    StaticDefinition, TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
+    UnlessCost, UnlessPayModifier,
 };
 use crate::types::card::{CardFace, CardLayout};
 use crate::types::card_type::{CardType, CoreType, Supertype};
@@ -183,11 +184,11 @@ pub fn synthesize_equip(face: &mut CardFace) {
 }
 
 /// CR 702.49: Synthesize marker activated abilities for the Ninjutsu family
-/// (Ninjutsu, CommanderNinjutsu, WebSlinging). The actual activation is handled
+/// (Ninjutsu, CommanderNinjutsu). The actual activation is handled
 /// by the GameAction::ActivateNinjutsu path, not by normal activated ability
-/// resolution. CR 702.190a: Sneak is NOT a ninjutsu-family activation — it is
-/// a cast alternative cost handled by the casting pipeline — so it does not
-/// synthesize an activated ability here.
+/// resolution. CR 702.190a Sneak and CR 702.188a Web-slinging are NOT
+/// ninjutsu-family activations — they are cast alternative costs handled by
+/// the casting pipeline — so they do not synthesize activated abilities here.
 pub fn synthesize_ninjutsu_family(face: &mut CardFace) {
     let abilities: Vec<AbilityDefinition> = face
         .keywords
@@ -196,7 +197,6 @@ pub fn synthesize_ninjutsu_family(face: &mut CardFace) {
             let (variant, cost) = match kw {
                 Keyword::Ninjutsu(c) => (NinjutsuVariant::Ninjutsu, c),
                 Keyword::CommanderNinjutsu(c) => (NinjutsuVariant::CommanderNinjutsu, c),
-                Keyword::WebSlinging(c) => (NinjutsuVariant::WebSlinging, c),
                 _ => return None,
             };
             Some(
@@ -509,6 +509,9 @@ fn resolve_ability_kicker_condition_variants(
     if let Some(condition) = ability.condition.as_mut() {
         resolve_condition_kicker_variant(condition, additional_cost);
     }
+    if let Some(modal) = ability.modal.as_mut() {
+        resolve_modal_kicker_condition_variants(modal, additional_cost);
+    }
 
     if let Some(sub_ability) = ability.sub_ability.as_mut() {
         resolve_ability_kicker_condition_variants(sub_ability, additional_cost);
@@ -516,6 +519,26 @@ fn resolve_ability_kicker_condition_variants(
 
     for mode in &mut ability.mode_abilities {
         resolve_ability_kicker_condition_variants(mode, additional_cost);
+    }
+}
+
+fn resolve_modal_kicker_condition_variants(
+    modal: &mut crate::types::ability::ModalChoice,
+    additional_cost: &AdditionalCost,
+) {
+    for constraint in &mut modal.constraints {
+        let ModalSelectionConstraint::ConditionalMaxChoices { condition, .. } = constraint else {
+            continue;
+        };
+        let ModalSelectionCondition::AdditionalCostPaid {
+            variant,
+            kicker_cost,
+            ..
+        } = condition
+        else {
+            continue;
+        };
+        resolve_kicker_cost_metadata(variant, kicker_cost, additional_cost);
     }
 }
 
@@ -1146,6 +1169,149 @@ pub fn synthesize_evoke(face: &mut CardFace) {
     face.triggers.push(trigger);
 }
 
+/// CR 702.30a: Echo is a triggered ability. "Echo [cost]" means "At the
+/// beginning of your upkeep, if this permanent came under your control since
+/// the beginning of your last upkeep, sacrifice it unless you pay [cost]."
+///
+/// The runtime marks each new echo permanent `echo_due` when it enters and
+/// clears the marker when the unless-payment is handled.
+pub fn synthesize_echo(face: &mut CardFace) {
+    let echo_costs: Vec<ManaCost> = face
+        .keywords
+        .iter()
+        .filter_map(|kw| {
+            if let Keyword::Echo(cost) = kw {
+                Some(cost.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+    if echo_costs.is_empty() {
+        return;
+    }
+
+    let already_has_trigger = face.triggers.iter().any(|t| {
+        matches!(t.mode, TriggerMode::PayEcho)
+            && t.phase == Some(Phase::Upkeep)
+            && matches!(t.valid_target, Some(TargetFilter::Controller))
+            && matches!(t.condition, Some(TriggerCondition::EchoDue))
+            && t.unless_pay.is_some()
+            && matches!(
+                t.execute.as_deref().map(|a| &*a.effect),
+                Some(Effect::Sacrifice {
+                    target: TargetFilter::SelfRef,
+                    ..
+                })
+            )
+    });
+    if already_has_trigger {
+        return;
+    }
+
+    for cost in echo_costs {
+        let sac = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Sacrifice {
+                target: TargetFilter::SelfRef,
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+        );
+        let mut trigger = TriggerDefinition::new(TriggerMode::PayEcho)
+            .phase(Phase::Upkeep)
+            .valid_target(TargetFilter::Controller)
+            .condition(TriggerCondition::EchoDue)
+            .execute(sac)
+            .description(
+                "CR 702.30a: At the beginning of your upkeep, sacrifice this permanent unless you pay its echo cost."
+                    .to_string(),
+            );
+        trigger.unless_pay = Some(UnlessPayModifier {
+            cost: UnlessCost::Fixed { cost },
+            payer: TargetFilter::Controller,
+        });
+        face.triggers.push(trigger);
+    }
+}
+
+/// CR 702.175a: Offspring represents two abilities:
+///   1. "You may pay an additional [cost] as you cast this spell" — modeled as
+///      `AdditionalCost::Optional(AbilityCost::Mana { cost })`.
+///   2. "When this permanent enters, if its offspring cost was paid, create a
+///      token that's a copy of it, except it's 1/1." — modeled as an ETB trigger
+///      with `TriggerCondition::AdditionalCostPaid` and `Effect::CopyTokenOf`
+///      carrying `SetPower { value: 1 }` + `SetToughness { value: 1 }` modifications.
+///
+/// Build-for-the-class: every card with `Keyword::Offspring(cost)` flows through
+/// this single synthesizer. Idempotent across repeated invocations.
+pub fn synthesize_offspring(face: &mut CardFace) {
+    let Some(offspring_cost) = face.keywords.iter().find_map(|k| match k {
+        Keyword::Offspring(cost) => Some(cost.clone()),
+        _ => None,
+    }) else {
+        return;
+    };
+
+    // CR 702.175a ability 1: Optional additional cost.
+    // Only set if no additional_cost was already parsed (e.g., a card with both
+    // kicker and offspring would need the kicker cost to take precedence since
+    // AdditionalCost is a single slot — but no such card exists in print).
+    if face.additional_cost.is_none() {
+        face.additional_cost = Some(AdditionalCost::Optional(AbilityCost::Mana {
+            cost: offspring_cost,
+        }));
+    }
+
+    // CR 702.175a ability 2: ETB trigger creating a 1/1 copy token.
+    // Idempotency: skip if an AdditionalCostPaid + CopyTokenOf ETB trigger already exists.
+    let already_has_trigger = face.triggers.iter().any(|t| {
+        matches!(t.mode, TriggerMode::ChangesZone)
+            && t.destination == Some(Zone::Battlefield)
+            && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+            && matches!(
+                t.condition,
+                Some(TriggerCondition::AdditionalCostPaid { .. })
+            )
+            && matches!(
+                t.execute.as_deref().map(|a| &*a.effect),
+                Some(Effect::CopyTokenOf { .. })
+            )
+    });
+    if already_has_trigger {
+        return;
+    }
+
+    let copy_effect = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::CopyTokenOf {
+            target: TargetFilter::SelfRef,
+            source_filter: None,
+            enters_attacking: false,
+            tapped: false,
+            count: QuantityExpr::Fixed { value: 1 },
+            extra_keywords: vec![],
+            additional_modifications: vec![
+                ContinuousModification::SetPower { value: 1 },
+                ContinuousModification::SetToughness { value: 1 },
+            ],
+        },
+    );
+    let trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
+        .destination(Zone::Battlefield)
+        .valid_card(TargetFilter::SelfRef)
+        .condition(TriggerCondition::AdditionalCostPaid {
+            variant: None,
+            kicker_cost: None,
+            min_count: 1,
+        })
+        .execute(copy_effect)
+        .description(
+            "CR 702.175a: When this permanent enters, if its offspring cost was paid, create a token that's a copy of it, except it's 1/1."
+                .to_string(),
+        );
+    face.triggers.push(trigger);
+}
+
 /// CR 702.62a: Suspend N—{cost} synthesizes three abilities for every face
 /// carrying `Keyword::Suspend { count, cost }`:
 ///
@@ -1449,6 +1615,9 @@ pub fn synthesize_all(face: &mut CardFace) {
     synthesize_entwine(face);
     synthesize_madness_intrinsics(face);
     synthesize_evoke(face);
+    synthesize_echo(face);
+    // CR 702.175a: Offspring — optional additional cost + ETB 1/1 copy trigger.
+    synthesize_offspring(face);
     // CR 702.62a: Suspend — hand-activated alt-cost + upkeep counter-removal +
     // last-counter free-cast. Runs after Evoke to keep alt-cost synthesizers
     // grouped; idempotent so order against Cycling/Madness is irrelevant.
@@ -1818,6 +1987,7 @@ fn build_oracle_face_inner(
         parse_warnings: parsed.parse_warnings,
         brawl_commander: false,
         metadata: Default::default(),
+        rarities: Default::default(),
     };
 
     face.brawl_commander = compute_brawl_commander(mtgjson, &face);
@@ -1955,6 +2125,73 @@ mod kicker_synthesis_tests {
                 variant: Some(KickerVariant::Second),
                 kicker_cost: None
             })
+        ));
+    }
+
+    #[test]
+    fn resolves_specific_kicker_modal_condition_to_position() {
+        let mut face = CardFace {
+            additional_cost: Some(AdditionalCost::Kicker {
+                costs: vec![
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost {
+                            generic: 1,
+                            shards: vec![ManaCostShard::Red],
+                        },
+                    },
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost {
+                            generic: 1,
+                            shards: vec![ManaCostShard::White],
+                        },
+                    },
+                ],
+                repeatable: false,
+            }),
+            abilities: vec![AbilityDefinition {
+                modal: Some(crate::types::ability::ModalChoice {
+                    constraints: vec![ModalSelectionConstraint::ConditionalMaxChoices {
+                        condition: ModalSelectionCondition::AdditionalCostPaid {
+                            variant: None,
+                            kicker_cost: Some(ManaCost::Cost {
+                                generic: 1,
+                                shards: vec![ManaCostShard::White],
+                            }),
+                            min_count: 1,
+                        },
+                        max_choices: 2,
+                        otherwise_max_choices: 1,
+                    }],
+                    ..Default::default()
+                }),
+                ..AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                )
+            }],
+            ..CardFace::default()
+        };
+
+        resolve_kicker_condition_variants(&mut face);
+
+        let Some(ModalSelectionConstraint::ConditionalMaxChoices { condition, .. }) = face
+            .abilities
+            .first()
+            .and_then(|ability| ability.modal.as_ref())
+            .and_then(|modal| modal.constraints.first())
+        else {
+            panic!("expected conditional modal constraint");
+        };
+        assert!(matches!(
+            condition,
+            ModalSelectionCondition::AdditionalCostPaid {
+                variant: Some(KickerVariant::Second),
+                kicker_cost: None,
+                min_count: 1
+            }
         ));
     }
 }
@@ -2351,6 +2588,78 @@ mod evoke_synthesis_tests {
         let mut face = CardFace::default();
         face.keywords.push(Keyword::Flying);
         synthesize_evoke(&mut face);
+        assert!(face.triggers.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod echo_synthesis_tests {
+    use super::*;
+    use crate::types::mana::{ManaCost, ManaCostShard};
+
+    fn echo_face() -> CardFace {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Echo(ManaCost::Cost {
+            shards: vec![ManaCostShard::White, ManaCostShard::White],
+            generic: 3,
+        }));
+        face
+    }
+
+    #[test]
+    fn synthesize_echo_adds_upkeep_pay_or_sac_trigger() {
+        let mut face = echo_face();
+        synthesize_echo(&mut face);
+
+        let trigger = face
+            .triggers
+            .iter()
+            .find(|t| matches!(t.mode, TriggerMode::PayEcho))
+            .expect("echo should add an upkeep trigger");
+        assert_eq!(trigger.phase, Some(Phase::Upkeep));
+        assert!(matches!(
+            trigger.valid_target,
+            Some(TargetFilter::Controller)
+        ));
+        assert!(matches!(trigger.condition, Some(TriggerCondition::EchoDue)));
+        assert!(matches!(
+            trigger.execute.as_deref().map(|a| &*a.effect),
+            Some(Effect::Sacrifice {
+                target: TargetFilter::SelfRef,
+                ..
+            })
+        ));
+        assert!(matches!(
+            trigger.unless_pay.as_ref(),
+            Some(UnlessPayModifier {
+                cost: UnlessCost::Fixed {
+                    cost: ManaCost::Cost { generic: 3, .. },
+                },
+                payer: TargetFilter::Controller,
+            })
+        ));
+    }
+
+    #[test]
+    fn synthesize_echo_is_idempotent() {
+        let mut face = echo_face();
+        synthesize_echo(&mut face);
+        synthesize_echo(&mut face);
+
+        assert_eq!(
+            face.triggers
+                .iter()
+                .filter(|t| matches!(t.mode, TriggerMode::PayEcho))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn synthesize_echo_is_noop_without_keyword() {
+        let mut face = CardFace::default();
+        synthesize_echo(&mut face);
+
         assert!(face.triggers.is_empty());
     }
 }
@@ -3836,5 +4145,117 @@ mod loyalty_sorcery_speed_tests {
         assert!(def
             .activation_restrictions
             .contains(&ActivationRestriction::AsSorcery));
+    }
+}
+
+#[cfg(test)]
+mod offspring_synthesis_tests {
+    use super::*;
+    use crate::types::mana::ManaCostShard;
+
+    /// CR 702.175a: Offspring synthesizes an optional additional cost and an
+    /// ETB trigger that creates a 1/1 copy token.
+    #[test]
+    fn synthesize_offspring_sets_additional_cost_and_trigger() {
+        let offspring_cost = ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::Red],
+        };
+        let mut face = CardFace {
+            keywords: vec![Keyword::Offspring(offspring_cost.clone())],
+            ..CardFace::default()
+        };
+
+        synthesize_offspring(&mut face);
+
+        // Part 1: additional_cost is Optional(Mana { offspring_cost })
+        match face.additional_cost.as_ref().expect("additional_cost set") {
+            AdditionalCost::Optional(AbilityCost::Mana { cost }) => {
+                assert_eq!(*cost, offspring_cost);
+            }
+            other => panic!("expected Optional(Mana), got {other:?}"),
+        }
+
+        // Part 2: ETB trigger with AdditionalCostPaid condition + CopyTokenOf effect
+        let trigger = face
+            .triggers
+            .iter()
+            .find(|t| {
+                matches!(t.mode, TriggerMode::ChangesZone)
+                    && t.destination == Some(Zone::Battlefield)
+                    && matches!(
+                        t.condition,
+                        Some(TriggerCondition::AdditionalCostPaid { .. })
+                    )
+            })
+            .expect("offspring ETB trigger");
+        let effect = &trigger.execute.as_ref().expect("execute body").effect;
+        match &**effect {
+            Effect::CopyTokenOf {
+                target,
+                additional_modifications,
+                ..
+            } => {
+                assert!(matches!(target, TargetFilter::SelfRef));
+                assert_eq!(additional_modifications.len(), 2);
+                assert!(matches!(
+                    additional_modifications[0],
+                    ContinuousModification::SetPower { value: 1 }
+                ));
+                assert!(matches!(
+                    additional_modifications[1],
+                    ContinuousModification::SetToughness { value: 1 }
+                ));
+            }
+            other => panic!("expected CopyTokenOf, got {other:?}"),
+        }
+    }
+
+    /// Idempotency: running synthesize_offspring twice produces the same result.
+    #[test]
+    fn synthesize_offspring_is_idempotent() {
+        let mut face = CardFace {
+            keywords: vec![Keyword::Offspring(ManaCost::Cost {
+                generic: 2,
+                shards: vec![],
+            })],
+            ..CardFace::default()
+        };
+
+        synthesize_offspring(&mut face);
+        let first_cost = face.additional_cost.clone();
+        let first_trigger_count = face.triggers.len();
+        synthesize_offspring(&mut face);
+        assert_eq!(face.additional_cost, first_cost);
+        assert_eq!(face.triggers.len(), first_trigger_count);
+    }
+
+    /// Offspring skips additional_cost when one is already set (e.g., kicker).
+    #[test]
+    fn synthesize_offspring_skips_additional_cost_when_already_set() {
+        let existing = AdditionalCost::Kicker {
+            costs: vec![AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    generic: 1,
+                    shards: vec![],
+                },
+            }],
+            repeatable: false,
+        };
+        let mut face = CardFace {
+            keywords: vec![Keyword::Offspring(ManaCost::Cost {
+                generic: 0,
+                shards: vec![ManaCostShard::White],
+            })],
+            additional_cost: Some(existing.clone()),
+            ..CardFace::default()
+        };
+
+        synthesize_offspring(&mut face);
+
+        // additional_cost unchanged (kicker takes precedence)
+        assert_eq!(face.additional_cost, Some(existing));
+        // Trigger is still synthesized
+        assert_eq!(face.triggers.len(), 1);
     }
 }

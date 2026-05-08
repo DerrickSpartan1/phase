@@ -1,13 +1,13 @@
+use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till};
 use nom::combinator::{all_consuming, value, verify};
 use nom::sequence::preceded;
 use nom::Parser;
-use nom_language::error::VerboseError;
 
 use super::animation::{animation_modifications, parse_animation_spec};
-use super::types::*;
 use super::{resolve_it_pronoun, ParseContext};
+use crate::parser::oracle_ir::ast::*;
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef, Duration, Effect,
     FilterProp, GainLifePlayer, MultiTargetSpec, PlayerScope, PtValue, QuantityExpr, QuantityRef,
@@ -19,13 +19,19 @@ use crate::types::statics::StaticMode;
 use super::super::oracle_nom::error::OracleResult;
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::target::parse_event_context_ref;
-use super::super::oracle_static::{parse_continuous_modifications, parse_static_line_multi};
+use super::super::oracle_static::{
+    parse_additive_type_clause_modifications, parse_continuous_modifications,
+    parse_static_line_multi,
+};
 use super::super::oracle_target::{parse_target, parse_type_phrase};
 use super::super::oracle_util::{
     parse_number, TextPair, SELF_REF_PARSE_ONLY_PHRASES, SELF_REF_TYPE_PHRASES,
 };
 
-pub(super) fn try_parse_subject_predicate_ast(text: &str, ctx: &ParseContext) -> Option<ClauseAst> {
+pub(super) fn try_parse_subject_predicate_ast(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<ClauseAst> {
     if try_parse_targeted_controller_gain_life(text).is_some() {
         return None;
     }
@@ -40,6 +46,10 @@ pub(super) fn try_parse_subject_predicate_ast(text: &str, ctx: &ParseContext) ->
             |effect, duration, _sub_ability| PredicateAst::Restriction { effect, duration },
             ctx,
         ));
+    }
+
+    if let Some(clause) = try_parse_subject_additive_type_clause(text, ctx) {
+        return Some(clause);
     }
 
     if let Some(clause) = try_parse_subject_continuous_clause(text, ctx) {
@@ -106,7 +116,7 @@ fn subject_predicate_ast_from_clause<F>(
     text: &str,
     clause: ParsedEffectClause,
     build_predicate: F,
-    ctx: &ParseContext,
+    ctx: &mut ParseContext,
 ) -> ClauseAst
 where
     F: FnOnce(Effect, Option<Duration>, Option<Box<AbilityDefinition>>) -> PredicateAst,
@@ -146,9 +156,40 @@ fn extract_subject_text(text: &str) -> Option<String> {
     }
 }
 
+fn try_parse_subject_additive_type_clause(text: &str, ctx: &mut ParseContext) -> Option<ClauseAst> {
+    type VE<'a> = OracleError<'a>;
+
+    let lower = text.to_lowercase();
+    let (subject_lower, predicate_lower) = nom_primitives::scan_split_at_phrase(&lower, |i| {
+        alt((tag::<_, _, VE>("are "), tag::<_, _, VE>("is "))).parse(i)
+    })?;
+    let subject_text = text[..subject_lower.len()].trim();
+    if subject_text.eq_ignore_ascii_case("you") {
+        return None;
+    }
+    let predicate = &text[text.len() - predicate_lower.len()..];
+    let application = additive_type_subject_application(subject_text, ctx)?;
+    let clause = build_additive_type_continuous_clause(&application, predicate)?;
+
+    Some(ClauseAst::SubjectPredicate {
+        subject: Box::new(SubjectPhraseAst {
+            affected: application.affected,
+            target: application.target,
+            multi_target: application.multi_target,
+            inherits_parent: application.inherits_parent,
+            is_optional: application.is_optional,
+        }),
+        predicate: Box::new(PredicateAst::Continuous {
+            effect: clause.effect,
+            duration: clause.duration,
+            sub_ability: clause.sub_ability,
+        }),
+    })
+}
+
 fn try_parse_subject_continuous_clause(
     text: &str,
-    ctx: &ParseContext,
+    ctx: &mut ParseContext,
 ) -> Option<ParsedEffectClause> {
     let verb_start = find_predicate_start(text)?;
     let subject = text[..verb_start].trim();
@@ -161,16 +202,73 @@ fn try_parse_subject_continuous_clause(
     if subject.eq_ignore_ascii_case("you") {
         return None;
     }
+    if let Some(clause) = try_parse_additive_type_continuous_clause(subject, predicate, ctx) {
+        return Some(clause);
+    }
     let application = parse_subject_application(subject, ctx)?;
     build_continuous_clause(application, predicate)
 }
 
-fn try_parse_subject_become_clause(text: &str, ctx: &ParseContext) -> Option<ParsedEffectClause> {
+fn additive_type_subject_application(
+    subject: &str,
+    ctx: &mut ParseContext,
+) -> Option<SubjectApplication> {
+    let (parsed_subject, rest) = parse_target(subject);
+    if rest.trim().is_empty()
+        && matches!(
+            parsed_subject,
+            TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }
+        )
+    {
+        return subject_filter_application(parsed_subject, false);
+    }
+
+    parse_subject_application(subject, ctx)
+}
+
+fn try_parse_additive_type_continuous_clause(
+    subject: &str,
+    predicate: &str,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
+    let application = additive_type_subject_application(subject, ctx)?;
+    build_additive_type_continuous_clause(&application, predicate)
+}
+
+fn build_additive_type_continuous_clause(
+    application: &SubjectApplication,
+    predicate: &str,
+) -> Option<ParsedEffectClause> {
+    let modifications = parse_additive_type_clause_modifications(predicate)?;
+    let affected = static_affected_for_application(application);
+
+    Some(ParsedEffectClause {
+        effect: Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::continuous()
+                .affected(affected)
+                .modifications(modifications)
+                .description(predicate.to_string())],
+            duration: Some(Duration::Permanent),
+            target: application.target.clone(),
+        },
+        duration: Some(Duration::Permanent),
+        sub_ability: None,
+        distribute: None,
+        multi_target: None,
+        condition: None,
+        optional: false,
+    })
+}
+
+fn try_parse_subject_become_clause(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
     let verb_start = find_predicate_start(text)?;
     let subject = text[..verb_start].trim();
     let predicate = deconjugate_verb(text[verb_start..].trim());
     let predicate_lower = predicate.to_lowercase();
-    tag::<_, _, VerboseError<&str>>("become ")
+    tag::<_, _, OracleError<'_>>("become ")
         .parse(predicate_lower.as_str())
         .ok()?;
     let application = parse_subject_application(subject, ctx)?;
@@ -179,7 +277,7 @@ fn try_parse_subject_become_clause(text: &str, ctx: &ParseContext) -> Option<Par
 
 fn try_parse_subject_restriction_clause(
     text: &str,
-    ctx: &ParseContext,
+    ctx: &mut ParseContext,
 ) -> Option<ParsedEffectClause> {
     let lower = text.to_lowercase();
 
@@ -288,7 +386,7 @@ fn try_parse_subject_restriction_clause(
 /// Produces a GenericEffect with CanAttackWithDefender static mode.
 fn try_parse_can_attack_with_defender(
     text: &str,
-    ctx: &ParseContext,
+    ctx: &mut ParseContext,
 ) -> Option<ParsedEffectClause> {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
@@ -324,7 +422,7 @@ fn try_parse_can_attack_with_defender(
 
 pub(super) fn parse_subject_application(
     subject: &str,
-    ctx: &ParseContext,
+    ctx: &mut ParseContext,
 ) -> Option<SubjectApplication> {
     if subject.trim().is_empty() {
         return None;
@@ -332,9 +430,30 @@ pub(super) fn parse_subject_application(
 
     let lower = subject.to_lowercase();
 
+    if let Ok((_, _)) = all_consuming((
+        tag::<_, _, OracleError<'_>>("you"),
+        tag(" and "),
+        tag("permanents you control"),
+    ))
+    .parse(lower.as_str())
+    {
+        let (permanents, rest) = parse_target("all permanents you control");
+        if rest.trim().is_empty() {
+            return Some(SubjectApplication {
+                affected: TargetFilter::Or {
+                    filters: vec![TargetFilter::Controller, permanents],
+                },
+                target: None,
+                multi_target: None,
+                inherits_parent: false,
+                is_optional: false,
+            });
+        }
+    }
+
     // CR 115.10a: "another target X" — target with Another filter property,
     // excluding the source object from legal targets.
-    if tag::<_, _, VerboseError<&str>>("another target ")
+    if tag::<_, _, OracleError<'_>>("another target ")
         .parse(lower.as_str())
         .is_ok()
     {
@@ -342,14 +461,14 @@ pub(super) fn parse_subject_application(
         let filter = add_another_property(filter);
         return subject_filter_application(filter, true);
     }
-    if tag::<_, _, VerboseError<&str>>("target ")
+    if tag::<_, _, OracleError<'_>>("target ")
         .parse(lower.as_str())
         .is_ok()
     {
         let (filter, _) = parse_target(subject);
         return subject_filter_application(filter, true);
     }
-    if tag::<_, _, VerboseError<&str>>("up to ")
+    if tag::<_, _, OracleError<'_>>("up to ")
         .parse(lower.as_str())
         .is_ok()
     {
@@ -365,11 +484,11 @@ pub(super) fn parse_subject_application(
     // Strip "any number of " prefix, delegate to parse_target for the filter,
     // and attach MultiTargetSpec { min: 0, max: None } (unlimited).
     if let Ok((after_prefix, _)) =
-        tag::<_, _, VerboseError<&str>>("any number of ").parse(lower.as_str())
+        tag::<_, _, OracleError<'_>>("any number of ").parse(lower.as_str())
     {
         let consumed = lower.len() - after_prefix.len();
         let target_text = &subject[consumed..];
-        if tag::<_, _, VerboseError<&str>>("target ")
+        if tag::<_, _, OracleError<'_>>("target ")
             .parse(after_prefix)
             .is_ok()
         {
@@ -388,9 +507,8 @@ pub(super) fn parse_subject_application(
         ("one or two ", 1usize, 2usize),
         ("one, two, or three ", 1, 3),
     ] {
-        if let Ok((after_prefix, _)) = tag::<_, _, VerboseError<&str>>(prefix).parse(lower.as_str())
-        {
-            if tag::<_, _, VerboseError<&str>>("target ")
+        if let Ok((after_prefix, _)) = tag::<_, _, OracleError<'_>>(prefix).parse(lower.as_str()) {
+            if tag::<_, _, OracleError<'_>>("target ")
                 .parse(after_prefix)
                 .is_ok()
             {
@@ -406,9 +524,9 @@ pub(super) fn parse_subject_application(
     // "each of your opponents" / "each of those creatures" / "each of them" — variant of
     // "each" with an interposed "of" that parse_target doesn't handle directly.
     // Must check before "each " to avoid the generic "each" path swallowing "each of".
-    if let Ok((remainder, _)) = tag::<_, _, VerboseError<&str>>("each of ").parse(lower.as_str()) {
+    if let Ok((remainder, _)) = tag::<_, _, OracleError<'_>>("each of ").parse(lower.as_str()) {
         if alt((
-            tag::<_, _, VerboseError<&str>>("your opponents"),
+            tag::<_, _, OracleError<'_>>("your opponents"),
             tag("your opponent"),
         ))
         .parse(remainder)
@@ -421,7 +539,7 @@ pub(super) fn parse_subject_application(
         }
         // "each of those [creatures/players/...]" / "each of them" — anaphoric reference
         // to the targets declared in the parent ability's sub_ability chain.
-        if alt((tag::<_, _, VerboseError<&str>>("those "), tag("them")))
+        if alt((tag::<_, _, OracleError<'_>>("those "), tag("them")))
             .parse(remainder)
             .is_ok()
         {
@@ -433,7 +551,7 @@ pub(super) fn parse_subject_application(
         return subject_filter_application(filter, false);
     }
     if let Ok((rest_lower, _)) =
-        alt((tag::<_, _, VerboseError<&str>>("all "), tag("each "))).parse(lower.as_str())
+        alt((tag::<_, _, OracleError<'_>>("all "), tag("each "))).parse(lower.as_str())
     {
         let consumed = lower.len() - rest_lower.len();
         let phrase = &subject[consumed..];
@@ -442,7 +560,7 @@ pub(super) fn parse_subject_application(
         return subject_filter_application(filter, false);
     }
     if alt((
-        tag::<_, _, VerboseError<&str>>("enchanted creature"),
+        tag::<_, _, OracleError<'_>>("enchanted creature"),
         tag("enchanted permanent"),
         tag("equipped creature"),
     ))
@@ -460,20 +578,44 @@ pub(super) fn parse_subject_application(
     }
     // "those creatures" / "those lands" — anaphoric reference to previous targets.
     // Maps to ParentTarget so the restriction applies to the same objects.
-    if let Ok((_, _)) = tag::<_, _, VerboseError<&str>>("those ").parse(lower.as_str()) {
+    if let Ok((_, _)) = tag::<_, _, OracleError<'_>>("those ").parse(lower.as_str()) {
+        return subject_filter_application(TargetFilter::ParentTarget, false);
+    }
+    if all_consuming(preceded(
+        tag::<_, _, OracleError<'_>>("the chosen "),
+        alt((
+            tag("artifacts"),
+            tag("artifact"),
+            tag("cards"),
+            tag("card"),
+            tag("creatures"),
+            tag("creature"),
+            tag("enchantments"),
+            tag("enchantment"),
+            tag("lands"),
+            tag("land"),
+            tag("permanents"),
+            tag("permanent"),
+            tag("players"),
+            tag("player"),
+        )),
+    ))
+    .parse(lower.as_str())
+    .is_ok()
+    {
         return subject_filter_application(TargetFilter::ParentTarget, false);
     }
 
     // Bare plural noun phrase subjects ("creatures you control", "other creatures you control")
     // are implicit "all X" forms — strip any "other " prefix and route through parse_target.
     let (had_other, noun_subject) =
-        if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("other ").parse(lower.as_str()) {
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("other ").parse(lower.as_str()) {
             (true, rest)
         } else {
             (false, lower.as_str())
         };
     if alt((
-        tag::<_, _, VerboseError<&str>>("target "),
+        tag::<_, _, OracleError<'_>>("target "),
         tag("all "),
         tag("each "),
     ))
@@ -522,7 +664,7 @@ pub(super) fn parse_subject_application(
     let player_subject = all_consuming(alt((
         value(
             ("that player", true),
-            tag::<_, _, VerboseError<&str>>("that player may"),
+            tag::<_, _, OracleError<'_>>("that player may"),
         ),
         value(("the player", true), tag("the player may")),
         value(("that player", false), tag("that player")),
@@ -535,7 +677,10 @@ pub(super) fn parse_subject_application(
             return None;
         };
         if matches!(ctx_filter, TargetFilter::TriggeringPlayer) {
-            let affected = if ctx.subject.is_some() {
+            let affected = if matches!(ctx.relative_player_scope, Some(ControllerRef::ScopedPlayer))
+            {
+                TargetFilter::ScopedPlayer
+            } else if ctx.subject.is_some() {
                 ctx_filter
             } else {
                 TargetFilter::Player
@@ -563,7 +708,7 @@ pub(super) fn parse_subject_application(
         });
     }
     // "an opponent" as subject — single opponent (two-player: equivalent to "each opponent").
-    if tag::<_, _, VerboseError<&str>>("an opponent")
+    if tag::<_, _, OracleError<'_>>("an opponent")
         .parse(lower.as_str())
         .is_ok()
     {
@@ -603,7 +748,7 @@ pub(super) fn parse_subject_application(
     // etc.) which already handle the subject-ignorant "reveals cards from the
     // top of their library until …" pattern as RevealUntil.
     if let Ok((after_head, _)) = alt((
-        tag::<_, _, VerboseError<&str>>("its controller may"),
+        tag::<_, _, OracleError<'_>>("its controller may"),
         tag("their controller may"),
     ))
     .parse(lower.as_str())
@@ -637,7 +782,7 @@ pub(super) fn parse_subject_application(
     // `ends_with` check on the remainder (post-tokenization classification, not
     // parsing dispatch).
     if let Ok((after_det, _)) =
-        alt((tag::<_, _, VerboseError<&str>>("that "), tag("the "))).parse(lower.as_str())
+        alt((tag::<_, _, OracleError<'_>>("that "), tag("the "))).parse(lower.as_str())
     {
         // structural: not dispatch — the nom `alt(tag(...))` above is the dispatch
         // step that consumes the determiner; this `ends_with` is a post-tokenization
@@ -697,7 +842,7 @@ pub(super) fn parse_subject_application(
     // CR 608.2c: "that creature/permanent/land" — anaphoric back-reference to a
     // previously mentioned object in the same effect sequence. Strip "that " and parse
     // the remainder as a type phrase. Covers all "that [type]" patterns generically.
-    if let Ok((rest_subject, _)) = tag::<_, _, VerboseError<&str>>("that ").parse(lower.as_str()) {
+    if let Ok((rest_subject, _)) = tag::<_, _, OracleError<'_>>("that ").parse(lower.as_str()) {
         // CR 608.2c: "that creature/permanent/land" — anaphoric back-reference to a
         // previously mentioned object in the same effect sequence. Strip "that " and parse
         // the remainder as a type phrase. Covers all "that [type]" patterns generically.
@@ -741,7 +886,7 @@ pub(super) fn parse_subject_application(
     // "each player's life total", etc. Map to the player filter so that
     // try_parse_set_life_total can produce the correct SetLifeTotal target.
     if alt((
-        tag::<_, _, VerboseError<&str>>("your life total"),
+        tag::<_, _, OracleError<'_>>("your life total"),
         tag("your life totals"),
     ))
     .parse(lower.as_str())
@@ -750,7 +895,7 @@ pub(super) fn parse_subject_application(
         return subject_filter_application(TargetFilter::Controller, false);
     }
     if alt((
-        tag::<_, _, VerboseError<&str>>("each player's life total"),
+        tag::<_, _, OracleError<'_>>("each player's life total"),
         tag("all players' life totals"),
         tag("all players' life total"),
         tag("each player's life totals"),
@@ -761,7 +906,7 @@ pub(super) fn parse_subject_application(
         return subject_filter_application(TargetFilter::Any, false);
     }
     if alt((
-        tag::<_, _, VerboseError<&str>>("that player's life total"),
+        tag::<_, _, OracleError<'_>>("that player's life total"),
         tag("the player's life total"),
         tag("their life total"),
     ))
@@ -781,7 +926,10 @@ pub(super) fn parse_subject_application(
 /// ref (e.g., `controller: Opponent`). For object-type subjects, "they" refers
 /// to the triggering source. Without trigger context, "they" is an anaphoric
 /// reference to previously mentioned objects (`ParentTarget`).
-fn resolve_they_pronoun(ctx: &ParseContext) -> TargetFilter {
+fn resolve_they_pronoun(ctx: &mut ParseContext) -> TargetFilter {
+    if matches!(ctx.relative_player_scope, Some(ControllerRef::ScopedPlayer)) {
+        return TargetFilter::ScopedPlayer;
+    }
     match &ctx.subject {
         // Player-type trigger subject: no type_filters, has controller ref
         Some(TargetFilter::Typed(tf)) if tf.type_filters.is_empty() && tf.controller.is_some() => {
@@ -963,7 +1111,7 @@ fn build_continuous_clause(
     // B15: Guard against "becomes" predicates routing through continuous clause parsing.
     // Creature-land animations ("becomes a 3/3 Dinosaur creature with trample") must
     // fall through to try_parse_subject_become_clause for correct animation handling.
-    if alt((tag::<_, _, VerboseError<&str>>("become "), tag("become\n")))
+    if alt((tag::<_, _, OracleError<'_>>("become "), tag("become\n")))
         .parse(normalized.as_str())
         .is_ok()
     {
@@ -1102,7 +1250,7 @@ fn strip_pre_except_duration(text: &str) -> (String, Option<Duration>) {
     // `eof`, consumes the head text from some byte offset. Scan forward at
     // word boundaries inside `head_lower` and try the tag-then-eof
     // combinator at each — the first match wins.
-    let duration_alt = |i| -> nom::IResult<&str, Duration, VerboseError<&str>> {
+    let duration_alt = |i| -> nom::IResult<&str, Duration, OracleError<'_>> {
         alt((
             value(Duration::UntilEndOfTurn, tag(" until end of turn")),
             value(Duration::UntilEndOfTurn, tag(" this turn")),
@@ -1138,7 +1286,7 @@ fn strip_pre_except_duration(text: &str) -> (String, Option<Duration>) {
             continue;
         }
         if let Ok((rest, duration)) = duration_alt(&head_lower[idx..]) {
-            if eof::<_, VerboseError<&str>>(rest).is_ok() {
+            if eof::<_, OracleError<'_>>(rest).is_ok() {
                 let head = text[..idx].trim_end();
                 let tail = &text[except_pos..];
                 return (format!("{head}{tail}"), Some(duration));
@@ -1151,13 +1299,13 @@ fn strip_pre_except_duration(text: &str) -> (String, Option<Duration>) {
 fn build_become_clause(
     application: SubjectApplication,
     predicate: &str,
-    ctx: &ParseContext,
+    ctx: &mut ParseContext,
 ) -> Option<ParsedEffectClause> {
     let normalized = deconjugate_verb(predicate);
     let (predicate, duration) = super::strip_trailing_duration(&normalized);
     // CR 725.1: "become the monarch" sets the monarch designation, not an animation.
     let predicate_lower = predicate.to_lowercase();
-    let (become_rest, _) = tag::<_, _, VerboseError<&str>>("become ")
+    let (become_rest, _) = tag::<_, _, OracleError<'_>>("become ")
         .parse(predicate_lower.as_str())
         .ok()?;
     let consumed = predicate_lower.len() - become_rest.len();
@@ -1202,7 +1350,7 @@ fn build_become_clause(
     if let Ok((_, kind)) = all_consuming(alt((
         value(
             PreparedKind::Unprepared,
-            tag::<_, _, VerboseError<&str>>("unprepared"),
+            tag::<_, _, OracleError<'_>>("unprepared"),
         ),
         value(PreparedKind::Prepared, tag("prepared")),
     )))
@@ -1231,7 +1379,7 @@ fn build_become_clause(
     // `become_copy_except` module so the trigger and replacement paths
     // contribute to the same building block.
     if let Ok((after_copy, _)) =
-        tag::<_, _, VerboseError<&str>>("a copy of ").parse(become_lower.as_str())
+        tag::<_, _, OracleError<'_>>("a copy of ").parse(become_lower.as_str())
     {
         // CR 611.2b + CR 707.9: Sarkhan-class triggers carry a mid-sentence
         // duration directly before the optional ", except <body>" clause
@@ -1257,11 +1405,8 @@ fn build_become_clause(
         // emitting `SetName { name: "" }` would silently set `obj.name = ""`
         // at Layer 1, strictly worse than dropping the override entirely.
         let card_name = ctx.card_name.as_deref().unwrap_or("");
-        let except_ctx = super::become_copy_except::ExceptClauseContext {
-            current_trigger_index: ctx.current_trigger_index,
-        };
         let additional_modifications =
-            super::become_copy_except::parse_except_clause(remainder, card_name, except_ctx)
+            super::become_copy_except::parse_except_clause(remainder, card_name, ctx)
                 .map(|(_, mods)| mods)
                 .unwrap_or_default();
         return Some(ParsedEffectClause {
@@ -1280,12 +1425,21 @@ fn build_become_clause(
         });
     }
 
-    if let Some(clause) = try_parse_become_and_attack_if_able(&application, become_text) {
+    if let Some(clause) = try_parse_become_and_attack_if_able(&application, become_text, ctx) {
         return Some(clause);
     }
 
-    let animation = parse_animation_spec(become_text)?;
+    let (become_text, name_override) = strip_become_name_override(become_text);
+    let animation = parse_animation_spec(&become_text, ctx)?;
     let modifications = animation_modifications(&animation);
+    let modifications = if let Some(name) = name_override {
+        let mut with_name = Vec::with_capacity(modifications.len() + 1);
+        with_name.push(ContinuousModification::SetName { name });
+        with_name.extend(modifications);
+        with_name
+    } else {
+        modifications
+    };
     if modifications.is_empty() {
         return None;
     }
@@ -1309,14 +1463,29 @@ fn build_become_clause(
     })
 }
 
+fn strip_become_name_override(text: &str) -> (String, Option<String>) {
+    let lower = text.to_lowercase();
+    let tp = TextPair::new(text, &lower);
+    let Some((before, after)) = tp.split_around(" named ") else {
+        return (text.to_string(), None);
+    };
+    let name = after.original.trim().trim_end_matches('.').to_string();
+    if name.is_empty() {
+        (before.original.trim().to_string(), None)
+    } else {
+        (before.original.trim().to_string(), Some(name))
+    }
+}
+
 fn try_parse_become_and_attack_if_able(
     application: &SubjectApplication,
     become_text: &str,
+    ctx: &mut ParseContext,
 ) -> Option<ParsedEffectClause> {
     let lower = become_text.to_lowercase();
     let (before_attack, attack_duration, rest) = nom_primitives::scan_preceded(&lower, |i| {
         preceded(
-            tag::<_, _, VerboseError<&str>>("and "),
+            tag::<_, _, OracleError<'_>>("and "),
             parse_attack_if_able_duration,
         )
         .parse(i)
@@ -1328,7 +1497,7 @@ fn try_parse_become_and_attack_if_able(
     let animation_text = become_text[..before_attack.trim_end().len()].trim();
     let (animation_text, animation_duration) = super::strip_trailing_duration(animation_text);
     let animation_duration = animation_duration?;
-    let animation = parse_animation_spec(animation_text)?;
+    let animation = parse_animation_spec(animation_text, ctx)?;
     let modifications = animation_modifications(&animation);
     if modifications.is_empty() {
         return None;
@@ -1396,36 +1565,37 @@ fn try_parse_set_life_total(
     let lower = become_text.to_lowercase();
 
     // Parse the amount expression
-    let amount =
-        if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("half ").parse(lower.as_str()) {
-            // "half their starting life total" / "half that player's starting life total"
-            if nom_primitives::scan_contains(rest, "starting life total") {
-                QuantityExpr::HalfRounded {
-                    inner: Box::new(QuantityExpr::Ref {
-                        qty: QuantityRef::StartingLifeTotal,
-                    }),
-                    rounding: RoundingMode::Down,
-                }
-            } else {
-                return None;
+    let amount = if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("half ").parse(lower.as_str())
+    {
+        // "half their starting life total" / "half that player's starting life total"
+        if nom_primitives::scan_contains(rest, "starting life total") {
+            QuantityExpr::DivideRounded {
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::StartingLifeTotal,
+                }),
+                divisor: 2,
+                rounding: RoundingMode::Down,
             }
-        } else if nom_primitives::scan_contains(&lower, "starting life total") {
-            QuantityExpr::Ref {
-                qty: QuantityRef::StartingLifeTotal,
-            }
-        } else if let Some((n, rest)) = parse_number(&lower) {
-            // Guard: reject if substantial text remains after the number.
-            // "a 3/3 red goblin creature" matches "a" as 1 but the rest
-            // "3/3 red goblin creature" indicates this is an animation, not
-            // a life total. Genuine life total patterns: "10", "1", bare numbers.
-            let rest_trimmed = rest.trim().trim_end_matches('.');
-            if !rest_trimmed.is_empty() {
-                return None;
-            }
-            QuantityExpr::Fixed { value: n as i32 }
         } else {
             return None;
-        };
+        }
+    } else if nom_primitives::scan_contains(&lower, "starting life total") {
+        QuantityExpr::Ref {
+            qty: QuantityRef::StartingLifeTotal,
+        }
+    } else if let Some((n, rest)) = parse_number(&lower) {
+        // Guard: reject if substantial text remains after the number.
+        // "a 3/3 red goblin creature" matches "a" as 1 but the rest
+        // "3/3 red goblin creature" indicates this is an animation, not
+        // a life total. Genuine life total patterns: "10", "1", bare numbers.
+        let rest_trimmed = rest.trim().trim_end_matches('.');
+        if !rest_trimmed.is_empty() {
+            return None;
+        }
+        QuantityExpr::Fixed { value: n as i32 }
+    } else {
+        return None;
+    };
 
     // CR 119.5: Use the parsed target if targeted ("target player's life total"),
     // otherwise fall back to the subject's affected filter ("each player's life total"
@@ -1450,8 +1620,8 @@ fn try_parse_set_life_total(
 fn try_parse_set_day_night(become_text: &str) -> Option<ParsedEffectClause> {
     let lower = become_text.to_lowercase();
     let (_, to) = alt((
-        value(DayNight::Night, tag::<_, _, VerboseError<&str>>("night")),
-        value(DayNight::Day, tag::<_, _, VerboseError<&str>>("day")),
+        value(DayNight::Night, tag::<_, _, OracleError<'_>>("night")),
+        value(DayNight::Day, tag::<_, _, OracleError<'_>>("day")),
     ))
     .parse(lower.trim_start())
     .ok()?;
@@ -1680,6 +1850,11 @@ pub(crate) fn parse_restriction_modes(lower: &str) -> Option<Vec<StaticMode>> {
     if lower == "can't transform" || lower == "cannot transform" {
         return Some(vec![StaticMode::Other("CantTransform".to_string())]);
     }
+    // CR 101.2: Spell/ability restriction predicate; the subject path owns
+    // the "spells you control" / "green spells you control" grammar.
+    if lower == "can't be countered" || lower == "cannot be countered" {
+        return Some(vec![StaticMode::CantBeCountered]);
+    }
     // Simple restrictions
     if lower == "can't block" || lower == "cannot block" {
         return Some(vec![StaticMode::CantBlock]);
@@ -1687,7 +1862,7 @@ pub(crate) fn parse_restriction_modes(lower: &str) -> Option<Vec<StaticMode>> {
     // "can't block this creature" / "can't block ~" — source-referential variant used in
     // activated abilities; grants CantBlock to the targeted creature (CR 509.1a).
     if let Ok((rest, _)) = alt((
-        tag::<_, _, VerboseError<&str>>("can't block "),
+        tag::<_, _, OracleError<'_>>("can't block "),
         tag("cannot block "),
     ))
     .parse(lower)
@@ -1717,7 +1892,7 @@ pub(crate) fn parse_restriction_modes(lower: &str) -> Option<Vec<StaticMode>> {
     }
     // CR 509.1c: "can't be blocked except by ..." — evasion restriction
     if let Ok((except_text, _)) = alt((
-        tag::<_, _, VerboseError<&str>>("can't be blocked except by "),
+        tag::<_, _, OracleError<'_>>("can't be blocked except by "),
         tag("cannot be blocked except by "),
     ))
     .parse(lower)
@@ -1728,7 +1903,7 @@ pub(crate) fn parse_restriction_modes(lower: &str) -> Option<Vec<StaticMode>> {
     }
     // CR 509.1b: "can't be blocked by <filter>" — blocker restriction
     if let Ok((by_rest, _)) = alt((
-        tag::<_, _, VerboseError<&str>>("can't be blocked by "),
+        tag::<_, _, OracleError<'_>>("can't be blocked by "),
         tag("cannot be blocked by "),
     ))
     .parse(lower)
@@ -1741,7 +1916,7 @@ pub(crate) fn parse_restriction_modes(lower: &str) -> Option<Vec<StaticMode>> {
     }
     // CR 115.4: "can't be the target of ..." — hexproof variant
     if alt((
-        tag::<_, _, VerboseError<&str>>("can't be the target of "),
+        tag::<_, _, OracleError<'_>>("can't be the target of "),
         tag("cannot be the target of "),
     ))
     .parse(lower)
@@ -1755,7 +1930,7 @@ pub(crate) fn parse_restriction_modes(lower: &str) -> Option<Vec<StaticMode>> {
     }
     // CR 302.6: "doesn't untap during [controller's] untap step"
     if alt((
-        tag::<_, _, VerboseError<&str>>("doesn't untap"),
+        tag::<_, _, OracleError<'_>>("doesn't untap"),
         tag("don't untap"),
     ))
     .parse(lower)
@@ -1792,7 +1967,7 @@ fn extract_pump_modifiers(
 /// the targeted permanent's controller gains life based on the permanent's stats.
 pub(super) fn try_parse_targeted_controller_gain_life(text: &str) -> Option<ParsedEffectClause> {
     let lower = text.to_lowercase();
-    tag::<_, _, VerboseError<&str>>("its controller ")
+    tag::<_, _, OracleError<'_>>("its controller ")
         .parse(lower.as_str())
         .ok()?;
     if !lower.contains("gain") || !lower.contains("life") {
@@ -1815,7 +1990,7 @@ pub(super) fn try_parse_targeted_controller_gain_life(text: &str) -> Option<Pars
     } else {
         // Try to parse a fixed amount: "its controller gains 3 life"
         let after = &lower["its controller ".len()..];
-        let after = alt((tag::<_, _, VerboseError<&str>>("gains "), tag("gain ")))
+        let after = alt((tag::<_, _, OracleError<'_>>("gains "), tag("gain ")))
             .parse(after)
             .map(|(rest, _)| rest)
             .unwrap_or(after);
@@ -1841,7 +2016,7 @@ pub(super) fn try_parse_targeted_controller_gain_life(text: &str) -> Option<Pars
 /// would scan past non-predicate tokens (e.g. `~ enters with a token copy of
 /// Pacifism attached to it.`) and match a later PREDICATE_VERB, stripping the
 /// wrong clause.
-fn parse_tilde_subject_with_predicate(input: &str) -> nom::IResult<&str, (), VerboseError<&str>> {
+fn parse_tilde_subject_with_predicate(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
     verify(
         preceded(tag("~ "), take_till(|c: char| c == ' ')),
         |first_word: &str| {
@@ -1881,7 +2056,7 @@ pub(super) fn deconjugate_verb(text: &str) -> String {
 pub(crate) fn starts_with_subject_prefix(lower: &str) -> bool {
     alt((
         alt((
-            value((), tag::<_, _, VerboseError<&str>>("all ")),
+            value((), tag::<_, _, OracleError<'_>>("all ")),
             value((), tag("an opponent ")),
             value((), tag("any number of ")),
             value((), tag("defending player ")),
@@ -1895,7 +2070,7 @@ pub(crate) fn starts_with_subject_prefix(lower: &str) -> bool {
             value((), tag("its controller ")),
         )),
         alt((
-            value((), tag::<_, _, VerboseError<&str>>("its owner ")),
+            value((), tag::<_, _, OracleError<'_>>("its owner ")),
             value((), tag("~'s owner ")),
             value((), tag("target ")),
             value((), tag("that ")),
@@ -2055,14 +2230,14 @@ mod tests {
     /// is the seam that pulls the duration through.
     #[test]
     fn sarkhan_soul_aflame_have_become_copy() {
-        let ctx = ParseContext {
+        let mut ctx = ParseContext {
             card_name: Some("Sarkhan, Soul Aflame".to_string()),
             ..Default::default()
         };
         let ability = crate::parser::oracle_effect::parse_effect_chain_with_context(
             "have ~ become a copy of it until end of turn, except its name is ~ and it's legendary in addition to its other types",
             AbilityKind::Spell,
-            &ctx,
+            &mut ctx,
         );
         match &*ability.effect {
             Effect::BecomeCopy {
@@ -2096,6 +2271,64 @@ mod tests {
     }
 
     #[test]
+    fn have_card_name_become_named_equipment_and_lose_other_abilities() {
+        let mut ctx = ParseContext {
+            card_name: Some("The Irencrag".to_string()),
+            ..Default::default()
+        };
+        let ability = crate::parser::oracle_effect::parse_effect_chain_with_context(
+            "have The Irencrag become a legendary Equipment artifact named Everflame, Heroes' Legacy. If you do, it gains equip {3} and \"Equipped creature gets +3/+3\" and loses all other abilities.",
+            AbilityKind::Spell,
+            &mut ctx,
+        );
+
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = &*ability.effect
+        else {
+            panic!("expected GenericEffect, got {:?}", ability.effect);
+        };
+        let modifications = &static_abilities[0].modifications;
+        assert!(
+            modifications.iter().any(|modification| matches!(
+                modification,
+                ContinuousModification::SetName { name } if name == "Everflame, Heroes' Legacy"
+            )),
+            "expected SetName in {modifications:?}",
+        );
+        assert!(
+            modifications.iter().any(|modification| matches!(
+                modification,
+                ContinuousModification::AddSubtype { subtype } if subtype == "Equipment"
+            )),
+            "expected AddSubtype(Equipment) in {modifications:?}",
+        );
+
+        let sub_ability = ability.sub_ability.as_ref().expect("If you do sub-ability");
+        assert!(matches!(
+            sub_ability.condition,
+            Some(crate::types::ability::AbilityCondition::IfYouDo)
+        ));
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = &*sub_ability.effect
+        else {
+            panic!(
+                "expected GenericEffect sub-ability, got {:?}",
+                sub_ability.effect
+            );
+        };
+        let sub_modifications = &static_abilities[0].modifications;
+        assert!(
+            sub_modifications.iter().any(|modification| matches!(
+                modification,
+                ContinuousModification::RemoveAllAbilities
+            )),
+            "expected RemoveAllAbilities in {sub_modifications:?}",
+        );
+    }
+
+    #[test]
     fn starts_with_subject_prefix_each_of() {
         assert!(starts_with_subject_prefix("each of your opponents"));
         assert!(starts_with_subject_prefix("each of those creatures"));
@@ -2117,8 +2350,8 @@ mod tests {
 
     #[test]
     fn parse_subject_each_of_your_opponents() {
-        let ctx = ParseContext::default();
-        let result = parse_subject_application("each of your opponents", &ctx);
+        let mut ctx = ParseContext::default();
+        let result = parse_subject_application("each of your opponents", &mut ctx);
         assert!(result.is_some());
         let app = result.unwrap();
         assert_eq!(
@@ -2133,8 +2366,8 @@ mod tests {
 
     #[test]
     fn parse_subject_each_of_them() {
-        let ctx = ParseContext::default();
-        let result = parse_subject_application("each of them", &ctx);
+        let mut ctx = ParseContext::default();
+        let result = parse_subject_application("each of them", &mut ctx);
         assert!(result.is_some());
         let app = result.unwrap();
         assert_eq!(app.affected, TargetFilter::ParentTarget);
@@ -2142,17 +2375,81 @@ mod tests {
 
     #[test]
     fn parse_subject_each_of_those_creatures() {
-        let ctx = ParseContext::default();
-        let result = parse_subject_application("each of those creatures", &ctx);
+        let mut ctx = ParseContext::default();
+        let result = parse_subject_application("each of those creatures", &mut ctx);
         assert!(result.is_some());
         let app = result.unwrap();
         assert_eq!(app.affected, TargetFilter::ParentTarget);
     }
 
     #[test]
+    fn parse_subject_the_chosen_creature() {
+        for subject in [
+            "the chosen artifact",
+            "the chosen card",
+            "the chosen creature",
+            "the chosen creatures",
+            "the chosen land",
+            "the chosen permanent",
+            "the chosen player",
+        ] {
+            let mut ctx = ParseContext::default();
+            let result = parse_subject_application(subject, &mut ctx);
+            let app = result.expect("should recognize selected subject");
+            assert_eq!(app.affected, TargetFilter::ParentTarget);
+            assert!(
+                app.target.is_none(),
+                "chosen object is an anaphoric parent target, not a new target"
+            );
+        }
+    }
+
+    #[test]
+    fn chosen_creature_doesnt_untap_builds_cant_untap_restriction() {
+        let mut ctx = ParseContext::default();
+        let clause = try_parse_subject_restriction_clause(
+            "The chosen creature doesn't untap during its controller's next untap step.",
+            &mut ctx,
+        )
+        .expect("chosen object untap restriction should parse");
+
+        let Effect::GenericEffect {
+            static_abilities,
+            duration,
+            target,
+        } = clause.effect
+        else {
+            panic!(
+                "expected GenericEffect restriction, got {:?}",
+                clause.effect
+            );
+        };
+
+        assert_eq!(target, None);
+        assert_eq!(
+            duration,
+            Some(Duration::UntilNextUntapStepOf {
+                player: PlayerScope::Controller,
+            })
+        );
+        assert_eq!(static_abilities.len(), 1);
+        assert_eq!(static_abilities[0].mode, StaticMode::CantUntap);
+        assert_eq!(
+            static_abilities[0].affected,
+            Some(TargetFilter::ParentTarget)
+        );
+        assert!(static_abilities[0].modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddStaticMode {
+                mode: StaticMode::CantUntap
+            }
+        )));
+    }
+
+    #[test]
     fn parse_subject_an_opponent() {
-        let ctx = ParseContext::default();
-        let result = parse_subject_application("an opponent", &ctx);
+        let mut ctx = ParseContext::default();
+        let result = parse_subject_application("an opponent", &mut ctx);
         assert!(result.is_some());
         let app = result.unwrap();
         assert_eq!(
@@ -2163,8 +2460,8 @@ mod tests {
 
     #[test]
     fn parse_subject_the_player() {
-        let ctx = ParseContext::default();
-        let result = parse_subject_application("the player", &ctx);
+        let mut ctx = ParseContext::default();
+        let result = parse_subject_application("the player", &mut ctx);
         assert!(result.is_some());
         let app = result.unwrap();
         assert_eq!(app.affected, TargetFilter::Player);
@@ -2173,8 +2470,8 @@ mod tests {
     // CR 608.2c + CR 117.3a: "its/their controller [may]" anaphoric player subject.
     #[test]
     fn parse_subject_its_controller_bare() {
-        let ctx = ParseContext::default();
-        let result = parse_subject_application("its controller", &ctx);
+        let mut ctx = ParseContext::default();
+        let result = parse_subject_application("its controller", &mut ctx);
         let app = result.expect("should recognize 'its controller'");
         assert_eq!(app.affected, TargetFilter::ParentTargetController);
         assert!(!app.is_optional, "no 'may' modal → not optional");
@@ -2182,8 +2479,8 @@ mod tests {
 
     #[test]
     fn parse_subject_their_controller_bare() {
-        let ctx = ParseContext::default();
-        let result = parse_subject_application("their controller", &ctx);
+        let mut ctx = ParseContext::default();
+        let result = parse_subject_application("their controller", &mut ctx);
         let app = result.expect("should recognize 'their controller'");
         assert_eq!(app.affected, TargetFilter::ParentTargetController);
         assert!(!app.is_optional);
@@ -2191,8 +2488,8 @@ mod tests {
 
     #[test]
     fn parse_subject_its_controller_may() {
-        let ctx = ParseContext::default();
-        let result = parse_subject_application("its controller may", &ctx);
+        let mut ctx = ParseContext::default();
+        let result = parse_subject_application("its controller may", &mut ctx);
         let app = result.expect("should recognize 'its controller may'");
         assert_eq!(app.affected, TargetFilter::ParentTargetController);
         assert!(
@@ -2237,8 +2534,8 @@ mod tests {
 
     #[test]
     fn parse_subject_their_controller_may() {
-        let ctx = ParseContext::default();
-        let result = parse_subject_application("their controller may", &ctx);
+        let mut ctx = ParseContext::default();
+        let result = parse_subject_application("their controller may", &mut ctx);
         let app = result.expect("should recognize 'their controller may'");
         assert_eq!(app.affected, TargetFilter::ParentTargetController);
         assert!(app.is_optional);
@@ -2247,8 +2544,8 @@ mod tests {
     // CR 608.2c: "that [type]" anaphoric back-references
     #[test]
     fn parse_subject_that_creature() {
-        let ctx = ParseContext::default();
-        let result = parse_subject_application("That creature", &ctx);
+        let mut ctx = ParseContext::default();
+        let result = parse_subject_application("That creature", &mut ctx);
         assert!(result.is_some(), "should recognize 'That creature'");
         let app = result.unwrap();
         assert!(
@@ -2261,8 +2558,8 @@ mod tests {
 
     #[test]
     fn parse_subject_that_land() {
-        let ctx = ParseContext::default();
-        let result = parse_subject_application("that land", &ctx);
+        let mut ctx = ParseContext::default();
+        let result = parse_subject_application("that land", &mut ctx);
         assert!(result.is_some(), "should recognize 'that land'");
         let app = result.unwrap();
         assert!(
@@ -2274,8 +2571,8 @@ mod tests {
 
     #[test]
     fn parse_subject_that_permanent() {
-        let ctx = ParseContext::default();
-        let result = parse_subject_application("that permanent", &ctx);
+        let mut ctx = ParseContext::default();
+        let result = parse_subject_application("that permanent", &mut ctx);
         assert!(result.is_some(), "should recognize 'that permanent'");
         let app = result.unwrap();
         assert!(
@@ -2289,8 +2586,8 @@ mod tests {
     fn parse_subject_that_player_unchanged() {
         // "that player" has its own handler at line 266 — ensure "that " prefix
         // doesn't shadow it (it shouldn't, since it's checked earlier)
-        let ctx = ParseContext::default();
-        let result = parse_subject_application("that player", &ctx);
+        let mut ctx = ParseContext::default();
+        let result = parse_subject_application("that player", &mut ctx);
         assert!(result.is_some());
         assert_eq!(result.unwrap().affected, TargetFilter::Player);
     }
@@ -2298,8 +2595,8 @@ mod tests {
     // CR 115.1d: "any number of target" subject prefix tests
     #[test]
     fn parse_subject_any_number_of_target_creatures() {
-        let ctx = ParseContext::default();
-        let result = parse_subject_application("any number of target creatures", &ctx);
+        let mut ctx = ParseContext::default();
+        let result = parse_subject_application("any number of target creatures", &mut ctx);
         assert!(result.is_some());
         let app = result.unwrap();
         assert!(
@@ -2317,8 +2614,9 @@ mod tests {
 
     #[test]
     fn parse_subject_any_number_of_target_creatures_you_control() {
-        let ctx = ParseContext::default();
-        let result = parse_subject_application("any number of target creatures you control", &ctx);
+        let mut ctx = ParseContext::default();
+        let result =
+            parse_subject_application("any number of target creatures you control", &mut ctx);
         assert!(result.is_some());
         let app = result.unwrap();
         assert!(
@@ -2333,8 +2631,8 @@ mod tests {
 
     #[test]
     fn parse_subject_any_number_of_target_players() {
-        let ctx = ParseContext::default();
-        let result = parse_subject_application("any number of target players", &ctx);
+        let mut ctx = ParseContext::default();
+        let result = parse_subject_application("any number of target players", &mut ctx);
         assert!(result.is_some());
         let app = result.unwrap();
         assert_eq!(app.multi_target, Some(MultiTargetSpec::unlimited(0)),);

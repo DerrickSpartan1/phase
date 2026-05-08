@@ -20,10 +20,12 @@ import init, {
   restore_game_state,
   resume_multiplayer_host_state,
   load_card_database,
+  evaluate_deck_compatibility_js,
   apply_seat_mutation,
   export_game_state_json,
   clear_game_state,
   set_multiplayer_mode,
+  resolve_all,
 } from "@wasm/engine";
 
 import type { GameAction } from "./types";
@@ -68,11 +70,13 @@ type EngineRequest =
   | { type: "resumeMultiplayerHostState"; id: number; stateJson: string }
   | { type: "exportState"; id: number }
   | { type: "loadCardDbFromUrl"; id: number }
+  | { type: "evaluateDeckCompatibility"; id: number; request: unknown }
   | { type: "resetGame"; id: number }
   | { type: "setMultiplayerMode"; id: number; enabled: boolean }
   | { type: "ping"; id: number }
   | { type: "takeLastPanic"; id: number }
-  | { type: "applySeatMutation"; id: number; stateJson: string; mutationJson: string };
+  | { type: "applySeatMutation"; id: number; stateJson: string; mutationJson: string }
+  | { type: "resolveAll"; id: number; requester: number; aiSeatsJson: string; maxResolutions: number };
 
 type EngineResponse =
   | { type: "ready" }
@@ -128,6 +132,19 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
         break;
       }
 
+      case "evaluateDeckCompatibility": {
+        if (!cardDbLoaded) {
+          error(
+            msg.id,
+            "Card database not loaded. Call loadCardDb or loadCardDbFromUrl first.",
+          );
+          break;
+        }
+        const data = evaluate_deck_compatibility_js(msg.request);
+        result(msg.id, data);
+        break;
+      }
+
       case "initializeGame": {
         if (!cardDbLoaded && msg.deckData) {
           error(
@@ -167,6 +184,18 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
       }
 
       case "submitAction": {
+        if (
+          !cardDbLoaded &&
+          msg.action?.type === "Debug" &&
+          msg.action?.data?.type === "CreateCard"
+        ) {
+          const resp = await fetch(__CARD_DATA_URL__);
+          if (resp.ok) {
+            const text = await resp.text();
+            load_card_database(text);
+            cardDbLoaded = true;
+          }
+        }
         const actionResult = submit_action(msg.actor, msg.action);
         if (typeof actionResult === "string") {
           // Rust's submit_action error contract: returns the error string
@@ -311,6 +340,16 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
       case "applySeatMutation": {
         const delta = apply_seat_mutation(msg.stateJson, msg.mutationJson);
         result(msg.id, delta ?? null);
+        break;
+      }
+
+      case "resolveAll": {
+        const r = resolve_all(msg.requester, msg.aiSeatsJson, msg.maxResolutions);
+        if (typeof r === "string") {
+          error(msg.id, r);
+          break;
+        }
+        result(msg.id, r);
         break;
       }
 

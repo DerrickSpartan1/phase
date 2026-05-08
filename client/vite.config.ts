@@ -87,6 +87,7 @@ export default defineConfig({
   resolve: {
     alias: {
       "@wasm/engine": path.resolve(__dirname, "src/wasm/engine_wasm"),
+      "@wasm/draft": path.resolve(__dirname, "src/wasm/draft_wasm"),
     },
   },
   plugins: [
@@ -101,13 +102,21 @@ export default defineConfig({
       includeAssets: ["**/*.mp3", "**/*.m4a"],
       workbox: {
         maximumFileSizeToCacheInBytes: 15 * 1024 * 1024,
-        globIgnores: ["**/engine_wasm_bg-*.wasm"],
+        globIgnores: ["**/engine_wasm_bg-*.wasm", "**/draft_wasm_bg-*.wasm"],
         runtimeCaching: [
           {
             urlPattern: /engine_wasm_bg-.*\.wasm$/,
             handler: "CacheFirst",
             options: {
               cacheName: "engine-wasm",
+              expiration: { maxEntries: 2, maxAgeSeconds: 2592000 },
+            },
+          },
+          {
+            urlPattern: /draft_wasm_bg-.*\.wasm$/,
+            handler: "CacheFirst",
+            options: {
+              cacheName: "draft-wasm",
               expiration: { maxEntries: 2, maxAgeSeconds: 2592000 },
             },
           },

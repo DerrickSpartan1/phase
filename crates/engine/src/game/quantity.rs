@@ -45,6 +45,9 @@ pub struct QuantityContext {
     /// evaluator when the dynamic modification's filter contains
     /// `FilterProp::AttachedToRecipient`; `None` otherwise.
     pub recipient: Option<ObjectId>,
+    /// Current player for an "each player/opponent" resolution pass. Distinct
+    /// from `controller`, which remains the printed ability's controller.
+    pub scoped_player: Option<PlayerId>,
 }
 
 impl QuantityContext {
@@ -73,6 +76,7 @@ pub fn resolve_quantity(
             entering: None,
             source: source_id,
             recipient: None,
+            scoped_player: None,
         },
     )
 }
@@ -96,6 +100,7 @@ pub fn resolve_quantity_with_recipient(
             entering: None,
             source: source_id,
             recipient: Some(recipient_id),
+            scoped_player: None,
         },
     )
 }
@@ -144,9 +149,18 @@ pub(crate) fn quantity_expr_uses_recipient(expr: &QuantityExpr) -> bool {
                 scope: ObjectScope::Recipient,
                 ..
             } => true,
+            QuantityRef::Power {
+                scope: ObjectScope::CostPaidObject,
+            }
+            | QuantityRef::Toughness {
+                scope: ObjectScope::CostPaidObject,
+            }
+            | QuantityRef::ObjectManaValue {
+                scope: ObjectScope::CostPaidObject,
+            } => false,
             _ => false,
         },
-        QuantityExpr::HalfRounded { inner, .. }
+        QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::Offset { inner, .. }
         | QuantityExpr::Multiply { inner, .. } => quantity_expr_uses_recipient(inner),
         QuantityExpr::Sum { exprs } => exprs.iter().any(quantity_expr_uses_recipient),
@@ -196,7 +210,7 @@ pub fn resolve_quantity_with_ctx(
 }
 
 /// Compose recursively-resolved inner values for the non-leaf
-/// `QuantityExpr` variants (`HalfRounded`, `Offset`, `Multiply`, `Sum`).
+/// `QuantityExpr` variants (`DivideRounded`, `Offset`, `Multiply`, `Sum`).
 /// All four resolver entry points share this logic; only the leaf arms
 /// (`Fixed`, `Ref`) differ in context handling. `recurse` is a closure
 /// the caller supplies that re-enters its own resolver with the inner
@@ -206,7 +220,11 @@ pub fn resolve_quantity_with_ctx(
 /// before delegating here.
 fn fold_compose(expr: &QuantityExpr, recurse: impl Fn(&QuantityExpr) -> i32) -> i32 {
     match expr {
-        QuantityExpr::HalfRounded { inner, rounding } => half_rounded(recurse(inner), *rounding),
+        QuantityExpr::DivideRounded {
+            inner,
+            divisor,
+            rounding,
+        } => divide_rounded(recurse(inner), *divisor, *rounding),
         QuantityExpr::Offset { inner, offset } => recurse(inner) + offset,
         QuantityExpr::Multiply { factor, inner } => factor * recurse(inner),
         QuantityExpr::Sum { exprs } => exprs.iter().map(&recurse).sum(),
@@ -216,7 +234,7 @@ fn fold_compose(expr: &QuantityExpr, recurse: impl Fn(&QuantityExpr) -> i32) -> 
         // `QuantityExpr::peel_up_to` to extract the "may pick fewer" flag
         // before reaching arithmetic. Treating it transparently here keeps
         // legacy serde round-trips correct and makes accidental composition
-        // (e.g., `HalfRounded { inner: UpTo { max: ... } }`) collapse to a
+        // (e.g., `DivideRounded { inner: UpTo { max: ... } }`) collapse to a
         // sensible bound rather than panicking.
         QuantityExpr::UpTo { max } => recurse(max),
         QuantityExpr::Fixed { .. } | QuantityExpr::Ref { .. } => {
@@ -371,16 +389,18 @@ pub fn resolve_quantity_with_targets(
     expr: &QuantityExpr,
     ability: &ResolvedAbility,
 ) -> i32 {
+    let controller = ability.original_controller.unwrap_or(ability.controller);
     match expr {
         QuantityExpr::Fixed { value } => *value,
         QuantityExpr::Ref { qty } => resolve_ref(
             state,
             qty,
-            ability.controller,
+            controller,
             QuantityContext {
                 entering: None,
                 source: ability.source_id,
                 recipient: None,
+                scoped_player: ability.scoped_player,
             },
             &ability.targets,
             ability.chosen_x,
@@ -400,16 +420,18 @@ pub(crate) fn resolve_quantity_with_targets_and_recipient(
     ability: &ResolvedAbility,
     recipient_id: ObjectId,
 ) -> i32 {
+    let controller = ability.original_controller.unwrap_or(ability.controller);
     match expr {
         QuantityExpr::Fixed { value } => *value,
         QuantityExpr::Ref { qty } => resolve_ref(
             state,
             qty,
-            ability.controller,
+            controller,
             QuantityContext {
                 entering: None,
                 source: ability.source_id,
                 recipient: Some(recipient_id),
+                scoped_player: ability.scoped_player,
             },
             &ability.targets,
             ability.chosen_x,
@@ -443,6 +465,7 @@ pub fn resolve_quantity_with_targets_slice(
                 entering: None,
                 source: source_id,
                 recipient: None,
+                scoped_player: None,
             },
             targets,
             None,
@@ -476,6 +499,7 @@ pub(crate) fn resolve_quantity_scoped(
                 entering: None,
                 source: source_id,
                 recipient: None,
+                scoped_player: Some(scope_player),
             },
             &[],
             None,
@@ -488,16 +512,23 @@ pub(crate) fn resolve_quantity_scoped(
 }
 
 /// CR 107.1a: "If a spell or ability could generate a fractional number, the
-/// spell or ability will tell you whether to round up or down." Integer-divides
-/// by 2 in the direction specified by the parsed `RoundingMode`. Negative
-/// inputs are resolver-safe: `(−1 + 1) / 2 = 0` rounds up, `−1 / 2 = 0` rounds
-/// down (Rust truncates toward zero), matching CR 107.1b which permits
-/// negative intermediate values but forbids negative damage/life results.
-fn half_rounded(value: i32, rounding: RoundingMode) -> i32 {
-    match rounding {
-        RoundingMode::Up => (value + 1) / 2,
-        RoundingMode::Down => value / 2,
-    }
+/// spell or ability will tell you whether to round up or down.
+fn divide_rounded(value: i32, divisor: u32, rounding: RoundingMode) -> i32 {
+    debug_assert!(divisor > 0, "fractional quantity divisor must be nonzero");
+    let divisor = i64::from(divisor.max(1));
+    let value = i64::from(value);
+    let rounded = match rounding {
+        RoundingMode::Up => {
+            let quotient = value.div_euclid(divisor);
+            if value.rem_euclid(divisor) == 0 {
+                quotient
+            } else {
+                quotient + 1
+            }
+        }
+        RoundingMode::Down => value.div_euclid(divisor),
+    };
+    rounded as i32
 }
 
 fn resolve_ref(
@@ -712,6 +743,7 @@ fn resolve_ref(
             *scope,
             ctx,
             targets,
+            ability,
             |obj| obj.power,
             |lki| lki.power,
         ),
@@ -720,11 +752,12 @@ fn resolve_ref(
             *scope,
             ctx,
             targets,
+            ability,
             |obj| obj.toughness,
             |lki| lki.toughness,
         ),
         QuantityRef::ObjectManaValue { scope } => {
-            resolve_object_mana_value(state, *scope, ctx, targets)
+            resolve_object_mana_value(state, *scope, ctx, targets, ability)
         }
         // CR 105.1 + CR 105.2: Count the object's current colors. The color
         // vector is maintained by layer 5, so recipient-relative static boosts
@@ -1012,6 +1045,10 @@ fn resolve_ref(
             .current_trigger_event
             .as_ref()
             .and_then(crate::game::targeting::extract_amount_from_event)
+            .or_else(|| {
+                ctx.scoped_player
+                    .and_then(|player| state.last_effect_counts_by_player.get(&player).copied())
+            })
             .or(state.last_effect_count)
             .unwrap_or(0),
         // CR 603.7c: Power of the source object from the triggering event.
@@ -1058,14 +1095,6 @@ fn resolve_ref(
                             .map(|lki| u32_to_i32_saturating(lki.mana_value))
                     })
             })
-            .unwrap_or(0),
-        // CR 117.1 + CR 202.3: Mana value of the cost-paid object (sacrificed
-        // creature, exiled creature, etc.), captured at cost-payment time on
-        // the resolving ability. Food Chain / Burnt Offering / Metamorphosis.
-        // Returns 0 when no cost-paid object snapshot is in scope.
-        QuantityRef::CostPaidObjectManaValue => ability
-            .and_then(|a| a.cost_paid_object_mana_value)
-            .map(u32_to_i32_saturating)
             .unwrap_or(0),
         // CR 107.3a + CR 601.2b + CR 603.7c: The announced value of X for the
         // triggering spell. Reads `GameObject::cost_x_paid` — populated during
@@ -1150,6 +1179,9 @@ fn resolve_ref(
                     let controller_matches = match land_controller {
                         ControllerRef::You => obj.controller == controller,
                         ControllerRef::Opponent => obj.controller != controller,
+                        ControllerRef::ScopedPlayer => {
+                            obj.controller == scoped_player_or_controller(ability, controller)
+                        }
                         ControllerRef::TargetPlayer => target_player == Some(obj.controller),
                         ControllerRef::DefendingPlayer => {
                             crate::game::combat::defending_player_for_attacker(state, ctx.source)
@@ -1167,28 +1199,26 @@ fn resolve_ref(
             }
             usize_to_i32_saturating(found.len())
         }
-        // CR 117.1: Count spells cast this turn by the controller, optionally filtered.
-        QuantityRef::SpellsCastThisTurn { ref filter } => {
-            let spells = state.spells_cast_this_turn_by_player.get(&controller);
-            match spells {
-                None => 0,
-                Some(list) => match filter {
-                    None => usize_to_i32_saturating(list.len()),
-                    Some(filter) => usize_to_i32_saturating(
-                        list.iter()
-                            .filter(|record| {
-                                spell_record_matches_filter(
-                                    record,
-                                    filter,
-                                    controller,
-                                    &state.all_creature_types,
-                                )
-                            })
-                            .count(),
-                    ),
-                },
-            }
-        }
+        // CR 117.1: Count spells cast this turn by the scoped players, optionally filtered.
+        QuantityRef::SpellsCastThisTurn { scope, ref filter } => usize_to_i32_saturating(
+            scoped_players(state, scope, controller)
+                .filter_map(|player| state.spells_cast_this_turn_by_player.get(&player.id))
+                .map(|list| match filter {
+                    None => list.len(),
+                    Some(filter) => list
+                        .iter()
+                        .filter(|record| {
+                            spell_record_matches_filter(
+                                record,
+                                filter,
+                                controller,
+                                &state.all_creature_types,
+                            )
+                        })
+                        .count(),
+                })
+                .sum(),
+        ),
         // Count permanents matching filter that entered the battlefield this turn.
         // Uses `entered_battlefield_turn` field on GameObject.
         QuantityRef::EnteredThisTurn { ref filter } => usize_to_i32_saturating(
@@ -1243,14 +1273,13 @@ fn resolve_ref(
                 })
             })
             .unwrap_or(0),
-        // CR 508.1a: Whether the controller declared attackers this turn.
-        QuantityRef::AttackedThisTurn => {
-            if state.players_attacked_this_turn.contains(&controller) {
-                1
-            } else {
-                0
-            }
-        }
+        // CR 508.1a: Count creatures the controller attacked with this turn.
+        QuantityRef::AttackedThisTurn => state
+            .attacking_creatures_this_turn
+            .get(&controller)
+            .copied()
+            .map(u32_to_i32_saturating)
+            .unwrap_or(0),
         // CR 603.4: Whether the controller descended this turn.
         QuantityRef::DescendedThisTurn => {
             if player.is_some_and(|p| p.descended_this_turn) {
@@ -1347,6 +1376,9 @@ fn resolve_ref(
                         None => true,
                         Some(ControllerRef::You) => snap.controller == controller,
                         Some(ControllerRef::Opponent) => snap.controller != controller,
+                        Some(ControllerRef::ScopedPlayer) => {
+                            snap.controller == scoped_player_or_controller(ability, controller)
+                        }
                         Some(ControllerRef::TargetPlayer) => ability
                             .and_then(|a| {
                                 a.targets.iter().find_map(|t| match t {
@@ -1364,6 +1396,15 @@ fn resolve_ref(
             )
         }
     }
+}
+
+fn scoped_player_or_controller(
+    ability: Option<&ResolvedAbility>,
+    controller: PlayerId,
+) -> PlayerId {
+    ability
+        .and_then(|ability| ability.scoped_player)
+        .unwrap_or(controller)
 }
 
 /// Check if an object matches a set of type filters for zone card counting.
@@ -1443,6 +1484,7 @@ fn object_for_scope<'a>(
             .as_ref()
             .and_then(crate::game::targeting::extract_source_from_event)
             .and_then(|id| state.objects.get(&id)),
+        ObjectScope::CostPaidObject => None,
     }
 }
 
@@ -1471,6 +1513,7 @@ fn object_id_for_scope(
             .current_trigger_event
             .as_ref()
             .and_then(crate::game::targeting::extract_source_from_event),
+        ObjectScope::CostPaidObject => None,
     }
 }
 
@@ -1549,6 +1592,7 @@ fn resolve_object_pt<F, G>(
     scope: ObjectScope,
     ctx: QuantityContext,
     targets: &[TargetRef],
+    ability: Option<&ResolvedAbility>,
     obj_extract: F,
     lki_extract: G,
 ) -> i32
@@ -1587,6 +1631,10 @@ where
                 .or_else(|| state.lki_cache.get(&object_id).and_then(&lki_extract))
                 .unwrap_or(0)
         }
+        ObjectScope::CostPaidObject => ability
+            .and_then(|ability| ability.cost_paid_object.as_ref())
+            .and_then(|snapshot| lki_extract(&snapshot.lki))
+            .unwrap_or(0),
     }
 }
 
@@ -1598,6 +1646,7 @@ fn resolve_object_mana_value(
     scope: ObjectScope,
     ctx: QuantityContext,
     targets: &[TargetRef],
+    ability: Option<&ResolvedAbility>,
 ) -> i32 {
     match scope {
         ObjectScope::Source => state
@@ -1640,6 +1689,10 @@ fn resolve_object_mana_value(
                 })
                 .unwrap_or(0)
         }
+        ObjectScope::CostPaidObject => ability
+            .and_then(|ability| ability.cost_paid_object.as_ref())
+            .map(|snapshot| u32_to_i32_saturating(snapshot.lki.mana_value))
+            .unwrap_or(0),
     }
 }
 
@@ -1673,6 +1726,11 @@ where
             .players
             .iter()
             .find(|p| p.id == controller)
+            .map_or(0, &mut extract),
+        PlayerScope::ScopedPlayer => state
+            .players
+            .iter()
+            .find(|p| p.id == ctx.scoped_player.unwrap_or(controller))
             .map_or(0, &mut extract),
         PlayerScope::Target => targets
             .iter()
@@ -1843,6 +1901,17 @@ pub(crate) fn resolve_player_count(
                     && match filter {
                         PlayerFilter::Controller => p.id == controller,
                         PlayerFilter::Opponent => p.id != controller,
+                        PlayerFilter::DefendingPlayer => {
+                            crate::game::targeting::resolve_event_context_target_for_event_or_state(
+                                state,
+                                &TargetFilter::DefendingPlayer,
+                                source_id,
+                                state.current_trigger_event.as_ref(),
+                            )
+                            .is_some_and(
+                                |target| matches!(target, TargetRef::Player(pid) if pid == p.id),
+                            )
+                        }
                         PlayerFilter::OpponentLostLife => {
                             p.id != controller && p.life_lost_this_turn > 0
                         }
@@ -1998,6 +2067,18 @@ mod tests {
     }
 
     #[test]
+    fn resolve_attacked_this_turn_counts_creatures_attacked_with_by_controller() {
+        let mut state = GameState::new_two_player(42);
+        state.attacking_creatures_this_turn.insert(PlayerId(0), 3);
+
+        let qty = QuantityExpr::Ref {
+            qty: QuantityRef::AttackedThisTurn,
+        };
+
+        assert_eq!(resolve_quantity(&state, &qty, PlayerId(0), ObjectId(1)), 3);
+    }
+
+    #[test]
     fn resolve_source_qualified_mana_spent_uses_entering_context() {
         let mut state = GameState::new_two_player(42);
         let static_source = create_object(
@@ -2048,6 +2129,7 @@ mod tests {
                     entering: Some(entering),
                     source: static_source,
                     recipient: None,
+                    scoped_player: None,
                 },
             ),
             1
@@ -2609,10 +2691,11 @@ mod tests {
         };
         assert_eq!(resolve_quantity(&state, &twice, PlayerId(0), obj_id), 8);
 
-        let half_up = QuantityExpr::HalfRounded {
+        let half_up = QuantityExpr::DivideRounded {
             inner: Box::new(QuantityExpr::Ref {
                 qty: QuantityRef::CostXPaid,
             }),
+            divisor: 2,
             rounding: crate::types::ability::RoundingMode::Up,
         };
         // half of 4 = 2 (exact).
@@ -3581,6 +3664,7 @@ mod tests {
 
         let expr = QuantityExpr::Ref {
             qty: QuantityRef::SpellsCastThisTurn {
+                scope: CountScope::Controller,
                 filter: Some(TargetFilter::Typed(
                     TypedFilter::creature()
                         .with_type(TypeFilter::Subtype("Bird".to_string()))
@@ -3602,8 +3686,9 @@ mod tests {
     #[test]
     fn half_rounded_up_even() {
         let state = GameState::new_two_player(42);
-        let expr = QuantityExpr::HalfRounded {
+        let expr = QuantityExpr::DivideRounded {
             inner: Box::new(QuantityExpr::Fixed { value: 20 }),
+            divisor: 2,
             rounding: crate::types::ability::RoundingMode::Up,
         };
         assert_eq!(
@@ -3615,8 +3700,9 @@ mod tests {
     #[test]
     fn half_rounded_up_odd() {
         let state = GameState::new_two_player(42);
-        let expr = QuantityExpr::HalfRounded {
+        let expr = QuantityExpr::DivideRounded {
             inner: Box::new(QuantityExpr::Fixed { value: 7 }),
+            divisor: 2,
             rounding: crate::types::ability::RoundingMode::Up,
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 4);
@@ -3625,8 +3711,9 @@ mod tests {
     #[test]
     fn half_rounded_down_odd() {
         let state = GameState::new_two_player(42);
-        let expr = QuantityExpr::HalfRounded {
+        let expr = QuantityExpr::DivideRounded {
             inner: Box::new(QuantityExpr::Fixed { value: 7 }),
+            divisor: 2,
             rounding: crate::types::ability::RoundingMode::Down,
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 3);
@@ -3757,6 +3844,21 @@ mod tests {
                 recipient
             ),
             3
+        );
+
+        state.current_trigger_event = Some(crate::types::events::GameEvent::SpellCast {
+            card_id: CardId(2),
+            controller: PlayerId(0),
+            object_id: target,
+        });
+        let event_source_expr = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectColorCount {
+                scope: ObjectScope::EventSource,
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &event_source_expr, PlayerId(0), source),
+            2
         );
     }
 

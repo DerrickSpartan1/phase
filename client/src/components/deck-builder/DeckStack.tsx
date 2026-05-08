@@ -1,8 +1,13 @@
-import { useMemo } from "react";
+import { useCallback, useMemo, useState } from "react";
 
 import { useCardImage } from "../../hooks/useCardImage";
+import { usePrintingsLoaded } from "../../hooks/usePrintingsLoaded";
+import { hasAlternatePrintingsSync, resolveOracleIdSync } from "../../services/scryfall";
 import type { DeckEntry, ParsedDeck } from "../../services/deckParser";
 import type { ScryfallCard } from "../../services/scryfall";
+import { usePreferencesStore } from "../../stores/preferencesStore";
+import { DeckCardContextMenu } from "./DeckCardContextMenu";
+import { PrintingPickerModal } from "./PrintingPickerModal";
 
 interface DeckStackProps {
   deck: ParsedDeck;
@@ -11,7 +16,7 @@ interface DeckStackProps {
   onAddCard: (name: string) => void;
   onRemoveCard: (name: string, section: "main" | "sideboard") => void;
   onRemoveCommander: (cardName: string) => void;
-  onCardHover?: (cardName: string | null) => void;
+  onCardHover?: (cardName: string | null, scryfallId?: string) => void;
 }
 
 type DeckStackSection = "commander" | "main" | "sideboard";
@@ -145,6 +150,7 @@ function DeckStackCard({
   onRemoveCard,
   onRemoveCommander,
   onCardHover,
+  onContextMenu,
 }: {
   item: DeckStackItem;
   zIndex: number;
@@ -153,9 +159,13 @@ function DeckStackCard({
   onAddCard: (name: string) => void;
   onRemoveCard: (name: string, section: "main" | "sideboard") => void;
   onRemoveCommander: (cardName: string) => void;
-  onCardHover?: (cardName: string | null) => void;
+  onCardHover?: (cardName: string | null, scryfallId?: string) => void;
+  onContextMenu?: (cardName: string, x: number, y: number) => void;
 }) {
   const { src, isLoading } = useCardImage(item.name, { size: "normal" });
+  const printingsLoaded = usePrintingsLoaded();
+  const oracleId = printingsLoaded ? resolveOracleIdSync(item.name) : null;
+  const hasAlternates = oracleId ? hasAlternatePrintingsSync(oracleId) : false;
   const isCommander = item.section === "commander";
   const showAddButton = item.section === "main";
 
@@ -178,6 +188,12 @@ function DeckStackCard({
       style={{ zIndex, width: CARD_WIDTH }}
       onMouseEnter={() => onCardHover?.(item.name)}
       onMouseLeave={() => onCardHover?.(null)}
+      onContextMenu={(e) => {
+        if (onContextMenu) {
+          e.preventDefault();
+          onContextMenu(item.name, e.clientX, e.clientY);
+        }
+      }}
     >
       <div
         className={`group relative overflow-hidden rounded-xl bg-black/35 shadow-[0_16px_36px_rgba(0,0,0,0.32)] ${
@@ -232,8 +248,18 @@ function DeckStackCard({
           />
         )}
         <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-black via-black/70 to-transparent px-2 pb-2 pt-8">
-          <div className="truncate text-[11px] font-medium text-white">{item.name}</div>
+          <div className="truncate text-[11px] font-medium text-white">
+            {item.name}
+          </div>
         </div>
+        {hasAlternates && (
+          <span
+            className="pointer-events-none absolute bottom-1.5 right-2 z-10 text-sm text-sky-400 drop-shadow-[0_1px_2px_rgba(0,0,0,0.8)]"
+            title="Alternate art available — right-click to choose"
+          >
+            ✦
+          </span>
+        )}
       </div>
     </div>
   );
@@ -250,6 +276,7 @@ function DeckStackSectionLane({
   onRemoveCard,
   onRemoveCommander,
   onCardHover,
+  onContextMenu,
 }: {
   title: string;
   badge: string;
@@ -260,7 +287,8 @@ function DeckStackSectionLane({
   canAddCard: (item: DeckStackItem) => boolean;
   onRemoveCard: (name: string, section: "main" | "sideboard") => void;
   onRemoveCommander: (cardName: string) => void;
-  onCardHover?: (cardName: string | null) => void;
+  onCardHover?: (cardName: string | null, scryfallId?: string) => void;
+  onContextMenu?: (cardName: string, x: number, y: number) => void;
 }) {
   const typeGroups = useMemo(
     () => showTypeSections ? buildTypeGroups(entries) : [{ key: "all", title: "", entries }],
@@ -310,6 +338,7 @@ function DeckStackSectionLane({
                       onRemoveCard={onRemoveCard}
                       onRemoveCommander={onRemoveCommander}
                       onCardHover={onCardHover}
+                      onContextMenu={onContextMenu}
                     />
                   ))}
                 </div>
@@ -351,6 +380,30 @@ export function DeckStack({
     [cardDataCache],
   );
 
+  const artOverrides = usePreferencesStore((s) => s.artOverrides);
+  const clearArtOverride = usePreferencesStore((s) => s.clearArtOverride);
+
+  const [contextMenu, setContextMenu] = useState<{ cardName: string; x: number; y: number } | null>(null);
+  const [pickerCard, setPickerCard] = useState<{ cardName: string; oracleId: string } | null>(null);
+
+  const handleContextMenu = useCallback((cardName: string, x: number, y: number) => {
+    setContextMenu({ cardName, x, y });
+  }, []);
+
+  const handleChooseArt = useCallback(() => {
+    if (!contextMenu) return;
+    const oracleId = resolveOracleIdSync(contextMenu.cardName);
+    if (oracleId) {
+      setPickerCard({ cardName: contextMenu.cardName, oracleId });
+    }
+  }, [contextMenu]);
+
+  const handleClearOverride = useCallback(() => {
+    if (!contextMenu) return;
+    const oracleId = resolveOracleIdSync(contextMenu.cardName);
+    if (oracleId) clearArtOverride(oracleId);
+  }, [contextMenu, clearArtOverride]);
+
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
       <div className="flex items-center justify-between border-b border-white/8 px-3 py-2">
@@ -388,6 +441,7 @@ export function DeckStack({
                 onRemoveCard={onRemoveCard}
                 onRemoveCommander={onRemoveCommander}
                 onCardHover={onCardHover}
+                onContextMenu={handleContextMenu}
               />
             )}
             <DeckStackSectionLane
@@ -401,6 +455,7 @@ export function DeckStack({
               onRemoveCard={onRemoveCard}
               onRemoveCommander={onRemoveCommander}
               onCardHover={onCardHover}
+              onContextMenu={handleContextMenu}
             />
             {sideboardCount > 0 && (
               <DeckStackSectionLane
@@ -413,11 +468,34 @@ export function DeckStack({
                 onRemoveCard={onRemoveCard}
                 onRemoveCommander={onRemoveCommander}
                 onCardHover={onCardHover}
+                onContextMenu={handleContextMenu}
               />
             )}
           </div>
         )}
       </div>
+
+      {contextMenu && (
+        <DeckCardContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          cardName={contextMenu.cardName}
+          hasOverride={!!artOverrides[resolveOracleIdSync(contextMenu.cardName) ?? ""]}
+          hasAlternates={hasAlternatePrintingsSync(resolveOracleIdSync(contextMenu.cardName) ?? "")}
+          onChooseArt={handleChooseArt}
+          onClearOverride={handleClearOverride}
+          onClose={() => setContextMenu(null)}
+        />
+      )}
+
+      {pickerCard && (
+        <PrintingPickerModal
+          cardName={pickerCard.cardName}
+          oracleId={pickerCard.oracleId}
+          onCardHover={onCardHover}
+          onClose={() => setPickerCard(null)}
+        />
+      )}
     </div>
   );
 }

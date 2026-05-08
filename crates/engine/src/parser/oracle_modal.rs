@@ -1,8 +1,9 @@
+use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
-use nom::bytes::complete::tag;
-use nom::combinator::value;
+use nom::bytes::complete::{tag, take_until};
+use nom::combinator::{map, opt, success, value};
+use nom::sequence::{preceded, terminated};
 use nom::Parser;
-use nom_language::error::VerboseError;
 
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, Effect, ModalChoice, ModalSelectionCondition,
@@ -10,46 +11,13 @@ use crate::types::ability::{
 };
 
 use super::oracle::find_activated_colon;
-use super::oracle_effect::{parse_effect_chain, parse_effect_chain_with_context, ParseContext};
-use super::oracle_nom::primitives as nom_primitives;
+use super::oracle_effect::{parse_effect_chain, parse_effect_chain_with_context};
+use super::oracle_ir::context::ParseContext;
+use super::oracle_nom::condition as nom_condition;
+use super::oracle_nom::primitives::{self as nom_primitives, scan_preceded};
 use super::oracle_util::{parse_mana_symbols, strip_reminder_text};
+use crate::parser::oracle_ir::ast::{ModalHeaderAst, ModeAst, OracleBlockAst};
 use crate::types::ability::TargetFilter;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum OracleBlockAst {
-    ActivatedModal {
-        cost_text: String,
-        header: ModalHeaderAst,
-        modes: Vec<ModeAst>,
-    },
-    Modal {
-        header: ModalHeaderAst,
-        modes: Vec<ModeAst>,
-    },
-    TriggeredModal {
-        trigger_line: String,
-        header: ModalHeaderAst,
-        modes: Vec<ModeAst>,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ModeAst {
-    pub(crate) raw: String,
-    pub(crate) label: Option<String>,
-    pub(crate) body: String,
-    /// Per-mode additional cost (Spree). None for standard `•` modes.
-    pub(crate) mode_cost: Option<crate::types::mana::ManaCost>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ModalHeaderAst {
-    pub(crate) raw: String,
-    pub(crate) min_choices: usize,
-    pub(crate) max_choices: usize,
-    pub(crate) allow_repeat_modes: bool,
-    pub(crate) constraints: Vec<ModalSelectionConstraint>,
-}
 
 pub(crate) fn parse_oracle_block(lines: &[&str], start: usize) -> Option<(OracleBlockAst, usize)> {
     let line = strip_reminder_text(lines.get(start)?.trim());
@@ -85,7 +53,7 @@ pub(crate) fn parse_oracle_block(lines: &[&str], start: usize) -> Option<(Oracle
     if let Some(header) = parse_modal_header_ast(&candidate) {
         // Reject trigger prefixes — these are triggered modals, not plain modals
         if alt((
-            tag::<_, _, VerboseError<&str>>("when "),
+            tag::<_, _, OracleError<'_>>("when "),
             tag("whenever "),
             tag("at "),
         ))
@@ -124,6 +92,20 @@ pub(crate) fn parse_oracle_block(lines: &[&str], start: usize) -> Option<(Oracle
         return Some((OracleBlockAst::Modal { header, modes }, next));
     }
 
+    if line.eq_ignore_ascii_case("tiered")
+        && !modes.is_empty()
+        && modes.iter().all(|m| m.mode_cost.is_some())
+    {
+        let header = ModalHeaderAst {
+            raw: line.to_string(),
+            min_choices: 1,
+            max_choices: 1,
+            allow_repeat_modes: false,
+            constraints: vec![],
+        };
+        return Some((OracleBlockAst::Modal { header, modes }, next));
+    }
+
     None
 }
 
@@ -139,12 +121,7 @@ pub(crate) fn collect_mode_asts(lines: &[&str], start: usize) -> Vec<ModeAst> {
             let stripped = stripped.trim();
             if let Some((cost, rest)) = parse_mana_symbols(stripped) {
                 // Strip " — " or " – " separator between cost and effect text
-                let body = rest
-                    .trim()
-                    .strip_prefix('—')
-                    .or_else(|| rest.trim().strip_prefix('–'))
-                    .unwrap_or(rest)
-                    .trim();
+                let body = strip_mode_separator(rest);
                 modes.push(ModeAst {
                     raw: body.to_string(),
                     label: None,
@@ -164,6 +141,16 @@ pub(crate) fn collect_mode_asts(lines: &[&str], start: usize) -> Vec<ModeAst> {
 
 fn parse_mode_ast(text: &str) -> ModeAst {
     if let Some((label, body)) = split_short_label_prefix(text, 4) {
+        if let Some((cost, rest)) = parse_mana_symbols(body) {
+            let body = strip_mode_separator(rest);
+            return ModeAst {
+                raw: text.to_string(),
+                label: Some(label.to_string()),
+                body: body.to_string(),
+                mode_cost: Some(cost),
+            };
+        }
+
         return ModeAst {
             raw: text.to_string(),
             label: Some(label.to_string()),
@@ -178,6 +165,17 @@ fn parse_mode_ast(text: &str) -> ModeAst {
         body: text.to_string(),
         mode_cost: None,
     }
+}
+
+fn strip_mode_separator(text: &str) -> &str {
+    let trimmed = text.trim();
+    alt((
+        tag::<_, _, OracleError<'_>>("—"),
+        tag::<_, _, OracleError<'_>>("–"),
+    ))
+    .parse(trimmed)
+    .map(|(rest, _)| rest.trim())
+    .unwrap_or(trimmed)
 }
 
 pub(super) fn split_short_label_prefix(text: &str, max_words: usize) -> Option<(&str, &str)> {
@@ -202,13 +200,13 @@ pub(super) fn split_short_label_prefix(text: &str, max_words: usize) -> Option<(
 fn is_modal_header_text(lower: &str) -> bool {
     let lower = lower.trim();
     alt((
-        tag::<_, _, VerboseError<&str>>("choose "),
+        tag::<_, _, OracleError<'_>>("choose "),
         tag("you may choose "),
     ))
     .parse(lower)
     .is_ok()
-        || (tag::<_, _, VerboseError<&str>>("if ").parse(lower).is_ok()
-            && lower.contains("choose "))
+        || (tag::<_, _, OracleError<'_>>("if ").parse(lower).is_ok()
+            && scan_preceded(lower, |i| tag::<_, _, OracleError<'_>>("choose ").parse(i)).is_some())
 }
 
 pub(crate) fn parse_modal_header_ast(text: &str) -> Option<ModalHeaderAst> {
@@ -223,7 +221,7 @@ pub(crate) fn parse_modal_header_ast(text: &str) -> Option<ModalHeaderAst> {
         return None;
     }
 
-    let (min_choices, max_choices) = parse_modal_choose_count(&text.to_lowercase());
+    let (min_choices, max_choices) = parse_modal_choose_count(&header_lower);
     let mut allow_repeat_modes = false;
     let mut constraints = Vec::new();
 
@@ -236,13 +234,10 @@ pub(crate) fn parse_modal_header_ast(text: &str) -> Option<ModalHeaderAst> {
         constraints.push(ModalSelectionConstraint::NoRepeatThisGame);
     }
 
-    if parse_commander_conditional_choose_both(&text.to_lowercase()).is_ok() {
-        constraints.push(ModalSelectionConstraint::ConditionalMaxChoices {
-            condition: ModalSelectionCondition::ControlsCommander,
-            max_choices: 2,
-            otherwise_max_choices: 1,
-        });
-    }
+    constraints.extend(parse_conditional_modal_max_constraints(
+        &text.to_lowercase(),
+        max_choices,
+    ));
 
     for sentence in sentences.iter().skip(1) {
         let lower = sentence.to_lowercase();
@@ -264,16 +259,135 @@ pub(crate) fn parse_modal_header_ast(text: &str) -> Option<ModalHeaderAst> {
     })
 }
 
-fn parse_commander_conditional_choose_both(
+fn parse_conditional_modal_max_constraints(
     input: &str,
-) -> nom::IResult<&str, (), VerboseError<&str>> {
-    let (rest, _) = tag("choose one.").parse(input.trim())?;
+    otherwise_max_choices: usize,
+) -> Vec<ModalSelectionConstraint> {
+    match parse_conditional_modal_max(input.trim()) {
+        Ok(("", (condition, max_choices))) => {
+            vec![ModalSelectionConstraint::ConditionalMaxChoices {
+                condition,
+                max_choices,
+                otherwise_max_choices,
+            }]
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn parse_conditional_modal_max(
+    input: &str,
+) -> nom::IResult<&str, (ModalSelectionCondition, usize), OracleError<'_>> {
+    let (rest, _) = parse_modal_base_sentence(input)?;
     let (rest, _) = tag(" if ").parse(rest)?;
-    let (rest, _) = tag("you control a commander").parse(rest)?;
-    let (rest, _) = tag(" as you cast this spell,").parse(rest)?;
-    let (rest, _) = tag(" you may ").parse(rest)?;
-    let (rest, _) = tag("choose both instead").parse(rest)?;
+    let (rest, condition) = parse_modal_condition(rest)?;
+    let (rest, _) = tag(",").parse(rest)?;
+    let (rest, _) = tag(" ").parse(rest)?;
+    let (rest, _) = opt(tag("you may ")).parse(rest)?;
+    let (rest, max_choices) = parse_modal_override_count(rest)?;
+    let (rest, _) = opt(tag(".")).parse(rest)?;
+    Ok((rest, (condition, max_choices)))
+}
+
+fn parse_modal_base_sentence(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
+    let (rest, _) = alt((
+        tag("choose one."),
+        tag("choose two."),
+        tag("choose three."),
+        tag("choose one or both."),
+        tag("choose one or more."),
+        tag("choose any number of."),
+    ))
+    .parse(input)?;
     Ok((rest, ()))
+}
+
+fn parse_modal_condition(
+    input: &str,
+) -> nom::IResult<&str, ModalSelectionCondition, OracleError<'_>> {
+    alt((
+        parse_modal_additional_cost_condition,
+        parse_modal_static_condition,
+    ))
+    .parse(input)
+}
+
+fn parse_modal_static_condition(
+    input: &str,
+) -> nom::IResult<&str, ModalSelectionCondition, OracleError<'_>> {
+    let (rest, condition) = nom_condition::parse_inner_condition(input)?;
+    let (rest, _) = opt(tag(" as you cast this spell")).parse(rest)?;
+    Ok((rest, ModalSelectionCondition::Static { condition }))
+}
+
+fn parse_modal_additional_cost_condition(
+    input: &str,
+) -> nom::IResult<&str, ModalSelectionCondition, OracleError<'_>> {
+    let (rest, _) = alt((
+        tag("this spell was kicked"),
+        tag("it was kicked"),
+        preceded(take_until(" was kicked"), tag(" was kicked")),
+    ))
+    .parse(input)?;
+
+    alt((
+        parse_modal_specific_kicker_cost_condition,
+        value(
+            ModalSelectionCondition::AdditionalCostPaid {
+                variant: None,
+                kicker_cost: None,
+                min_count: 2,
+            },
+            tag(" twice"),
+        ),
+        map(
+            preceded(
+                tag(" "),
+                terminated(nom_primitives::parse_number, tag(" times")),
+            ),
+            |min_count| ModalSelectionCondition::AdditionalCostPaid {
+                variant: None,
+                kicker_cost: None,
+                min_count,
+            },
+        ),
+        success(ModalSelectionCondition::AdditionalCostPaid {
+            variant: None,
+            kicker_cost: None,
+            min_count: 1,
+        }),
+    ))
+    .parse(rest)
+}
+
+fn parse_modal_specific_kicker_cost_condition(
+    input: &str,
+) -> nom::IResult<&str, ModalSelectionCondition, OracleError<'_>> {
+    let (rest, _) = tag(" with its ").parse(input)?;
+    let (rest, cost_text) = take_until(" kicker").parse(rest)?;
+    let (rest, _) = tag(" kicker").parse(rest)?;
+    let normalized_cost = cost_text.to_uppercase();
+    let (_, kicker_cost) = nom_primitives::parse_mana_cost(normalized_cost.as_str())
+        .map_err(|_| nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Fail)))?;
+    Ok((
+        rest,
+        ModalSelectionCondition::AdditionalCostPaid {
+            variant: None,
+            kicker_cost: Some(kicker_cost),
+            min_count: 1,
+        },
+    ))
+}
+
+fn parse_modal_override_count(input: &str) -> nom::IResult<&str, usize, OracleError<'_>> {
+    alt((
+        value(2, tag("choose both instead")),
+        value(2, tag("choose two instead")),
+        value(3, tag("choose three instead")),
+        value(usize::MAX, tag("choose any number instead")),
+        value(usize::MAX, tag("choose one or more instead")),
+    ))
+    .parse(input)
 }
 
 fn split_triggered_modal_header(line: &str) -> Option<(String, String)> {
@@ -392,16 +506,39 @@ fn modal_marker_effect(_header: &ModalHeaderAst) -> Effect {
 }
 
 fn build_modal_choice(header: &ModalHeaderAst, modes: &[ModeAst]) -> ModalChoice {
+    let mode_count = modes.len();
     ModalChoice {
         min_choices: header.min_choices,
-        max_choices: header.max_choices.min(modes.len()),
-        mode_count: modes.len(),
+        max_choices: header.max_choices.min(mode_count),
+        mode_count,
         mode_descriptions: modes.iter().map(|mode| mode.raw.clone()).collect(),
         allow_repeat_modes: header.allow_repeat_modes,
-        constraints: header.constraints.clone(),
+        constraints: cap_modal_constraints(&header.constraints, mode_count),
         mode_costs: modes.iter().filter_map(|m| m.mode_cost.clone()).collect(),
         entwine_cost: None,
     }
+}
+
+fn cap_modal_constraints(
+    constraints: &[ModalSelectionConstraint],
+    mode_count: usize,
+) -> Vec<ModalSelectionConstraint> {
+    constraints
+        .iter()
+        .cloned()
+        .map(|constraint| match constraint {
+            ModalSelectionConstraint::ConditionalMaxChoices {
+                condition,
+                max_choices,
+                otherwise_max_choices,
+            } => ModalSelectionConstraint::ConditionalMaxChoices {
+                condition,
+                max_choices: max_choices.min(mode_count),
+                otherwise_max_choices: otherwise_max_choices.min(mode_count),
+            },
+            other => other,
+        })
+        .collect()
 }
 
 fn lower_mode_abilities(modes: &[ModeAst], kind: AbilityKind) -> Vec<AbilityDefinition> {
@@ -423,14 +560,14 @@ fn lower_mode_abilities_with_subject(
     kind: AbilityKind,
     subject: Option<TargetFilter>,
 ) -> Vec<AbilityDefinition> {
-    let ctx = ParseContext {
+    let mut ctx = ParseContext {
         subject,
         ..Default::default()
     };
     modes
         .iter()
         .map(|mode| {
-            let parsed = parse_effect_chain_with_context(&mode.body, kind, &ctx);
+            let parsed = parse_effect_chain_with_context(&mode.body, kind, &mut ctx);
             guard_unsupported_mode_qualifiers(&mode.body, parsed, kind)
         })
         .collect()
@@ -619,16 +756,19 @@ pub(super) const ABILITY_WORD_NAMES: &[&str] = &[
 /// open paren.
 pub(super) fn parse_known_ability_word_name(
     input: &str,
-) -> nom::IResult<&str, &'static str, VerboseError<&str>> {
+) -> nom::IResult<&str, &'static str, OracleError<'_>> {
     for name in ABILITY_WORD_NAMES {
-        if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>(*name).parse(input) {
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(*name).parse(input) {
             // Word-boundary guard: next char must be non-alphanumeric or end.
             if rest.is_empty() || !rest.chars().next().unwrap().is_alphanumeric() {
                 return Ok((rest, *name));
             }
         }
     }
-    Err(nom::Err::Error(VerboseError { errors: vec![] }))
+    Err(nom::Err::Error(nom::error::Error::new(
+        "",
+        nom::error::ErrorKind::Fail,
+    )))
 }
 
 /// Pattern A (CR 207.2c): Detect a line of the form `<ability-word> (<body>)`
@@ -674,12 +814,11 @@ pub(super) fn extract_ability_word_reminder_body(raw: &str) -> Option<String> {
 /// Scan for modal count override phrases at word boundaries using nom combinators.
 /// Returns (min_choices, max_choices) for matching phrases.
 fn scan_modal_count_override(text: &str) -> Option<(usize, usize)> {
-    use nom::sequence::preceded;
     super::oracle_nom::primitives::scan_at_word_boundaries(text, |input| {
         alt((
             value(
                 (1, usize::MAX),
-                tag::<_, _, VerboseError<&str>>("choose any number instead"),
+                tag::<_, _, OracleError<'_>>("choose any number instead"),
             ),
             value((1, 2), tag("choose both instead")),
             value((1, 2), tag("choose two instead")),

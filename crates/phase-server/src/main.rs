@@ -1,3 +1,4 @@
+mod admin;
 mod logging;
 mod persistence;
 
@@ -10,7 +11,7 @@ use std::time::Instant;
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{State, WebSocketUpgrade};
 use axum::response::IntoResponse;
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
 use clap::Parser;
 use engine::ai_support::{
@@ -18,17 +19,19 @@ use engine::ai_support::{
 };
 use engine::database::CardDatabase;
 use engine::game::derived_views::derive_views;
-use engine::game::{validate_deck_for_format, DeckCompatibilityRequest};
+use engine::game::validate_name_deck_for_format;
 use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
 use http::HeaderValue;
 use seat_reducer::types::{DeckChoice, DeckResolver, ReducerCtx};
+use server_core::draft_session::DraftSessionManager;
 use server_core::lobby::{LobbyManager, RegisterGameRequest};
 use server_core::protocol::{
     build_commit, ClientMessage, ServerMessage, ServerMode, PROTOCOL_VERSION,
 };
 use server_core::resolve_deck;
 use server_core::session::SessionManager;
+use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
 use tower_http::cors::CorsLayer;
 use tracing::{debug, error, info, info_span, warn, Instrument};
@@ -41,6 +44,19 @@ type SharedLobby = Arc<Mutex<LobbyManager>>;
 type SharedLobbySubscribers = Arc<Mutex<Vec<mpsc::UnboundedSender<ServerMessage>>>>;
 type SharedPlayerCount = Arc<AtomicU32>;
 type SharedGameDb = Arc<persistence::GameDb>;
+type SharedDraftState = Arc<Mutex<DraftSessionManager>>;
+/// Spectator senders keyed by draft_code. Each spectator has a visibility + sender.
+type SharedDraftSpectators = Arc<
+    Mutex<
+        HashMap<
+            String,
+            Vec<(
+                draft_core::types::SpectatorVisibility,
+                mpsc::UnboundedSender<ServerMessage>,
+            )>,
+        >,
+    >,
+>;
 
 /// Server's advertised role, selected at startup via `--lobby-only`. Copied
 /// into every handler so the dispatch path can gate disabled messages in
@@ -143,6 +159,14 @@ struct SocketIdentity {
     /// 5-minute expiry. Empty in `Full` mode (handled via `game_code` +
     /// `SessionManager` cleanup).
     lobby_host_game: Option<String>,
+    /// Set when this socket is participating in a draft session.
+    draft_code: Option<String>,
+    draft_seat: Option<usize>,
+    draft_token: Option<String>,
+    /// Set when this socket is spectating a draft (T-60-09: action handler
+    /// checks draft_seat.is_some() before processing, rejecting spectators).
+    spectator_draft_code: Option<String>,
+    spectator_visibility: Option<draft_core::types::SpectatorVisibility>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -267,6 +291,16 @@ fn reject_if_disabled(msg: &ClientMessage, mode: ServerMode) -> Option<&'static 
         | ClientMessage::JoinGameWithPassword { .. }
         | ClientMessage::LookupJoinTarget { .. } => None,
 
+        // Draft messages — Full-only (draft sessions are server-hosted).
+        ClientMessage::CreateDraftWithSettings { .. }
+        | ClientMessage::JoinDraftWithPassword { .. }
+        | ClientMessage::DraftAction { .. }
+        | ClientMessage::ReconnectDraft { .. }
+        | ClientMessage::SpectateDraft { .. } => match mode {
+            ServerMode::Full => None,
+            ServerMode::LobbyOnly => Some(LOBBY_ONLY_REJECTION),
+        },
+
         // Lobby-only-exclusive.
         ClientMessage::UpdateLobbyMetadata { .. } | ClientMessage::UnregisterLobby { .. } => {
             match mode {
@@ -325,7 +359,9 @@ async fn main() {
     }
 
     let state: SharedState = Arc::new(Mutex::new(SessionManager::new()));
+    let draft_sessions: SharedDraftState = Arc::new(Mutex::new(DraftSessionManager::new()));
     let connections: SharedConnections = Arc::new(Mutex::new(HashMap::new()));
+    let draft_spectators: SharedDraftSpectators = Arc::new(Mutex::new(HashMap::new()));
     let lobby: SharedLobby = Arc::new(Mutex::new(LobbyManager::new()));
     let lobby_subscribers: SharedLobbySubscribers = Arc::new(Mutex::new(Vec::new()));
     let player_count: SharedPlayerCount = Arc::new(AtomicU32::new(0));
@@ -335,7 +371,6 @@ async fn main() {
     // replayed — skip the restore pass entirely and let SQLite ignore the
     // stale rows until operators clean them up manually.
     if matches!(mode, ServerMode::Full) {
-        let card_names = db.card_names();
         match game_db.load_all() {
             Ok(persisted_games) => {
                 let mut mgr = state.lock().await;
@@ -348,14 +383,19 @@ async fn main() {
                             let lobby_meta = ps.lobby_meta.clone();
                             let is_started = ps.game_started;
                             let session =
-                                server_core::session::GameSession::from_persisted(ps, &card_names);
+                                server_core::session::GameSession::from_persisted(ps, db.as_ref());
 
                             // Register all non-AI human players as disconnected
                             // to start the 120s grace period from now
+                            let default_grace = mgr.reconnect.grace_period;
                             for (i, token) in session.player_tokens.iter().enumerate() {
                                 let pid = PlayerId(i as u8);
                                 if !token.is_empty() && !session.ai_seats.contains(&pid) {
-                                    mgr.reconnect.record_disconnect(&session.game_code, pid);
+                                    mgr.reconnect.record_disconnect(
+                                        &session.game_code,
+                                        pid,
+                                        default_grace,
+                                    );
                                 }
                             }
 
@@ -401,11 +441,42 @@ async fn main() {
                 error!(error = %e, "failed to load persisted sessions");
             }
         }
+
+        // Restore persisted draft sessions from disk
+        match game_db.load_all_drafts() {
+            Ok(persisted_drafts) => {
+                let mut dsm = draft_sessions.lock().await;
+                let mut restored_drafts = 0u32;
+                for (draft_code, json) in &persisted_drafts {
+                    match serde_json::from_str::<server_core::persist::PersistedDraftSession>(json)
+                    {
+                        Ok(ps) => {
+                            let timer_ms = ps.timer_remaining_ms;
+                            dsm.restore_session(ps);
+                            if let Some(ms) = timer_ms {
+                                info!(draft = %draft_code, remaining_ms = ms, "draft session has pending timer");
+                            }
+                            restored_drafts += 1;
+                        }
+                        Err(e) => {
+                            warn!(draft = %draft_code, error = %e, "failed to restore draft session, deleting");
+                            let _ = game_db.delete_draft_session(draft_code);
+                        }
+                    }
+                }
+                if restored_drafts > 0 {
+                    info!(count = restored_drafts, "restored draft sessions from disk");
+                }
+            }
+            Err(e) => error!(error = %e, "failed to load persisted draft sessions"),
+        }
     }
 
     // Spawn background task for grace period and lobby expiry
     let bg_state = state.clone();
+    let bg_draft_state = draft_sessions.clone();
     let bg_connections = connections.clone();
+    let bg_draft_spectators = draft_spectators.clone();
     let bg_lobby = lobby.clone();
     let bg_lobby_subs = lobby_subscribers.clone();
     let bg_game_db = game_db.clone();
@@ -472,6 +543,71 @@ async fn main() {
                     }
                 }
             }
+
+            // Check draft disconnect grace period expiry — auto-pick for disconnected seats
+            let draft_expired = {
+                let mut mgr = bg_draft_state.lock().await;
+                mgr.reconnect.check_expired_with_players()
+            };
+            if !draft_expired.is_empty() {
+                let mut mgr = bg_draft_state.lock().await;
+                for (draft_code, player_id) in &draft_expired {
+                    let seat = player_id.0;
+                    if let Some(session) = mgr.sessions.get(draft_code.as_str()) {
+                        if session.session.status == draft_core::types::DraftStatus::Drafting
+                            && !session.connected[seat as usize]
+                        {
+                            match mgr.pick_random_for_seat(draft_code, seat, None) {
+                                Ok(()) => {
+                                    info!(
+                                        draft = %draft_code,
+                                        seat,
+                                        "auto-picked for disconnected seat (grace expired)"
+                                    );
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        draft = %draft_code,
+                                        seat,
+                                        error = %e,
+                                        "auto-pick on grace expiry failed"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                // Broadcast updated views + persist for any modified drafts
+                let affected_drafts: Vec<String> = draft_expired
+                    .iter()
+                    .map(|(code, _)| code.clone())
+                    .collect::<std::collections::HashSet<_>>()
+                    .into_iter()
+                    .collect();
+                drop(mgr);
+                for draft_code in &affected_drafts {
+                    // Broadcast to players
+                    let views: Vec<_> = {
+                        let mgr = bg_draft_state.lock().await;
+                        let Some(session) = mgr.sessions.get(draft_code) else {
+                            continue;
+                        };
+                        let pod_size = session.player_tokens.len();
+                        (0..pod_size).map(|i| session.view_for_seat(i)).collect()
+                    };
+                    broadcast_draft_views(draft_code, &views, &bg_connections, &bg_draft_state)
+                        .await;
+                    // Broadcast to spectators
+                    broadcast_draft_spectator_views(
+                        draft_code,
+                        &bg_draft_state,
+                        &bg_draft_spectators,
+                    )
+                    .await;
+                    // Persist
+                    persist_draft_session_async(&bg_game_db, draft_code, &bg_draft_state).await;
+                }
+            }
         }
     });
 
@@ -483,22 +619,35 @@ async fn main() {
 
     // Keep references for shutdown flush (Arcs are cheap to clone)
     let shutdown_state = state.clone();
+    let shutdown_draft_state = draft_sessions.clone();
     let shutdown_game_db = game_db.clone();
 
     let app = Router::new()
         .route("/ws", get(ws_handler))
         .route("/health", get(health))
+        .route("/admin/drafts", get(admin::admin_list_drafts))
+        .route(
+            "/admin/drafts/{code}",
+            get(admin::admin_get_draft).delete(admin::admin_delete_draft),
+        )
+        .route("/p2p-draft-backup", post(admin::p2p_backup_store))
+        .route(
+            "/p2p-draft-backup/{code}",
+            get(admin::p2p_backup_get).delete(admin::p2p_backup_delete),
+        )
         .layer(cors)
-        .with_state((
-            state,
+        .with_state(AppState {
+            sessions: state,
+            draft_sessions,
             connections,
             db,
             lobby,
             lobby_subscribers,
             player_count,
             game_db,
+            draft_spectators,
             mode,
-        ));
+        });
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", cli.port))
         .await
@@ -533,6 +682,31 @@ async fn main() {
             "flushed active sessions to disk on shutdown"
         );
     }
+
+    // Flush all active draft sessions to SQLite
+    let dsm = shutdown_draft_state.lock().await;
+    let mut flushed_drafts = 0u32;
+    for (draft_code, session) in &dsm.sessions {
+        let snapshot = session.to_persisted();
+        match serde_json::to_string(&snapshot) {
+            Ok(json) => {
+                if let Err(e) = shutdown_game_db.save_draft_session(draft_code, &json) {
+                    error!(draft = %draft_code, error = %e, "failed to persist draft on shutdown");
+                } else {
+                    flushed_drafts += 1;
+                }
+            }
+            Err(e) => {
+                error!(draft = %draft_code, error = %e, "failed to serialize draft for shutdown");
+            }
+        }
+    }
+    if flushed_drafts > 0 {
+        info!(
+            count = flushed_drafts,
+            "flushed draft sessions to disk on shutdown"
+        );
+    }
 }
 
 async fn shutdown_signal() {
@@ -557,24 +731,22 @@ async fn health() -> &'static str {
     "ok"
 }
 
-type AppState = (
-    SharedState,
-    SharedConnections,
-    SharedDb,
-    SharedLobby,
-    SharedLobbySubscribers,
-    SharedPlayerCount,
-    SharedGameDb,
-    Mode,
-);
+#[derive(Clone)]
+struct AppState {
+    sessions: SharedState,
+    draft_sessions: SharedDraftState,
+    connections: SharedConnections,
+    db: SharedDb,
+    lobby: SharedLobby,
+    lobby_subscribers: SharedLobbySubscribers,
+    player_count: SharedPlayerCount,
+    game_db: SharedGameDb,
+    draft_spectators: SharedDraftSpectators,
+    mode: Mode,
+}
 
-async fn ws_handler(
-    ws: WebSocketUpgrade,
-    State((state, connections, db, lobby, lobby_subscribers, player_count, game_db, mode)): State<
-        AppState,
-    >,
-) -> impl IntoResponse {
-    let current = player_count.load(Ordering::Relaxed);
+async fn ws_handler(ws: WebSocketUpgrade, State(app_state): State<AppState>) -> impl IntoResponse {
+    let current = app_state.player_count.load(Ordering::Relaxed);
     if current >= MAX_CONNECTIONS {
         warn!(
             online_count = current,
@@ -588,14 +760,16 @@ async fn ws_handler(
         .on_upgrade(move |socket| {
             handle_socket(
                 socket,
-                state,
-                connections,
-                db,
-                lobby,
-                lobby_subscribers,
-                player_count,
-                game_db,
-                mode,
+                app_state.sessions,
+                app_state.draft_sessions,
+                app_state.connections,
+                app_state.db,
+                app_state.lobby,
+                app_state.lobby_subscribers,
+                app_state.player_count,
+                app_state.game_db,
+                app_state.draft_spectators,
+                app_state.mode,
             )
         })
         .into_response()
@@ -605,12 +779,14 @@ async fn ws_handler(
 async fn handle_socket(
     mut socket: WebSocket,
     state: SharedState,
+    draft_state: SharedDraftState,
     connections: SharedConnections,
     db: SharedDb,
     lobby: SharedLobby,
     lobby_subscribers: SharedLobbySubscribers,
     player_count: SharedPlayerCount,
     game_db: SharedGameDb,
+    draft_spectators: SharedDraftSpectators,
     mode: Mode,
 ) {
     let (tx, mut rx) = mpsc::unbounded_channel::<ServerMessage>();
@@ -627,6 +803,11 @@ async fn handle_socket(
         session_span: None,
         client_hello: None,
         lobby_host_game: None,
+        draft_code: None,
+        draft_seat: None,
+        draft_token: None,
+        spectator_draft_code: None,
+        spectator_visibility: None,
     };
     let mut rate_limiter = RateLimiter::new();
 
@@ -693,12 +874,14 @@ async fn handle_socket(
                             client_msg,
                             &mut socket,
                             &state,
+                            &draft_state,
                             &connections,
                             &db,
                             &lobby,
                             &lobby_subscribers,
                             &player_count,
                             &game_db,
+                            &draft_spectators,
                             &tx,
                             &mut identity,
                             mode,
@@ -718,6 +901,12 @@ async fn handle_socket(
         player = ?identity.player_id,
         "client disconnected"
     );
+    // Handle draft session disconnect
+    if let (Some(draft_code), Some(seat)) = (&identity.draft_code, identity.draft_seat) {
+        let mut mgr = draft_state.lock().await;
+        mgr.handle_disconnect(draft_code, seat);
+    }
+
     if let (Some(game_code), Some(player_id)) = (&identity.game_code, &identity.player_id) {
         let mut mgr = state.lock().await;
         mgr.handle_disconnect(game_code, *player_id);
@@ -833,6 +1022,61 @@ fn persist_session_async(
     });
 }
 
+/// Broadcast `DraftSpectatorView` to all spectators watching a draft.
+/// Prunes disconnected spectators (closed sender channels).
+async fn broadcast_draft_spectator_views(
+    draft_code: &str,
+    draft_state: &SharedDraftState,
+    draft_spectators: &SharedDraftSpectators,
+) {
+    let mut specs = draft_spectators.lock().await;
+    let Some(spectators) = specs.get_mut(draft_code) else {
+        return;
+    };
+
+    let mgr = draft_state.lock().await;
+    let Some(session) = mgr.sessions.get(draft_code) else {
+        return;
+    };
+
+    // Retain only live senders, sending views to each
+    spectators.retain(|(visibility, sender)| {
+        let view = draft_core::view::filter_for_spectator(&session.session, *visibility);
+        let msg = ServerMessage::DraftSpectatorView { view };
+        sender.send(msg).is_ok()
+    });
+
+    // Clean up empty entries
+    if spectators.is_empty() {
+        specs.remove(draft_code);
+    }
+}
+
+/// Fire-and-forget persistence of a draft session to SQLite.
+async fn persist_draft_session_async(
+    game_db: &SharedGameDb,
+    draft_code: &str,
+    draft_state: &SharedDraftState,
+) {
+    let mgr = draft_state.lock().await;
+    let Some(session) = mgr.sessions.get(draft_code) else {
+        return;
+    };
+    let snapshot = session.to_persisted();
+    let db = game_db.clone();
+    let code = draft_code.to_string();
+    tokio::task::spawn_blocking(move || match serde_json::to_string(&snapshot) {
+        Ok(json) => {
+            if let Err(e) = db.save_draft_session(&code, &json) {
+                error!(draft = %code, error = %e, "failed to persist draft session");
+            }
+        }
+        Err(e) => {
+            error!(draft = %code, error = %e, "failed to serialize draft session");
+        }
+    });
+}
+
 /// Fire-and-forget deletion of a persisted game session.
 fn delete_session_async(game_db: &SharedGameDb, game_code: &str) {
     let db = game_db.clone();
@@ -840,6 +1084,188 @@ fn delete_session_async(game_db: &SharedGameDb, game_code: &str) {
     tokio::task::spawn_blocking(move || {
         if let Err(e) = db.delete_session(&code) {
             error!(game = %code, error = %e, "failed to delete persisted session");
+        }
+    });
+}
+
+/// If this game_code belongs to a draft tournament, auto-report the match
+/// result to the DraftSessionManager and broadcast updated views. This
+/// implements Pitfall 6 from RESEARCH: clients must NOT send
+/// ReportMatchResult for server-hosted drafts — the server handles it.
+async fn report_draft_game_over(
+    draft_state: &SharedDraftState,
+    connections: &SharedConnections,
+    game_code: &str,
+    winner: Option<PlayerId>,
+) {
+    let draft_code = {
+        let mgr = draft_state.lock().await;
+        mgr.draft_for_game_code(game_code)
+    };
+    let Some(draft_code) = draft_code else {
+        return;
+    };
+
+    // Find the match_id and winner_seat from the draft session
+    let (match_id, winner_seat) = {
+        let mgr = draft_state.lock().await;
+        let Some(session) = mgr.sessions.get(&draft_code) else {
+            return;
+        };
+        // Find the match_id that maps to this game_code
+        let match_entry = session
+            .active_matches
+            .iter()
+            .find(|(_, gc)| gc.as_str() == game_code);
+        let Some((match_id, _)) = match_entry else {
+            warn!(draft = %draft_code, game = %game_code, "game_code not found in active_matches");
+            return;
+        };
+        let match_id = match_id.clone();
+
+        // Map PlayerId winner to seat index
+        let winner_seat = winner.map(|pid| pid.0);
+
+        (match_id, winner_seat)
+    };
+
+    info!(
+        draft = %draft_code,
+        game = %game_code,
+        match_id = %match_id,
+        winner_seat = ?winner_seat,
+        "auto-reporting draft match result from GameOver"
+    );
+
+    let views = {
+        let mut mgr = draft_state.lock().await;
+        let action = draft_core::types::DraftAction::ReportMatchResult {
+            match_id,
+            winner_seat,
+        };
+        match mgr.apply_system_action(&draft_code, action, None) {
+            Ok(views) => views,
+            Err(e) => {
+                warn!(draft = %draft_code, error = %e, "failed to auto-report draft match result");
+                return;
+            }
+        }
+    };
+
+    // Broadcast updated views to all draft pod members
+    let conns = connections.lock().await;
+    if let Some(players) = conns.get(&draft_code) {
+        for (pid, sender) in players.iter() {
+            let seat = pid.0 as usize;
+            if let Some(view) = views.get(seat) {
+                let _ = sender.send(ServerMessage::DraftStateUpdate { view: view.clone() });
+            }
+        }
+    }
+}
+
+/// Broadcast `DraftStateUpdate` to all connected sockets in a draft pod.
+/// Iterates the connections map and filters by `identity.draft_code` match.
+/// Because `SocketIdentity` is per-socket state (not stored globally), we
+/// instead iterate draft session seats and send per-seat views via the
+/// connections map keyed by draft_code.
+async fn broadcast_draft_views(
+    draft_code: &str,
+    views: &[draft_core::view::DraftPlayerView],
+    connections: &SharedConnections,
+    draft_state: &SharedDraftState,
+) {
+    let conns = connections.lock().await;
+    // Draft connections are stored under the draft_code in the connections map
+    if let Some(players) = conns.get(draft_code) {
+        for (pid, sender) in players.iter() {
+            let seat = pid.0 as usize;
+            if let Some(view) = views.get(seat) {
+                let msg = ServerMessage::DraftStateUpdate { view: view.clone() };
+                let _ = sender.send(msg);
+            }
+        }
+    } else {
+        // Fallback: broadcast to all sockets that have a matching draft_code
+        // by sending the first view (for reconnect cases where identity is set
+        // but connection may not be in the draft_code map yet)
+        let _ = draft_state; // suppress unused
+    }
+}
+
+/// Spawn a pick timer task. When the timer expires, auto-pick a random card
+/// for any seat that hasn't picked yet. Aborts the previous timer if one exists.
+fn spawn_pick_timer(
+    draft_state: SharedDraftState,
+    connections: SharedConnections,
+    draft_code: String,
+    pick_seconds: u32,
+) {
+    let timer_draft_code = draft_code.clone();
+    let timer_draft_state = draft_state.clone();
+    let timer_connections = connections;
+
+    let handle = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(pick_seconds as u64)).await;
+
+        let mut mgr = timer_draft_state.lock().await;
+        let Some(session) = mgr.sessions.get_mut(&timer_draft_code) else {
+            return;
+        };
+
+        // Only auto-pick if still in Drafting status
+        if session.session.status != draft_core::types::DraftStatus::Drafting {
+            return;
+        }
+
+        info!(draft = %timer_draft_code, "pick timer expired — auto-picking for pending seats");
+
+        // Find seats that still have a current pack (haven't picked yet)
+        let pod_size = session.player_tokens.len();
+        for seat_idx in 0..pod_size {
+            if let Some(pack) = &session.session.current_pack[seat_idx] {
+                if !pack.0.is_empty() {
+                    let card_id = pack.0[0].instance_id.clone();
+                    let action = draft_core::types::DraftAction::Pick {
+                        seat: seat_idx as u8,
+                        card_instance_id: card_id,
+                    };
+                    if let Err(e) = draft_core::session::apply(&mut session.session, action, None) {
+                        warn!(
+                            draft = %timer_draft_code,
+                            seat = seat_idx,
+                            error = %e,
+                            "auto-pick failed"
+                        );
+                    }
+                }
+            }
+        }
+
+        // Broadcast updated views
+        let views: Vec<_> = (0..pod_size).map(|i| session.view_for_seat(i)).collect();
+        drop(mgr);
+
+        let conns = timer_connections.lock().await;
+        if let Some(players) = conns.get(&timer_draft_code) {
+            for (pid, sender) in players.iter() {
+                let seat = pid.0 as usize;
+                if let Some(view) = views.get(seat) {
+                    let _ = sender.send(ServerMessage::DraftStateUpdate { view: view.clone() });
+                }
+            }
+        }
+    });
+
+    // Store the handle so it can be aborted if all picks come in early
+    tokio::spawn(async move {
+        let mut mgr = draft_state.lock().await;
+        if let Some(session) = mgr.sessions.get_mut(&draft_code) {
+            // Abort previous timer if any (T-59-07: prevent timer task accumulation)
+            if let Some(prev) = session.timer_task.take() {
+                prev.abort();
+            }
+            session.timer_task = Some(handle);
         }
     });
 }
@@ -1018,12 +1444,14 @@ async fn handle_client_message(
     client_msg: ClientMessage,
     socket: &mut WebSocket,
     state: &SharedState,
+    draft_state: &SharedDraftState,
     connections: &SharedConnections,
     db: &SharedDb,
     lobby: &SharedLobby,
     lobby_subscribers: &SharedLobbySubscribers,
     player_count: &SharedPlayerCount,
     game_db: &SharedGameDb,
+    draft_spectators: &SharedDraftSpectators,
     tx: &mpsc::UnboundedSender<ServerMessage>,
     identity: &mut SocketIdentity,
     mode: Mode,
@@ -1317,6 +1745,15 @@ async fn handle_client_message(
                         if let Some(winner) = game_over_winner {
                             info!(game = %game_code, winner = ?winner, reason = "game_rules", "game over");
                             delete_session_async(game_db, &game_code);
+
+                            // Auto-report draft match result if this game belongs to a draft
+                            // (spawn as a separate task to avoid holding the state lock)
+                            let ds = draft_state.clone();
+                            let cs = connections.clone();
+                            let gc = game_code.clone();
+                            tokio::spawn(async move {
+                                report_draft_game_over(&ds, &cs, &gc, winner).await;
+                            });
                         } else {
                             persist_session_async(game_db, &game_code, session);
                         }
@@ -1737,6 +2174,7 @@ async fn handle_client_message(
             format_config,
             room_name,
             host_peer_id,
+            draft_metadata,
         } => {
             info!(
                 display_name = %display_name,
@@ -1856,6 +2294,7 @@ async fn handle_client_message(
                                 .filter(|s| !s.is_empty())
                                 .map(str::to_string),
                             host_peer_id: peer_id,
+                            draft_metadata,
                         },
                     );
                 }
@@ -1921,14 +2360,14 @@ async fn handle_client_message(
 
             // Validate player deck against the selected format
             if let Some(ref fc) = format_config {
-                let validation_request = DeckCompatibilityRequest {
-                    main_deck: deck.main_deck.clone(),
-                    sideboard: deck.sideboard.clone(),
-                    commander: deck.commander.clone(),
-                    selected_format: Some(fc.format),
-                    selected_match_type: None,
-                };
-                if let Err(reasons) = validate_deck_for_format(db, &validation_request) {
+                if let Err(reasons) = validate_name_deck_for_format(
+                    db,
+                    &deck.main_deck,
+                    &deck.sideboard,
+                    &deck.commander,
+                    fc.format,
+                    Some(match_config.match_type),
+                ) {
                     let msg = ServerMessage::Error {
                         message: format!(
                             "Deck not legal for {}: {}",
@@ -1958,6 +2397,29 @@ async fn handle_client_message(
                             }),
                         None => server_core::starter_decks::random_starter_deck(),
                     };
+                    if let Some(ref fc) = format_config {
+                        if let Err(reasons) = validate_name_deck_for_format(
+                            db,
+                            &ai_deck_data.main_deck,
+                            &ai_deck_data.sideboard,
+                            &ai_deck_data.commander,
+                            fc.format,
+                            Some(match_config.match_type),
+                        ) {
+                            let msg = ServerMessage::Error {
+                                message: format!(
+                                    "AI deck for seat {} not legal for {}: {}",
+                                    seat.seat_index,
+                                    fc.format.label(),
+                                    reasons.join("; ")
+                                ),
+                            };
+                            if let Ok(json) = serde_json::to_string(&msg) {
+                                let _ = socket.send(Message::text(json)).await;
+                            }
+                            return;
+                        }
+                    }
                     let ai_resolved = match resolve_deck(db, &ai_deck_data) {
                         Ok(d) => d,
                         Err(e) => {
@@ -2163,6 +2625,9 @@ async fn handle_client_message(
                         // Full-mode server runs the engine itself — no
                         // PeerJS peer is involved, so this stays empty.
                         host_peer_id: String::new(),
+                        // Draft metadata is P2P-only for now; Full-mode
+                        // servers don't host draft pods.
+                        draft_metadata: None,
                     },
                 );
 
@@ -2600,6 +3065,9 @@ async fn handle_client_message(
             }
             drop(conns);
 
+            // Auto-report draft match result if this game belongs to a draft
+            report_draft_game_over(draft_state, connections, &game_code, winner).await;
+
             let mut mgr = state.lock().await;
             mgr.sessions.remove(&game_code);
             delete_session_async(game_db, &game_code);
@@ -2820,6 +3288,328 @@ async fn handle_client_message(
             }
         }
 
+        ClientMessage::CreateDraftWithSettings {
+            display_name,
+            set_code,
+            kind,
+            public,
+            password,
+            timer_seconds,
+            tournament_format,
+            pod_policy,
+            pod_size,
+        } => {
+            info!(
+                display_name = %display_name,
+                set_code = %set_code,
+                kind = ?kind,
+                public,
+                pod_size,
+                "CreateDraftWithSettings"
+            );
+
+            let config = draft_core::types::DraftConfig {
+                set_code: set_code.clone(),
+                kind,
+                cards_per_pack: 14,
+                pack_count: 3,
+                rng_seed: rand::random(),
+                tournament_format,
+                pod_policy,
+                spectator_visibility: draft_core::types::SpectatorVisibility::default(),
+            };
+
+            let (draft_code, player_token, seat_index) = {
+                let mut mgr = draft_state.lock().await;
+                mgr.create_draft(config, display_name.clone())
+            };
+
+            identity.draft_code = Some(draft_code.clone());
+            identity.draft_seat = Some(seat_index as usize);
+            identity.draft_token = Some(player_token.clone());
+
+            // Register this connection in the connections map under draft_code
+            {
+                let mut conns = connections.lock().await;
+                conns
+                    .entry(draft_code.clone())
+                    .or_default()
+                    .insert(PlayerId(seat_index), tx.clone());
+            }
+
+            // Register in lobby so draft appears in the lobby list
+            {
+                let (host_version, host_build_commit) = identity
+                    .client_hello
+                    .as_ref()
+                    .map(|h| (h.client_version.clone(), h.build_commit.clone()))
+                    .unwrap_or_default();
+                let mut lob = lobby.lock().await;
+                lob.register_game(
+                    &draft_code,
+                    RegisterGameRequest {
+                        host_name: display_name.clone(),
+                        public,
+                        password,
+                        timer_seconds,
+                        host_version,
+                        host_build_commit,
+                        current_players: 1,
+                        max_players: pod_size as u32,
+                        format_config: None,
+                        match_config: Default::default(),
+                        room_name: None,
+                        host_peer_id: String::new(),
+                        draft_metadata: Some(server_core::protocol::DraftLobbyMetadata {
+                            set_code,
+                            draft_kind: format!("{kind:?}"),
+                        }),
+                    },
+                );
+            }
+
+            let msg = ServerMessage::DraftCreated {
+                draft_code: draft_code.clone(),
+                player_token,
+                seat_index,
+            };
+            if let Ok(json) = serde_json::to_string(&msg) {
+                let _ = socket.send(Message::text(json)).await;
+            }
+
+            if public {
+                let game = {
+                    let lob = lobby.lock().await;
+                    lob.public_game(&draft_code)
+                };
+                if let Some(game) = game {
+                    broadcast_to_lobby_subscribers(
+                        lobby_subscribers,
+                        ServerMessage::LobbyGameAdded { game },
+                    )
+                    .await;
+                }
+            }
+
+            info!(draft = %draft_code, host = %display_name, "draft created");
+        }
+
+        ClientMessage::JoinDraftWithPassword {
+            draft_code,
+            display_name,
+            password,
+        } => {
+            info!(draft = %draft_code, joiner = %display_name, "JoinDraftWithPassword");
+
+            let result = {
+                let mut mgr = draft_state.lock().await;
+                mgr.join_draft(&draft_code, display_name.clone(), password.as_deref())
+            };
+
+            match result {
+                Ok((player_token, seat_index, view)) => {
+                    identity.draft_code = Some(draft_code.clone());
+                    identity.draft_seat = Some(seat_index as usize);
+                    identity.draft_token = Some(player_token.clone());
+
+                    // Register this connection in the connections map under draft_code
+                    {
+                        let mut conns = connections.lock().await;
+                        conns
+                            .entry(draft_code.clone())
+                            .or_default()
+                            .insert(PlayerId(seat_index), tx.clone());
+                    }
+
+                    // Update lobby seats_filled count
+                    {
+                        let mgr = draft_state.lock().await;
+                        if let Some(session) = mgr.sessions.get(&draft_code) {
+                            let filled = session
+                                .player_tokens
+                                .iter()
+                                .filter(|t| !t.is_empty())
+                                .count();
+                            let mut lob = lobby.lock().await;
+                            lob.set_current_players(&draft_code, filled as u32);
+                            if let Some(game) = lob.public_game(&draft_code) {
+                                broadcast_to_lobby_subscribers(
+                                    lobby_subscribers,
+                                    ServerMessage::LobbyGameUpdated { game },
+                                )
+                                .await;
+                            }
+                        }
+                    }
+
+                    let msg = ServerMessage::DraftJoined {
+                        draft_code,
+                        player_token,
+                        seat_index,
+                        view,
+                    };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = socket.send(Message::text(json)).await;
+                    }
+                }
+                Err(reason) => {
+                    let msg = ServerMessage::DraftActionRejected { reason };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = socket.send(Message::text(json)).await;
+                    }
+                }
+            }
+        }
+
+        ClientMessage::DraftAction { draft_code, action } => {
+            let token = match &identity.draft_token {
+                Some(t) => t.clone(),
+                None => {
+                    let msg = ServerMessage::DraftActionRejected {
+                        reason: "Not in a draft session".to_string(),
+                    };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = socket.send(Message::text(json)).await;
+                    }
+                    return;
+                }
+            };
+
+            debug!(draft = %draft_code, action = ?action, "DraftAction");
+
+            // Check if this is a StartDraft action (triggers timer)
+            let is_start = matches!(action, draft_core::types::DraftAction::StartDraft);
+
+            let result = {
+                let mut mgr = draft_state.lock().await;
+                mgr.handle_draft_action(&draft_code, &token, action, None)
+            };
+
+            match result {
+                Ok(views) => {
+                    // Broadcast DraftStateUpdate to all connected sockets in the pod
+                    broadcast_draft_views(&draft_code, &views, connections, draft_state).await;
+
+                    // If draft just started, spawn pick timer
+                    if is_start {
+                        spawn_pick_timer(
+                            draft_state.clone(),
+                            connections.clone(),
+                            draft_code.clone(),
+                            75, // default pick timer seconds
+                        );
+                    }
+
+                    // Check if pairings were generated (status transitioned to MatchInProgress)
+                    {
+                        let mgr = draft_state.lock().await;
+                        if let Some(session) = mgr.sessions.get(&draft_code) {
+                            if session.session.status
+                                == draft_core::types::DraftStatus::MatchInProgress
+                            {
+                                // Pairings generated — send DraftMatchStart to each paired player
+                                // (This is a simplified stub; full game session spawning
+                                // requires deck resolution and session creation which
+                                // depends on the deckbuilding flow from Plan 03/04)
+                                info!(
+                                    draft = %draft_code,
+                                    pairings = session.session.pairings.len(),
+                                    "pairings generated — match spawning deferred to Plan 03/04"
+                                );
+                            }
+                        }
+                    }
+
+                    // Persist draft session after mutation
+                    persist_draft_session_async(game_db, &draft_code, draft_state).await;
+
+                    // Broadcast to spectators
+                    broadcast_draft_spectator_views(&draft_code, draft_state, draft_spectators)
+                        .await;
+                }
+                Err(reason) => {
+                    let msg = ServerMessage::DraftActionRejected { reason };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = socket.send(Message::text(json)).await;
+                    }
+                }
+            }
+        }
+
+        ClientMessage::ReconnectDraft {
+            draft_code,
+            player_token,
+        } => {
+            info!(draft = %draft_code, "ReconnectDraft attempt");
+
+            let result = {
+                let mut mgr = draft_state.lock().await;
+                mgr.handle_reconnect(&draft_code, &player_token)
+            };
+
+            match result {
+                Ok(view) => {
+                    // Restore identity
+                    let seat = {
+                        let mgr = draft_state.lock().await;
+                        mgr.sessions
+                            .get(&draft_code)
+                            .and_then(|s| s.seat_for_token(&player_token))
+                    };
+                    if let Some(seat) = seat {
+                        identity.draft_code = Some(draft_code.clone());
+                        identity.draft_seat = Some(seat);
+                        identity.draft_token = Some(player_token);
+                    }
+
+                    let msg = ServerMessage::DraftStateUpdate { view };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = socket.send(Message::text(json)).await;
+                    }
+
+                    info!(draft = %draft_code, "draft reconnect succeeded");
+                }
+                Err(reason) => {
+                    let msg = ServerMessage::DraftActionRejected { reason };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = socket.send(Message::text(json)).await;
+                    }
+                }
+            }
+        }
+
+        ClientMessage::SpectateDraft { draft_code } => {
+            let drafts = draft_state.lock().await;
+            if let Some(session) = drafts.sessions.get(&draft_code) {
+                // Derive visibility from session config (host-configured, per D-07)
+                let visibility = session.config.spectator_visibility;
+                let view = draft_core::view::filter_for_spectator(&session.session, visibility);
+                // Record spectator identity (T-60-09: prevents spectator from sending DraftAction)
+                identity.spectator_draft_code = Some(draft_code.clone());
+                identity.spectator_visibility = Some(visibility);
+                // Register spectator sender for live broadcasts
+                {
+                    let mut specs = draft_spectators.lock().await;
+                    specs
+                        .entry(draft_code.clone())
+                        .or_default()
+                        .push((visibility, tx.clone()));
+                }
+                let msg = ServerMessage::DraftSpectatorView { view };
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    let _ = socket.send(Message::text(json)).await;
+                }
+                info!(draft = %draft_code, ?visibility, "spectator connected to draft");
+            } else {
+                let msg = ServerMessage::Error {
+                    message: "Draft not found".to_string(),
+                };
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    let _ = socket.send(Message::text(json)).await;
+                }
+            }
+        }
+
         ClientMessage::UnregisterLobby { game_code } => {
             // Ownership check: only the socket that registered this entry
             // (stored in `identity.lobby_host_game`) may tear it down.
@@ -2897,6 +3687,30 @@ mod mode_gate_tests {
             ClientMessage::SpectatorJoin {
                 game_code: "X".into(),
             },
+            ClientMessage::CreateDraftWithSettings {
+                display_name: "A".into(),
+                set_code: "TST".into(),
+                kind: draft_core::types::DraftKind::Premier,
+                public: true,
+                password: None,
+                timer_seconds: None,
+                tournament_format: draft_core::types::TournamentFormat::Swiss,
+                pod_policy: draft_core::types::PodPolicy::Competitive,
+                pod_size: 8,
+            },
+            ClientMessage::JoinDraftWithPassword {
+                draft_code: "X".into(),
+                display_name: "B".into(),
+                password: None,
+            },
+            ClientMessage::DraftAction {
+                draft_code: "X".into(),
+                action: draft_core::types::DraftAction::StartDraft,
+            },
+            ClientMessage::ReconnectDraft {
+                draft_code: "X".into(),
+                player_token: "t".into(),
+            },
         ];
         for msg in disabled {
             assert!(
@@ -2963,6 +3777,21 @@ mod mode_gate_tests {
             },
             ClientMessage::Concede,
             ClientMessage::Ping { timestamp: 0 },
+            ClientMessage::CreateDraftWithSettings {
+                display_name: "A".into(),
+                set_code: "TST".into(),
+                kind: draft_core::types::DraftKind::Premier,
+                public: true,
+                password: None,
+                timer_seconds: None,
+                tournament_format: draft_core::types::TournamentFormat::Swiss,
+                pod_policy: draft_core::types::PodPolicy::Competitive,
+                pod_size: 8,
+            },
+            ClientMessage::DraftAction {
+                draft_code: "X".into(),
+                action: draft_core::types::DraftAction::StartDraft,
+            },
         ];
         for m in msgs {
             assert!(reject_if_disabled(&m, ServerMode::Full).is_none());

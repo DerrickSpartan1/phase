@@ -2,7 +2,7 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
 import type { FormatConfig, GameFormat, LobbyGame, MatchType, PlayerId } from "../adapter/types";
-import { FORMAT_REGISTRY } from "../data/formatRegistry";
+import { FORMAT_REGISTRY, LIMITED_FORMAT_CONFIG } from "../data/formatRegistry";
 import { PROTOCOL_VERSION, type ServerInfo } from "../adapter/ws-adapter";
 import {
   clearWsSession,
@@ -29,6 +29,12 @@ import {
 import { isValidWebSocketUrl } from "../services/serverDetection";
 import { saveActiveGame, useGameStore } from "./gameStore";
 import type { P2PHostAdapter } from "../adapter/p2p-adapter";
+import {
+  ServerDraftAdapter,
+  type CreateDraftSettings,
+  type DraftPhase,
+} from "../adapter/server-draft-adapter";
+import type { DraftPlayerView } from "../adapter/draft-adapter";
 import type {
   PlayerSlot,
   SeatMutation,
@@ -181,6 +187,8 @@ interface MultiplayerState {
   isSpectator: boolean;
   // PlayerId → display name, captured from playerSlots at game start (ephemeral — not persisted)
   playerNames: Map<number, string>;
+  // PlayerId → avatar art crop URL (ephemeral — assigned at game start)
+  playerAvatars: Map<number, string>;
   // Per-player connection tracking (ephemeral — not persisted)
   disconnectedPlayers: Set<number>;
   // Action round-trip tracking (ephemeral — not persisted)
@@ -196,6 +204,10 @@ interface MultiplayerState {
   // null before the first hello; updated when the hosting WS or the game WS
   // completes its handshake.
   serverInfo: ServerInfo | null;
+  // Server-hosted draft session (ephemeral — not persisted)
+  draftAdapter: ServerDraftAdapter | null;
+  draftView: DraftPlayerView | null;
+  draftPhase: DraftPhase | null;
 }
 
 interface MultiplayerActions {
@@ -280,6 +292,24 @@ interface MultiplayerActions {
   subscribeLobby: (
     onUpdate: (games: LobbyGame[]) => void,
   ) => Promise<(() => void) | null>;
+  /**
+   * Join a server-hosted draft room. Creates a ServerDraftAdapter and uses
+   * its joinDraft method, then stores the adapter and initial view.
+   */
+  joinServerDraft: (
+    serverUrl: string,
+    draftCode: string,
+    displayName: string,
+    password?: string,
+  ) => Promise<void>;
+  /**
+   * Create a new server-hosted draft pod. Opens a ServerDraftAdapter and
+   * calls createDraft with the given settings.
+   */
+  createServerDraft: (
+    serverUrl: string,
+    settings: CreateDraftSettings,
+  ) => Promise<void>;
 }
 
 /**
@@ -328,8 +358,9 @@ const TWO_HEADED_GIANT_DEFAULT: FormatConfig = {
 export const FORMAT_DEFAULTS: Record<GameFormat, FormatConfig> = {
   ...(Object.fromEntries(
     FORMAT_REGISTRY.map((m) => [m.format, m.default_config]),
-  ) as Record<Exclude<GameFormat, "TwoHeadedGiant">, FormatConfig>),
+  ) as Record<Exclude<GameFormat, "TwoHeadedGiant" | "Limited">, FormatConfig>),
   TwoHeadedGiant: TWO_HEADED_GIANT_DEFAULT,
+  Limited: LIMITED_FORMAT_CONFIG.default_config,
 };
 
 export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>()(
@@ -347,6 +378,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       spectators: [],
       isSpectator: false,
       playerNames: new Map(),
+      playerAvatars: new Map(),
       disconnectedPlayers: new Set(),
       actionPending: false,
       latencyMs: null,
@@ -356,6 +388,9 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       hostSession: null,
       pendingGameRoute: null,
       serverInfo: null,
+      draftAdapter: null,
+      draftView: null,
+      draftPhase: null,
 
       setServerInfo: (info) => set({ serverInfo: info }),
       setDisplayName: (name) => set({ displayName: name }),
@@ -736,6 +771,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
               formatConfig: settings.formatConfig,
               aiSeats: [],
               roomName: opts.roomName ?? null,
+              draftMetadata: null,
             });
             brokerGameCode = registered.gameCode;
             activeBroker = broker;
@@ -980,6 +1016,22 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
         }
       },
 
+      joinServerDraft: async (serverUrl, draftCode, displayName, password) => {
+        // Dispose any previous draft adapter before creating a new one.
+        get().draftAdapter?.dispose();
+        const adapter = new ServerDraftAdapter(serverUrl);
+        const view = await adapter.joinDraft(draftCode, displayName, password);
+        set({ draftAdapter: adapter, draftView: view, draftPhase: adapter.currentPhase });
+      },
+
+      createServerDraft: async (serverUrl, settings) => {
+        // Dispose any previous draft adapter before creating a new one.
+        get().draftAdapter?.dispose();
+        const adapter = new ServerDraftAdapter(serverUrl);
+        await adapter.createDraft(settings);
+        set({ draftAdapter: adapter, draftView: null, draftPhase: "lobby" });
+      },
+
       subscribeLobby: async (onUpdate) => {
         const socket = await get().ensureSubscriptionSocket();
         if (!socket) return null;
@@ -1023,13 +1075,13 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
 
 export function getPlayerDisplayName(playerId: number, myId?: number): string {
   if (playerId === myId) return "You";
-  const name = useMultiplayerStore.getState().playerNames.get(playerId);
-  if (name) return name;
-  return `Player ${playerId + 1}`;
+  return getOpponentDisplayName(playerId);
 }
 
 export function getOpponentDisplayName(playerId: number): string {
-  const name = useMultiplayerStore.getState().playerNames.get(playerId);
+  const state = useMultiplayerStore.getState();
+  const name = state.playerNames.get(playerId);
   if (name) return name;
   return `Opp ${playerId + 1}`;
 }
+

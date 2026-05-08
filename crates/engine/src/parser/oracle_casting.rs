@@ -1,8 +1,8 @@
+use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::combinator::value;
 use nom::Parser;
-use nom_language::error::VerboseError;
 
 use super::oracle_cost::parse_oracle_cost;
 use super::oracle_util::{parse_mana_symbols, TextPair};
@@ -17,10 +17,9 @@ use crate::types::ability::{AbilityCost, AdditionalCost, CastingRestriction, Spe
 /// - General "X or Y" → `Choice(X, Y)` using `parse_single_cost` for each fragment
 pub fn parse_additional_cost_line(lower: &str, raw: &str) -> Option<AdditionalCost> {
     // Strip the standard additional-cost prefix.
-    let after_prefix =
-        tag::<_, _, VerboseError<&str>>("as an additional cost to cast this spell, ")
-            .parse(lower)
-            .map_or(lower, |(rest, _)| rest);
+    let after_prefix = tag::<_, _, OracleError<'_>>("as an additional cost to cast this spell, ")
+        .parse(lower)
+        .map_or(lower, |(rest, _)| rest);
     // Use TextPair for case-preserving parallel slicing, then strip trailing period.
     let tp = TextPair::new(&raw[raw.len() - after_prefix.len()..], after_prefix);
     let tp = tp.trim_end_matches('.');
@@ -28,7 +27,7 @@ pub fn parse_additional_cost_line(lower: &str, raw: &str) -> Option<AdditionalCo
     let body_raw = tp.original;
 
     // "you may [cost]" → Optional wrapping
-    if let Ok((opt_lower, _)) = tag::<_, _, VerboseError<&str>>("you may ").parse(body_lower) {
+    if let Ok((opt_lower, _)) = tag::<_, _, OracleError<'_>>("you may ").parse(body_lower) {
         let opt_raw = &body_raw[body_raw.len() - opt_lower.len()..];
         let cost = super::oracle_cost::parse_single_cost(opt_raw);
         if !matches!(cost, AbilityCost::Unimplemented { .. }) {
@@ -98,7 +97,7 @@ pub(crate) fn parse_spell_casting_option_line(
 fn split_leading_if_clause(text: &str) -> (Option<&str>, &str) {
     let trimmed = text.trim();
     let lower = trimmed.to_lowercase();
-    if tag::<_, _, VerboseError<&str>>("if ")
+    if tag::<_, _, OracleError<'_>>("if ")
         .parse(lower.as_str())
         .is_err()
     {
@@ -130,21 +129,21 @@ fn parse_self_flash_option(
         return Some(option);
     }
 
-    if let Ok((after, _)) = tag::<_, _, VerboseError<&str>>("if you pay ").parse(rest) {
+    if let Ok((after, _)) = tag::<_, _, OracleError<'_>>("if you pay ").parse(rest) {
         if let Some(cost_text) = after.strip_suffix(" more to cast it") {
             option = option.cost(parse_oracle_cost(cost_text));
             return Some(option);
         }
     }
 
-    if let Ok((after, _)) = tag::<_, _, VerboseError<&str>>("by ").parse(rest) {
+    if let Ok((after, _)) = tag::<_, _, OracleError<'_>>("by ").parse(rest) {
         if let Some(cost_text) = after.strip_suffix(" in addition to paying its other costs") {
             option = option.cost(parse_oracle_cost(cost_text));
             return Some(option);
         }
     }
 
-    if let Ok((condition_text, _)) = tag::<_, _, VerboseError<&str>>("if ").parse(rest) {
+    if let Ok((condition_text, _)) = tag::<_, _, OracleError<'_>>("if ").parse(rest) {
         if let Some(parsed) = parse_restriction_condition(condition_text.trim()) {
             option = option.condition(parsed);
         }
@@ -212,12 +211,12 @@ fn extract_rather_than_pay_alt_cost<'a>(
     const PREFIX: &str = "you may ";
     const SUFFIX: &str = " rather than pay this spell's mana cost";
 
-    let (after_prefix_lower, _) = tag::<_, _, VerboseError<&str>>(PREFIX)
+    let (after_prefix_lower, _) = tag::<_, _, OracleError<'_>>(PREFIX)
         .parse(body_lower)
         .ok()?;
     let prefix_len = body_lower.len() - after_prefix_lower.len();
 
-    let (after_suffix_lower, _) = take_until::<_, _, VerboseError<&str>>(SUFFIX)
+    let (after_suffix_lower, _) = take_until::<_, _, OracleError<'_>>(SUFFIX)
         .parse(after_prefix_lower)
         .ok()?;
     let cost_end = body_lower.len() - after_suffix_lower.len();
@@ -225,14 +224,13 @@ fn extract_rather_than_pay_alt_cost<'a>(
     let cost_text = body[prefix_len..cost_end].trim();
     let after_suffix_pos = cost_end + SUFFIX.len();
     let remainder_lower = &body_lower[after_suffix_pos..];
-    let trailing_if = if let Ok((cond_lower, _)) =
-        tag::<_, _, VerboseError<&str>>(" if ").parse(remainder_lower)
-    {
-        let cond_start = body.len() - cond_lower.len();
-        Some(body[cond_start..].trim())
-    } else {
-        None
-    };
+    let trailing_if =
+        if let Ok((cond_lower, _)) = tag::<_, _, OracleError<'_>>(" if ").parse(remainder_lower) {
+            let cond_start = body.len() - cond_lower.len();
+            Some(body[cond_start..].trim())
+        } else {
+            None
+        };
 
     Some((cost_text, trailing_if))
 }
@@ -242,7 +240,7 @@ fn self_spell_phrase(lower: &str, card_name: &str) -> Option<String> {
     if let Ok((_, phrase)) = alt((
         value(
             "this spell",
-            tag::<_, _, VerboseError<&str>>("you may cast this spell "),
+            tag::<_, _, OracleError<'_>>("you may cast this spell "),
         ),
         value("it", tag("you may cast it ")),
     ))
@@ -265,7 +263,7 @@ pub(crate) fn parse_casting_restriction_line(text: &str) -> Option<Vec<CastingRe
     let trimmed = text.trim().trim_end_matches('.');
     // Try direct match first, then fall back to stripping ability word prefix
     let trimmed_lower = trimmed.to_lowercase();
-    let effective = if tag::<_, _, VerboseError<&str>>("cast this spell only ")
+    let effective = if tag::<_, _, OracleError<'_>>("cast this spell only ")
         .parse(trimmed_lower.as_str())
         .is_ok()
     {
@@ -273,16 +271,16 @@ pub(crate) fn parse_casting_restriction_line(text: &str) -> Option<Vec<CastingRe
     } else {
         super::oracle_modal::strip_ability_word(trimmed)?.to_lowercase()
     };
-    let rest =
-        match tag::<_, _, VerboseError<&str>>("cast this spell only ").parse(effective.as_str()) {
-            Ok((r, _)) => r,
-            Err(_) => return None,
-        };
+    let rest = match tag::<_, _, OracleError<'_>>("cast this spell only ").parse(effective.as_str())
+    {
+        Ok((r, _)) => r,
+        Err(_) => return None,
+    };
     let mut restrictions = scan_timing_restrictions(rest);
 
     // Extract condition clauses: "if ...", "only if ...", or "... and only if ..."
     if let Ok((condition, _)) =
-        alt((tag::<_, _, VerboseError<&str>>("only if "), tag("if "))).parse(rest)
+        alt((tag::<_, _, OracleError<'_>>("only if "), tag("if "))).parse(rest)
     {
         let condition_text = strip_casting_condition_suffixes(condition);
         restrictions.push(CastingRestriction::RequiresCondition {
@@ -314,7 +312,7 @@ fn strip_casting_condition_suffixes(text: &str) -> &str {
 /// prefix matching across the 15 timing variants.
 fn parse_timing_restriction(
     input: &str,
-) -> nom::IResult<&str, CastingRestriction, VerboseError<&str>> {
+) -> nom::IResult<&str, CastingRestriction, OracleError<'_>> {
     use nom::sequence::preceded;
     alt((
         preceded(tag("during "), parse_during_phrase),
@@ -333,7 +331,7 @@ fn parse_timing_restriction(
 }
 
 /// Sub-dispatch for "during [rest]" — declare steps, opponent/your phases, combat, upkeep.
-fn parse_during_phrase(input: &str) -> nom::IResult<&str, CastingRestriction, VerboseError<&str>> {
+fn parse_during_phrase(input: &str) -> nom::IResult<&str, CastingRestriction, OracleError<'_>> {
     use nom::sequence::preceded;
     alt((
         // Declare steps (most specific combat sub-phases)
@@ -370,7 +368,7 @@ fn parse_during_phrase(input: &str) -> nom::IResult<&str, CastingRestriction, Ve
 }
 
 /// Match "an opponent's " / "an opponents " possessive prefix (handles curly apostrophe).
-fn parse_opponent_possessive(input: &str) -> nom::IResult<&str, &str, VerboseError<&str>> {
+fn parse_opponent_possessive(input: &str) -> nom::IResult<&str, &str, OracleError<'_>> {
     alt((
         tag("an opponent\u{2019}s "),
         tag("an opponent's "),
@@ -380,7 +378,7 @@ fn parse_opponent_possessive(input: &str) -> nom::IResult<&str, &str, VerboseErr
 }
 
 /// After "an opponent's", dispatch on the phase keyword.
-fn parse_opponent_phase(input: &str) -> nom::IResult<&str, CastingRestriction, VerboseError<&str>> {
+fn parse_opponent_phase(input: &str) -> nom::IResult<&str, CastingRestriction, OracleError<'_>> {
     alt((
         value(CastingRestriction::DuringOpponentsUpkeep, tag("upkeep")),
         value(CastingRestriction::DuringOpponentsEndStep, tag("end step")),
@@ -392,7 +390,7 @@ fn parse_opponent_phase(input: &str) -> nom::IResult<&str, CastingRestriction, V
 /// "on an opponent's turn" — reuses the opponent possessive combinator.
 fn parse_opponent_possessive_turn(
     input: &str,
-) -> nom::IResult<&str, CastingRestriction, VerboseError<&str>> {
+) -> nom::IResult<&str, CastingRestriction, OracleError<'_>> {
     use nom::sequence::preceded;
     value(
         CastingRestriction::DuringOpponentsTurn,
@@ -402,7 +400,7 @@ fn parse_opponent_possessive_turn(
 }
 
 /// Sub-dispatch for "before [rest]" — attackers, blockers, combat damage.
-fn parse_before_phrase(input: &str) -> nom::IResult<&str, CastingRestriction, VerboseError<&str>> {
+fn parse_before_phrase(input: &str) -> nom::IResult<&str, CastingRestriction, OracleError<'_>> {
     alt((
         value(
             CastingRestriction::BeforeAttackersDeclared,

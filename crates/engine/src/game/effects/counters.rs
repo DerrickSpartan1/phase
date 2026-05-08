@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use crate::game::game_object::GameObject;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
+    CounterTransferMode, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::counter::{parse_counter_type, CounterType};
 use crate::types::events::GameEvent;
@@ -436,37 +436,36 @@ fn resolve_defined_or_targets(
         .collect()
 }
 
-/// CR 122.8: Read counters from source and put equivalent counters on target.
-/// Does NOT remove counters from source — per official rulings, "put its counters on"
-/// creates new counters matching the source's counter state.
+/// CR 122.5 / CR 122.8: Read counters from source and transfer them to target.
+/// True move effects remove counters from the source. "Put its counters on"
+/// effects copy matching counters from source/LKI state without removal.
 pub fn resolve_move(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    // CR 400.7: Read source counters, falling back to LKI cache for objects that
-    // have changed zones (e.g., dies triggers — counters cease to exist on zone
-    // change per CR 122.2, but the LKI snapshot preserves them).
-    let source_counters = {
-        let current = state
-            .objects
-            .get(&ability.source_id)
-            .map(|obj| obj.counters.clone())
-            .unwrap_or_default();
-        if current.is_empty() {
-            // Object may have lost counters during zone change — check LKI
-            state
-                .lki_cache
-                .get(&ability.source_id)
-                .map(|lki| lki.counters.clone())
-                .unwrap_or_default()
-        } else {
-            current
-        }
+    let (source_filter, counter_type_filter, count, mode, target_filter) = match &ability.effect {
+        Effect::MoveCounters {
+            source,
+            counter_type,
+            count,
+            mode,
+            target,
+        } => (
+            source,
+            counter_type.as_deref().map(parse_counter_type),
+            count.as_ref(),
+            *mode,
+            target,
+        ),
+        _ => return Ok(()),
     };
 
-    if source_counters.is_empty() {
-        // No counters to copy — no-op
+    let source_ids = resolve_counter_transfer_sources(state, ability, source_filter);
+    let dest_ids =
+        resolve_counter_transfer_destinations(state, ability, source_filter, target_filter);
+
+    if source_ids.is_empty() || dest_ids.is_empty() {
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
@@ -474,45 +473,62 @@ pub fn resolve_move(
         return Ok(());
     }
 
-    // Filter by counter_type if specified
-    let counter_type_filter = match &ability.effect {
-        Effect::MoveCounters { counter_type, .. } => counter_type.as_deref(),
-        _ => None,
-    };
+    let transfer_limit = count
+        .map(|expr| crate::game::quantity::resolve_quantity_with_targets(state, expr, ability))
+        .map(|value| value.max(0) as u32);
 
-    // Resolve destination target
-    let dest_ids: Vec<_> = ability
-        .targets
-        .iter()
-        .filter_map(|t| {
-            if let TargetRef::Object(id) = t {
-                Some(*id)
-            } else {
-                None
-            }
-        })
-        .collect();
+    for source_id in source_ids {
+        let source_counters =
+            counter_transfer_source_counters(state, source_id, mode, counter_type_filter.as_ref());
 
-    for dest_id in dest_ids {
-        for (ct, &count) in &source_counters {
-            if count == 0 {
+        if source_counters.is_empty() {
+            continue;
+        }
+
+        let mut remaining = transfer_limit;
+        let destinations: &[ObjectId] = if mode == CounterTransferMode::Move {
+            &dest_ids[..1]
+        } else {
+            &dest_ids
+        };
+
+        for dest_id in destinations.iter().copied() {
+            if mode == CounterTransferMode::Move && source_id == dest_id {
                 continue;
             }
-            // Filter by type if specified
-            if let Some(type_filter) = counter_type_filter {
-                let ct_name = format!("{ct:?}");
-                if !ct_name.eq_ignore_ascii_case(type_filter) {
+            for (ct, available) in &source_counters {
+                let count = remaining.map_or(*available, |limit| limit.min(*available));
+                if count == 0 {
                     continue;
                 }
+                let transferred = if mode == CounterTransferMode::Move {
+                    let before = counter_count(state, source_id, ct);
+                    remove_counter_with_replacement(state, source_id, ct.clone(), count, events);
+                    if matches!(
+                        state.waiting_for,
+                        crate::types::game_state::WaitingFor::ReplacementChoice { .. }
+                    ) {
+                        return Ok(());
+                    }
+                    before.saturating_sub(counter_count(state, source_id, ct))
+                } else {
+                    count
+                };
+                if transferred == 0 {
+                    continue;
+                }
+                add_counter_with_replacement(
+                    state,
+                    ability.controller,
+                    dest_id,
+                    ct.clone(),
+                    transferred,
+                    events,
+                );
+                if let Some(limit) = remaining.as_mut() {
+                    *limit = limit.saturating_sub(transferred);
+                }
             }
-            add_counter_with_replacement(
-                state,
-                ability.controller,
-                dest_id,
-                ct.clone(),
-                count,
-                events,
-            );
         }
     }
 
@@ -522,6 +538,98 @@ pub fn resolve_move(
     });
 
     Ok(())
+}
+
+fn resolve_counter_transfer_sources(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    source_filter: &TargetFilter,
+) -> Vec<ObjectId> {
+    if matches!(source_filter, TargetFilter::SelfRef | TargetFilter::None) {
+        return vec![ability.source_id];
+    }
+
+    if let Some(TargetRef::Object(id)) = crate::game::targeting::resolve_event_context_target(
+        state,
+        source_filter,
+        ability.source_id,
+    ) {
+        return vec![id];
+    }
+
+    ability
+        .targets
+        .iter()
+        .filter_map(|target| match target {
+            TargetRef::Object(id) => Some(*id),
+            TargetRef::Player(_) => None,
+        })
+        .take(1)
+        .collect()
+}
+
+fn resolve_counter_transfer_destinations(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    source_filter: &TargetFilter,
+    target_filter: &TargetFilter,
+) -> Vec<ObjectId> {
+    if matches!(target_filter, TargetFilter::SelfRef | TargetFilter::None) {
+        return vec![ability.source_id];
+    }
+
+    if let Some(TargetRef::Object(id)) = crate::game::targeting::resolve_event_context_target(
+        state,
+        target_filter,
+        ability.source_id,
+    ) {
+        return vec![id];
+    }
+
+    let skip_source_slot = !source_filter.is_context_ref();
+    ability
+        .targets
+        .iter()
+        .filter_map(|target| match target {
+            TargetRef::Object(id) => Some(*id),
+            TargetRef::Player(_) => None,
+        })
+        .skip(usize::from(skip_source_slot))
+        .collect()
+}
+
+fn counter_transfer_source_counters(
+    state: &GameState,
+    source_id: ObjectId,
+    mode: CounterTransferMode,
+    counter_type_filter: Option<&CounterType>,
+) -> Vec<(CounterType, u32)> {
+    let mut counters = state
+        .objects
+        .get(&source_id)
+        .map(|obj| obj.counters.clone())
+        .unwrap_or_default();
+
+    if counters.is_empty() && mode == CounterTransferMode::Put {
+        counters = state
+            .lki_cache
+            .get(&source_id)
+            .map(|lki| lki.counters.clone())
+            .unwrap_or_default();
+    }
+
+    counters
+        .into_iter()
+        .filter(|(ct, count)| *count > 0 && counter_type_filter.is_none_or(|filter| filter == ct))
+        .collect()
+}
+
+fn counter_count(state: &GameState, object_id: ObjectId, counter_type: &CounterType) -> u32 {
+    state
+        .objects
+        .get(&object_id)
+        .and_then(|obj| obj.counters.get(counter_type).copied())
+        .unwrap_or(0)
 }
 
 /// Remove counters from target objects, clamping at 0.
@@ -1014,6 +1122,8 @@ mod tests {
             Effect::MoveCounters {
                 source: TargetFilter::SelfRef,
                 counter_type: None,
+                count: None,
+                mode: CounterTransferMode::Put,
                 target: TargetFilter::Any,
             },
             vec![TargetRef::Object(dest_id)],
@@ -1032,6 +1142,233 @@ mod tests {
                 .unwrap_or(0),
             3,
             "destination should receive counters from LKI cache"
+        );
+    }
+
+    #[test]
+    fn move_one_counter_removes_one_from_source_and_adds_one_to_target() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Tidus".to_string(),
+            Zone::Battlefield,
+        );
+        let dest_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Ally".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source_id)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 5);
+        state
+            .objects
+            .get_mut(&dest_id)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 1);
+
+        let ability = ResolvedAbility::new(
+            Effect::MoveCounters {
+                source: TargetFilter::SelfRef,
+                counter_type: Some("P1P1".to_string()),
+                count: Some(QuantityExpr::Fixed { value: 1 }),
+                mode: CounterTransferMode::Move,
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(dest_id)],
+            source_id,
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve_move(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.objects[&source_id]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            4
+        );
+        assert_eq!(
+            state.objects[&dest_id]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            2
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::CounterRemoved {
+                object_id,
+                counter_type: CounterType::Plus1Plus1,
+                count: 1,
+            } if *object_id == source_id
+        )));
+    }
+
+    #[test]
+    fn move_counter_uses_selected_source_target_before_destination_target() {
+        let mut state = GameState::new_two_player(42);
+        let ability_source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Tidus".to_string(),
+            Zone::Battlefield,
+        );
+        let counter_source_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Counter Source".to_string(),
+            Zone::Battlefield,
+        );
+        let dest_id = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Counter Destination".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&counter_source_id)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 2);
+
+        let ability = ResolvedAbility::new(
+            Effect::MoveCounters {
+                source: TargetFilter::Any,
+                counter_type: Some("P1P1".to_string()),
+                count: Some(QuantityExpr::Fixed { value: 1 }),
+                mode: CounterTransferMode::Move,
+                target: TargetFilter::Any,
+            },
+            vec![
+                TargetRef::Object(counter_source_id),
+                TargetRef::Object(dest_id),
+            ],
+            ability_source_id,
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve_move(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.objects[&counter_source_id]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            1
+        );
+        assert_eq!(
+            state.objects[&dest_id]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            1
+        );
+        assert_eq!(
+            state.objects[&ability_source_id]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            0
+        );
+    }
+
+    #[test]
+    fn move_counter_after_target_selection_removes_from_source_and_adds_to_destination() {
+        let mut state = GameState::new_two_player(42);
+        let ability_source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Tidus".to_string(),
+            Zone::Battlefield,
+        );
+        let counter_source_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Counter Source".to_string(),
+            Zone::Battlefield,
+        );
+        let dest_id = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Counter Destination".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&counter_source_id)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 5);
+        state
+            .objects
+            .get_mut(&dest_id)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 1);
+
+        let mut ability = ResolvedAbility::new(
+            Effect::MoveCounters {
+                source: TargetFilter::Any,
+                counter_type: None,
+                count: Some(QuantityExpr::Fixed { value: 1 }),
+                mode: CounterTransferMode::Move,
+                target: TargetFilter::Any,
+            },
+            vec![],
+            ability_source_id,
+            PlayerId(0),
+        );
+        crate::game::ability_utils::assign_selected_slots_in_chain(
+            &mut ability,
+            &[
+                Some(TargetRef::Object(counter_source_id)),
+                Some(TargetRef::Object(dest_id)),
+            ],
+        )
+        .expect("target selection should preserve both move-counters targets");
+
+        let mut events = Vec::new();
+        resolve_move(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.objects[&counter_source_id]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            4
+        );
+        assert_eq!(
+            state.objects[&dest_id]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            2
         );
     }
 

@@ -348,3 +348,79 @@ fn sagu_wildling_cast_from_hand_prompts_adventure_choice() {
         result.waiting_for
     );
 }
+
+#[test]
+fn day_of_black_sun_is_castable_with_x_zero_from_export() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../client/public/card-data.json");
+    if !path.exists() {
+        eprintln!("skipping: client/public/card-data.json not generated");
+        return;
+    }
+    static DB: OnceLock<CardDatabase> = OnceLock::new();
+    let db = DB.get_or_init(|| CardDatabase::from_export(&path).expect("export should load"));
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let day_id = scenario.add_real_card(P0, "Day of Black Sun", Zone::Hand, db);
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+
+    let dummy = engine::types::identifiers::ObjectId(0);
+    let player = runner
+        .state_mut()
+        .players
+        .iter_mut()
+        .find(|p| p.id == P0)
+        .unwrap();
+    player
+        .mana_pool
+        .add(ManaUnit::new(ManaType::Black, dummy, false, vec![]));
+    player
+        .mana_pool
+        .add(ManaUnit::new(ManaType::Black, dummy, false, vec![]));
+
+    let day = runner.state().objects.get(&day_id).unwrap();
+    assert!(
+        engine::game::casting::spell_has_legal_targets(runner.state(), day, P0),
+        "Day of Black Sun has no targets and must pass target castability"
+    );
+    assert!(
+        engine::game::casting::can_pay_cost_after_auto_tap(
+            runner.state(),
+            P0,
+            day_id,
+            &day.mana_cost
+        ),
+        "Day of Black Sun must treat unchosen X as 0 during pre-cast affordability"
+    );
+    assert!(
+        engine::game::casting::can_cast_object_now(runner.state(), P0, day_id),
+        "Day of Black Sun must pass the engine castability gate with X=0 available"
+    );
+
+    let (actions, _, _) = engine::ai_support::legal_actions_full(runner.state());
+    assert!(
+        actions.iter().any(|action| matches!(
+            action,
+            GameAction::CastSpell {
+                object_id,
+                ..
+            } if *object_id == day_id
+        )),
+        "Day of Black Sun must be selectable with only the fixed {{B}}{{B}} portion payable"
+    );
+
+    let card_id = runner.state().objects[&day_id].card_id;
+    let result = runner
+        .act(GameAction::CastSpell {
+            object_id: day_id,
+            card_id,
+            targets: vec![],
+        })
+        .expect("Day of Black Sun cast should be accepted");
+
+    match result.waiting_for {
+        WaitingFor::ChooseXValue { max, .. } => assert_eq!(max, 0),
+        other => panic!("expected ChooseXValue with max 0, got {other:?}"),
+    }
+}

@@ -61,6 +61,11 @@ describe("collectObjectActions", () => {
       { type: "PlayLand", data: { object_id: 1, card_id: 100 } },
       { type: "CastSpell", data: { object_id: 1, card_id: 100, targets: [] } },
       { type: "ActivateAbility", data: { source_id: 1, ability_index: 0 } },
+      { type: "ActivateNinjutsu", data: { ninjutsu_object_id: 1, creature_to_return: 9 } },
+      {
+        type: "CastSpellAsWebSlinging",
+        data: { hand_object: 1, card_id: 100, creature_to_return: 9 },
+      },
     ];
     const obj2Actions: GameAction[] = [
       { type: "CastSpell", data: { object_id: 2, card_id: 200, targets: [] } },

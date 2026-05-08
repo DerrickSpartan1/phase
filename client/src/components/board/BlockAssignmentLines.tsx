@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
@@ -6,17 +6,29 @@ import { useUiStore } from "../../stores/uiStore.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useRafPositions } from "../../hooks/useRafPositions.ts";
-import type { ObjectId } from "../../adapter/types.ts";
-import { isAttackerTargetingPlayer } from "../../viewmodel/battlefieldProps.ts";
+import { arcPath } from "../../hooks/useAttackerArrowPositions.ts";
+import { getOpponentIds } from "../../viewmodel/gameStateView.ts";
+import type { ObjectId, PlayerId } from "../../adapter/types.ts";
+
+const BLOCK_COLOR = "rgba(56,189,248,0.95)";
+const BLOCK_COLOR_HEAD = "rgba(56,189,248,0.9)";
 
 export function BlockAssignmentLines() {
   const blockerAssignments = useUiStore((s) => s.blockerAssignments);
   const combatMode = useUiStore((s) => s.combatMode);
+  const focusedOpponent = useUiStore((s) => s.focusedOpponent) as PlayerId | null;
   const combat = useGameStore((s) => s.gameState?.combat ?? null);
+  const objects = useGameStore((s) => s.gameState?.objects);
+  const seatOrder = useGameStore((s) => s.gameState?.seat_order);
   const vfxQuality = usePreferencesStore((s) => s.vfxQuality);
-  const myId = usePlayerId();
+  const localPlayerId = usePlayerId();
 
-  // Merge UI blocker assignments with confirmed engine assignments
+  const isMultiplayer = (seatOrder?.length ?? 0) > 2;
+
+  const gameState = useGameStore((s) => s.gameState);
+  const opponents = useMemo(() => getOpponentIds(gameState, localPlayerId), [gameState, localPlayerId]);
+  const effectiveFocusedOpponent = focusedOpponent ?? opponents[0] ?? null;
+
   const pairs = useMergedPairs(blockerAssignments, combat?.blocker_to_attacker ?? null);
 
   const positions = useRafPositions(pairs);
@@ -25,14 +37,41 @@ export function BlockAssignmentLines() {
     combatMode === "blockers" ||
     (combat !== null && Object.keys(combat.blocker_to_attacker).length > 0);
 
-  if (!isVisible || positions.size === 0) return null;
+  // In multiplayer, hide creature→creature blocker lines when viewing a different opponent
+  const relevantBlockerController = useMemo(() => {
+    if (!isMultiplayer || !objects || pairs.size === 0) return null;
+    const firstBlockerId = pairs.keys().next().value;
+    if (firstBlockerId == null) return null;
+    return objects[firstBlockerId]?.controller ?? null;
+  }, [isMultiplayer, objects, pairs]);
+
+  const hiddenByFocus =
+    isMultiplayer &&
+    effectiveFocusedOpponent !== null &&
+    relevantBlockerController !== null &&
+    relevantBlockerController !== localPlayerId &&
+    relevantBlockerController !== effectiveFocusedOpponent;
+
+  // Compute HUD→attacker indicator arrows for off-screen blocking opponents
+  const hudIndicators = useHudBlockIndicators(
+    combat?.blocker_assignments ?? null,
+    objects ?? null,
+    localPlayerId,
+    effectiveFocusedOpponent,
+    isMultiplayer,
+  );
+
+  const showCreatureArrows = isVisible && !hiddenByFocus && positions.size > 0;
+  const showHudIndicators = hudIndicators.length > 0;
+
+  if (!showCreatureArrows && !showHudIndicators) return null;
 
   const isMinimal = vfxQuality === "minimal";
 
   return createPortal(
     <svg className="pointer-events-none fixed inset-0 z-30 h-full w-full">
-      {!isMinimal && (
-        <defs>
+      <defs>
+        {!isMinimal && (
           <filter id="block-line-glow">
             <feGaussianBlur stdDeviation="3" result="blur" />
             <feMerge>
@@ -40,38 +79,148 @@ export function BlockAssignmentLines() {
               <feMergeNode in="SourceGraphic" />
             </feMerge>
           </filter>
-        </defs>
-      )}
-      {Array.from(positions.entries()).map(([blockerId, pos]) => {
-        const attackerId = pairs.get(blockerId);
-        const targetsMe = attackerId != null && isAttackerTargetingPlayer(combat, attackerId, myId);
-        // In multi-defender combat, dim lines for attackers not targeting the current player
-        const lineOpacity = targetsMe || combat === null ? 0.7 : 0.25;
-        return (
-          <g key={blockerId} opacity={targetsMe || combat === null ? 1 : 0.4}>
-            <line
-              x1={pos.from.x}
-              y1={pos.from.y}
-              x2={pos.to.x}
-              y2={pos.to.y}
-              stroke={`rgba(249,115,22,${lineOpacity})`}
-              strokeWidth={isMinimal ? 1.5 : 2.5}
-              strokeDasharray={isMinimal ? undefined : "8 4"}
-              filter={isMinimal ? undefined : "url(#block-line-glow)"}
-            />
-            {!isMinimal && targetsMe && <PulseDot from={pos.from} to={pos.to} length={pos.length} />}
-          </g>
-        );
-      })}
+        )}
+        <marker
+          id="block-arrow-head"
+          markerWidth="4"
+          markerHeight="3.5"
+          refX="4"
+          refY="1.75"
+          orient="auto"
+        >
+          <path d="M0,0 L4,1.75 L0,3.5 Z" fill={BLOCK_COLOR_HEAD} />
+        </marker>
+      </defs>
+      {showCreatureArrows &&
+        Array.from(positions.entries()).map(([blockerId, pos]) => {
+          const d = arcPath(pos.from, pos.to);
+          return (
+            <g key={blockerId}>
+              <path
+                d={d}
+                stroke="black"
+                strokeWidth={isMinimal ? 3 : 5}
+                fill="none"
+                strokeLinecap="round"
+                markerEnd="url(#block-arrow-head)"
+              />
+              <path
+                d={d}
+                stroke={BLOCK_COLOR}
+                strokeWidth={isMinimal ? 1.5 : 2}
+                fill="none"
+                filter={isMinimal ? undefined : "url(#block-line-glow)"}
+                markerEnd="url(#block-arrow-head)"
+                strokeLinecap="round"
+              />
+            </g>
+          );
+        })}
+      {showHudIndicators &&
+        hudIndicators.map((ind) => {
+          const d = arcPath(ind.from, ind.to);
+          return (
+            <g key={ind.key}>
+              <path
+                d={d}
+                stroke="black"
+                strokeWidth={isMinimal ? 3 : 5}
+                fill="none"
+                strokeLinecap="round"
+                markerEnd="url(#block-arrow-head)"
+              />
+              <path
+                d={d}
+                stroke={BLOCK_COLOR}
+                strokeWidth={isMinimal ? 1.5 : 2}
+                fill="none"
+                filter={isMinimal ? undefined : "url(#block-line-glow)"}
+                markerEnd="url(#block-arrow-head)"
+                strokeLinecap="round"
+              />
+            </g>
+          );
+        })}
     </svg>,
     document.body,
   );
 }
 
-/** Merge UI-side blockerAssignments map with engine-confirmed blocker_to_attacker.
- *  Engine sends blocker_id → attacker_id[] (Vec supports multi-blocking via ExtraBlockers).
- *  We flatten to (blocker, attacker) pairs — for multi-block we use the first attacker
- *  since the line only needs one endpoint per blocker. */
+interface HudIndicator {
+  key: string;
+  from: { x: number; y: number };
+  to: { x: number; y: number };
+}
+
+function useHudBlockIndicators(
+  blockerAssignments: Record<string, ObjectId[]> | null,
+  objects: Record<string, { controller: PlayerId }> | null,
+  localPlayerId: PlayerId,
+  focusedOpponent: PlayerId | null,
+  isMultiplayer: boolean,
+): HudIndicator[] {
+  const [indicators, setIndicators] = useState<HudIndicator[]>([]);
+  const stableCountRef = useRef(0);
+
+  // Compute which attackers are blocked by off-screen opponents
+  const offScreenBlockedAttackers = useMemo(() => {
+    if (!isMultiplayer || !blockerAssignments || !objects) return [];
+    const result: { attackerId: ObjectId; blockingPlayerId: PlayerId }[] = [];
+    for (const [attackerId, blockerIds] of Object.entries(blockerAssignments)) {
+      if (blockerIds.length === 0) continue;
+      const blockerController = objects[String(blockerIds[0])]?.controller;
+      if (blockerController == null) continue;
+      if (blockerController === localPlayerId) continue;
+      if (blockerController === focusedOpponent) continue;
+      result.push({ attackerId: Number(attackerId), blockingPlayerId: blockerController });
+    }
+    return result;
+  }, [isMultiplayer, blockerAssignments, objects, localPlayerId, focusedOpponent]);
+
+  const prevCountRef = useRef(0);
+
+  useEffect(() => {
+    if (offScreenBlockedAttackers.length === 0) {
+      setIndicators([]);
+      prevCountRef.current = 0;
+      return;
+    }
+    stableCountRef.current = 0;
+    let rafId: number;
+
+    function poll() {
+      const next: HudIndicator[] = [];
+
+      for (const { attackerId, blockingPlayerId } of offScreenBlockedAttackers) {
+        const hudEl = document.querySelector(`[data-player-hud="${blockingPlayerId}"]`);
+        const attackerEl = document.querySelector(`[data-object-id="${attackerId}"]`);
+        if (!hudEl || !attackerEl) continue;
+        const hudRect = hudEl.getBoundingClientRect();
+        const attackerRect = attackerEl.getBoundingClientRect();
+        next.push({
+          key: `hud:${blockingPlayerId}->${attackerId}`,
+          from: { x: hudRect.left + hudRect.width / 2, y: hudRect.top + hudRect.height / 2 },
+          to: { x: attackerRect.left + attackerRect.width / 2, y: attackerRect.top + attackerRect.height / 2 },
+        });
+      }
+
+      const changed = next.length !== prevCountRef.current;
+      prevCountRef.current = next.length;
+      stableCountRef.current = changed ? 0 : stableCountRef.current + 1;
+      setIndicators(next);
+
+      if (stableCountRef.current < 10) {
+        rafId = requestAnimationFrame(poll);
+      }
+    }
+
+    rafId = requestAnimationFrame(poll);
+    return () => cancelAnimationFrame(rafId);
+  }, [offScreenBlockedAttackers]);
+
+  return indicators;
+}
+
 function useMergedPairs(
   uiAssignments: Map<ObjectId, ObjectId>,
   engineAssignments: Record<string, ObjectId[]> | null,
@@ -88,39 +237,3 @@ function useMergedPairs(
     return merged;
   }, [uiAssignments, engineAssignments]);
 }
-
-/** Animated dot that pulses from blocker to attacker. */
-function PulseDot({
-  from,
-  to,
-  length,
-}: {
-  from: { x: number; y: number };
-  to: { x: number; y: number };
-  length: number;
-}) {
-  const circleRef = useRef<SVGCircleElement>(null);
-
-  useEffect(() => {
-    const duration = Math.max(800, Math.min(length * 3, 2000));
-    let start: number | null = null;
-    let rafId: number;
-
-    function tick(now: number) {
-      if (start === null) start = now;
-      const elapsed = now - start;
-      const t = (elapsed % duration) / duration;
-      const cx = from.x + (to.x - from.x) * t;
-      const cy = from.y + (to.y - from.y) * t;
-      circleRef.current?.setAttribute("cx", String(cx));
-      circleRef.current?.setAttribute("cy", String(cy));
-      rafId = requestAnimationFrame(tick);
-    }
-
-    rafId = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(rafId);
-  }, [length, from.x, from.y, to.x, to.y]);
-
-  return <circle ref={circleRef} cx={from.x} cy={from.y} r={3} fill="rgba(249,115,22,0.9)" />;
-}
-

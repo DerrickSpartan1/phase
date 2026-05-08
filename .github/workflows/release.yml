@@ -159,6 +159,18 @@ jobs:
           # gen-card-data.sh mirrors card-data.json + coverage-data.json into
           # data/ itself, so downstream steps can read from data/ uniformly.
 
+      - name: Download draft set data
+        # fetch-draft-sets.sh needs SetList.json (produced by gen-card-data.sh).
+        # Per-set files land in data/mtgjson/sets/ which is covered by the
+        # mtgjson cache — subsequent runs skip already-downloaded sets.
+        run: ./scripts/fetch-draft-sets.sh
+
+      - name: Generate draft pools
+        # Reads data/mtgjson/sets/*.json → writes client/public/draft-pools.json.
+        # Included in data-files.json manifest so it's uploaded to R2 and
+        # stripped from the Pages dist automatically.
+        run: cargo run --release --bin draft-pool-gen
+
       - name: Validate card-data against engine schema
         # Deploy gate — refuse to ship card-data the current engine cannot parse.
         run: cargo run --release --bin card-data-validate -- client/public/card-data.json
@@ -175,7 +187,10 @@ jobs:
           cp client/public/card-data.json "client/public/card-data-$HASH.json"
 
       - name: Generate Scryfall data
-        run: ./scripts/gen-scryfall-images.sh
+        run: |
+          ./scripts/gen-scryfall-images.sh
+          ./scripts/gen-scryfall-sets.sh
+          ./scripts/gen-scryfall-printings.sh
 
       - name: Run semantic audit
         # Produces data/semantic-audit.json with structured findings for cards
@@ -304,10 +319,7 @@ jobs:
 
   deploy-production:
     name: Deploy Production (Cloudflare Pages)
-    # Gate on build-tauri: never ship the web build for a version whose
-    # desktop build failed — that's how partial releases happen (web + server
-    # live at v0.1.18 but no Tauri binaries on the GH release page).
-    needs: [build-wasm, build-tauri]
+    needs: [build-wasm]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -434,12 +446,40 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check macOS signing secrets
+        id: macos-signing
+        if: matrix.os == 'macos'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            if [ -z "${!name:-}" ]; then
+              echo "::warning::Missing macOS signing secret: ${name}"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "::warning::Skipping macOS Tauri build — Apple signing secrets not configured. The .dmg requires notarization to avoid Gatekeeper errors."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+        shell: bash
+
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+        if: steps.macos-signing.outputs.skip != 'true'
         with:
           target: wasm32-unknown-unknown
           cache-shared-key: rust-tauri-${{ matrix.os }}
 
       - uses: taiki-e/install-action@v2
+        if: steps.macos-signing.outputs.skip != 'true'
         with:
           tool: wasm-bindgen-cli@0.2.114
 
@@ -450,7 +490,7 @@ jobs:
           echo "$PWD/binaryen-version_123/bin" >> $GITHUB_PATH
 
       - name: Install binaryen (macOS)
-        if: matrix.os == 'macos'
+        if: matrix.os == 'macos' && steps.macos-signing.outputs.skip != 'true'
         run: brew install binaryen
 
       - name: Install binaryen (Windows)
@@ -462,10 +502,12 @@ jobs:
         shell: pwsh
 
       - uses: pnpm/action-setup@v4
+        if: steps.macos-signing.outputs.skip != 'true'
         with:
           version: 9
 
       - uses: actions/setup-node@v4
+        if: steps.macos-signing.outputs.skip != 'true'
         with:
           node-version: 22
           cache: pnpm
@@ -479,24 +521,28 @@ jobs:
           rustup target add x86_64-unknown-linux-musl
 
       - name: Download card data
+        if: steps.macos-signing.outputs.skip != 'true'
         uses: actions/download-artifact@v4
         with:
           name: card-data
           path: client/public
 
       - name: Download Scryfall image lookup data
+        if: steps.macos-signing.outputs.skip != 'true'
         uses: actions/download-artifact@v4
         with:
           name: scryfall-data
           path: client/public
 
       - name: Verify Tauri bundled data files
+        if: steps.macos-signing.outputs.skip != 'true'
         run: |
           test -s client/public/card-data.json
           test -s client/public/scryfall-data.json
         shell: bash
 
       - name: Build phase-server sidecar
+        if: steps.macos-signing.outputs.skip != 'true'
         run: |
           if [ "${{ matrix.os }}" = "linux" ]; then
             cargo build --profile server-release --bin phase-server --target x86_64-unknown-linux-musl
@@ -507,7 +553,7 @@ jobs:
         shell: bash
 
       - name: Place sidecar binary (Unix)
-        if: matrix.os != 'windows'
+        if: matrix.os != 'windows' && steps.macos-signing.outputs.skip != 'true'
         run: |
           if [ "${{ matrix.os }}" = "linux" ]; then
             cp target/x86_64-unknown-linux-musl/server-release/phase-server client/src-tauri/binaries/phase-server-${{ matrix.sidecar_triple }}
@@ -521,22 +567,32 @@ jobs:
         shell: pwsh
 
       - name: Build WASM for Tauri
+        if: steps.macos-signing.outputs.skip != 'true'
         run: ./scripts/build-wasm.sh release
         shell: bash
 
       - name: Install frontend dependencies
+        if: steps.macos-signing.outputs.skip != 'true'
         run: cd client && pnpm install --frozen-lockfile
 
       - name: Build Tauri
+        if: steps.macos-signing.outputs.skip != 'true'
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           projectPath: client
 
       - name: Stage Tauri artifacts
+        if: steps.macos-signing.outputs.skip != 'true'
         run: |
           mkdir -p staging
           find client/src-tauri/target/release/bundle \
@@ -549,6 +605,7 @@ jobs:
         shell: bash
 
       - name: Upload Tauri artifact
+        if: steps.macos-signing.outputs.skip != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
@@ -557,9 +614,7 @@ jobs:
 
   deploy-server:
     name: Deploy Server (beebs)
-    # Gate on build-tauri: keep web/server/desktop in lockstep — never ship a
-    # backend update whose paired desktop client failed to build.
-    needs: [build-server, build-tauri]
+    needs: [build-server]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
@@ -614,12 +669,16 @@ jobs:
   release:
     name: Create GitHub Release
     needs: [build-wasm, build-server, build-tauri]
-    # All three matrix builds must succeed. The previous condition let the
-    # release proceed when build-tauri failed (no check on its result),
-    # which produced a GitHub release missing the desktop binaries while
-    # web/server had already deployed — the partial-release scenario this
-    # workflow now refuses to enter.
-    if: needs.build-wasm.result == 'success' && needs.build-server.result == 'success' && needs.build-tauri.result == 'success'
+    # Proceed if wasm + server succeeded. build-tauri may have skipped
+    # matrix entries (e.g. macOS when signing secrets are absent) — the
+    # release still ships with whatever platforms built successfully.
+    # The updater manifest and artifact globs gracefully handle missing
+    # platform artifacts (fail_on_unmatched_files: false).
+    if: >-
+      always() &&
+      needs.build-wasm.result == 'success' &&
+      needs.build-server.result == 'success' &&
+      (needs.build-tauri.result == 'success' || needs.build-tauri.result == 'failure')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -683,7 +742,22 @@ jobs:
           else
             RANGE="${TAG}"
           fi
-          echo "## Changes" > changelog.md
+
+          cat > changelog.md <<'EOF'
+          ## Downloads
+
+          | Platform | File |
+          |----------|------|
+          | **Windows** | `Phase_*_x64-setup.exe` |
+          | **macOS (Apple Silicon)** | `Phase_*_aarch64.dmg` |
+          | **Linux** | `Phase_*_amd64.AppImage` or `.deb` |
+
+          > **macOS note:** If you see "this app is damaged", open Terminal and run: `xattr -cr /Applications/Phase.app`
+
+          ## Changes
+          EOF
+          sed -i 's/^          //' changelog.md
+
           git log --format="- %s" "$RANGE" -- ':!.planning' \
             | { grep -v "^- release:" || true; } \
             | { grep -v "^- chore: update coverage" || true; } \

@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::collections::HashMap;
 
 use crate::game::filter;
 use crate::game::speed::has_max_speed;
@@ -8,7 +9,9 @@ use crate::types::ability::{
     TargetFilter, TargetRef, UnlessCost,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{DayNight, GameState, PendingContinuation, WaitingFor};
+use crate::types::game_state::{
+    AutoMayChoice, DayNight, GameState, MayTriggerAutoChoiceKey, PendingContinuation, WaitingFor,
+};
 use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::mana::ManaCost;
 use crate::types::player::PlayerId;
@@ -16,7 +19,7 @@ use crate::types::player::PlayerId;
 pub mod adapt;
 pub mod add_restriction;
 pub mod add_target_replacement;
-pub mod additional_combat;
+pub mod additional_phase;
 pub mod amass;
 pub mod animate;
 pub mod attach;
@@ -33,6 +36,7 @@ pub mod choose_and_sacrifice_rest;
 pub mod choose_card;
 pub mod choose_damage_source;
 pub mod choose_from_zone;
+pub mod choose_one_of;
 pub mod clash;
 pub mod cleanup;
 pub mod collect_evidence;
@@ -52,6 +56,7 @@ pub mod discard;
 pub mod discover;
 pub mod double;
 pub mod draw;
+pub mod drawn_this_turn_choice;
 pub mod effect;
 pub mod energy;
 pub mod exchange_control;
@@ -104,6 +109,7 @@ pub mod search_library;
 pub mod seek;
 pub mod set_class_level;
 pub mod shuffle;
+pub mod skip_next_step;
 pub mod skip_next_turn;
 pub mod solve_case;
 pub mod speed_effects;
@@ -118,6 +124,36 @@ pub mod tribute;
 pub mod venture;
 pub mod vote;
 pub mod win_lose;
+
+/// Resolve object targets for effect handlers that operate directly on the
+/// resolving ability's target slots.
+///
+/// `ParentTarget` preserves the historical "all inherited object targets"
+/// behavior for broad anaphors. `ParentTargetSlot` is the precise CR 608.2c
+/// form for later instructions that refer to a specific earlier target slot
+/// after intervening actions may have changed object zones.
+pub(crate) fn effect_object_targets(
+    target_filter: &TargetFilter,
+    fallback_targets: &[TargetRef],
+) -> Vec<ObjectId> {
+    match target_filter {
+        TargetFilter::ParentTargetSlot { index } => fallback_targets
+            .get(*index)
+            .and_then(|target| match target {
+                TargetRef::Object(id) => Some(*id),
+                TargetRef::Player(_) => None,
+            })
+            .into_iter()
+            .collect(),
+        _ => fallback_targets
+            .iter()
+            .filter_map(|target| match target {
+                TargetRef::Object(obj_id) => Some(*obj_id),
+                TargetRef::Player(_) => None,
+            })
+            .collect(),
+    }
+}
 
 fn matches_player_scope(
     state: &GameState,
@@ -136,6 +172,17 @@ fn matches_player_scope(
                     PlayerFilter::Controller => p.id == controller,
                     PlayerFilter::All => true,
                     PlayerFilter::Opponent => p.id != controller,
+                    PlayerFilter::DefendingPlayer => {
+                        crate::game::targeting::resolve_event_context_target_for_event_or_state(
+                            state,
+                            &TargetFilter::DefendingPlayer,
+                            source_id,
+                            state.current_trigger_event.as_ref(),
+                        )
+                        .is_some_and(
+                            |target| matches!(target, TargetRef::Player(pid) if pid == p.id),
+                        )
+                    }
                     PlayerFilter::OpponentLostLife => {
                         p.id != controller && p.life_lost_this_turn > 0
                     }
@@ -220,6 +267,9 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
     // chain of resumed iterations until the loop completes.
     if !waits_for_resolution_choice(&state.waiting_for) {
         drain_pending_repeat_iteration(state, events);
+    }
+    if !waits_for_resolution_choice(&state.waiting_for) {
+        choose_one_of::resume_pending(state, events);
     }
 }
 
@@ -367,14 +417,40 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::PayAmountChoice { .. }
             | WaitingFor::RetargetChoice { .. }
             | WaitingFor::ChooseFromZoneChoice { .. }
+            | WaitingFor::ChooseOneOfBranch { .. }
             | WaitingFor::ChooseManaColor { .. }
             | WaitingFor::ManifestDreadChoice { .. }
             | WaitingFor::DiscardChoice { .. }
             | WaitingFor::EffectZoneChoice { .. }
+            | WaitingFor::DrawnThisTurnTopdeckChoice { .. }
             | WaitingFor::CategoryChoice { .. }
             | WaitingFor::LearnChoice { .. }
             | WaitingFor::PopulateChoice { .. }
     )
+}
+
+pub(super) fn resolve_optional_effect_decision(
+    state: &mut GameState,
+    mut ability: ResolvedAbility,
+    choice: AutoMayChoice,
+    events: &mut Vec<GameEvent>,
+    depth: u32,
+) -> Result<(), EffectError> {
+    ability.optional = false;
+    match choice {
+        AutoMayChoice::Accept => {
+            ability.context.optional_effect_performed = true;
+            resolve_ability_chain(state, &ability, events, depth)?;
+        }
+        AutoMayChoice::Decline => {
+            if let Some(ref sub) = ability.sub_ability {
+                let mut sub_resolved = sub.as_ref().clone();
+                sub_resolved.context = ability.context.clone();
+                resolve_ability_chain(state, &sub_resolved, events, depth)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn is_player_scope_local_continuation(parent: &Effect, child: &Effect) -> bool {
@@ -587,7 +663,7 @@ pub fn resolve_effect(
         Effect::LoseAllPlayerCounters { .. } => {
             player_counter::resolve_lose_all(state, ability, events)
         }
-        Effect::AdditionalCombatPhase { .. } => additional_combat::resolve(state, ability, events),
+        Effect::AdditionalPhase { .. } => additional_phase::resolve(state, ability, events),
         Effect::ExileFromTopUntil { .. } => exile_from_top_until::resolve(state, ability, events),
         Effect::RevealUntil { .. } => reveal_until::resolve(state, ability, events),
         Effect::Discover { .. } => discover::resolve(state, ability, events),
@@ -613,6 +689,9 @@ pub fn resolve_effect(
             Ok(())
         }
         Effect::PutAtLibraryPosition { .. } => put_on_top::resolve(state, ability, events),
+        Effect::ChooseDrawnThisTurnPayOrTopdeck { .. } => {
+            drawn_this_turn_choice::resolve(state, ability, events)
+        }
         Effect::PutOnTopOrBottom { .. } => put_on_top_or_bottom::resolve(state, ability, events),
         Effect::GiftDelivery { .. } => gift_delivery::resolve(state, ability, events),
         Effect::ChangeTargets { .. } => change_targets::resolve(state, ability, events),
@@ -624,6 +703,7 @@ pub fn resolve_effect(
         Effect::Manifest { .. } => manifest::resolve(state, ability, events),
         Effect::ManifestDread => manifest_dread::resolve(state, ability, events),
         Effect::ExtraTurn { .. } => extra_turn::resolve(state, ability, events),
+        Effect::SkipNextStep { .. } => skip_next_step::resolve(state, ability, events),
         Effect::SkipNextTurn { .. } => skip_next_turn::resolve(state, ability, events),
         Effect::Double { .. } => double::resolve(state, ability, events),
         Effect::RuntimeHandled { .. } => Ok(()), // Handled by dedicated engine path
@@ -647,18 +727,7 @@ pub fn resolve_effect(
         }
         Effect::TakeTheInitiative => venture::resolve_take_initiative(state, ability, events),
         Effect::Conjure { .. } => conjure::resolve(state, ability, events),
-        Effect::ChooseOneOf { .. } => {
-            // CR 700.2: Runtime resolver for `ChooseOneOf` is not yet wired —
-            // full support requires a new `WaitingFor::ChooseOneOfBranch`
-            // state + effect resolver + UI integration. The typed shape is
-            // emitted by the parser (Highway Robbery and analogous binary
-            // "you may A or B" imperatives) so it is preserved in card data
-            // for future runtime activation. Treat as a no-op at resolution
-            // for now — the outer `optional: true` on the ability means the
-            // controller can simply decline.
-            eprintln!("Warning: ChooseOneOf resolver not yet implemented — treating as no-op");
-            Ok(())
-        }
+        Effect::ChooseOneOf { .. } => choose_one_of::resolve(state, ability, events),
         Effect::Unimplemented { name, .. } => {
             // Log warning and return Ok (no-op) for unimplemented effects
             eprintln!("Warning: Unimplemented effect: {}", name);
@@ -762,7 +831,7 @@ fn quantity_expr_references_tracked_set(qty: &QuantityExpr) -> bool {
         QuantityExpr::Ref { qty } => matches!(qty, QuantityRef::TrackedSetSize),
         QuantityExpr::Offset { inner, .. }
         | QuantityExpr::Multiply { inner, .. }
-        | QuantityExpr::HalfRounded { inner, .. } => quantity_expr_references_tracked_set(inner),
+        | QuantityExpr::DivideRounded { inner, .. } => quantity_expr_references_tracked_set(inner),
         QuantityExpr::Sum { exprs } => exprs.iter().any(quantity_expr_references_tracked_set),
         QuantityExpr::UpTo { max } => quantity_expr_references_tracked_set(max),
     }
@@ -868,6 +937,7 @@ pub(crate) fn controller_for_relative_filter(
     target_filter: &TargetFilter,
 ) -> PlayerId {
     if filter_uses_relative_controller_you(target_filter)
+        && ability.scoped_player.is_none()
         && ability
             .targets
             .iter()
@@ -898,6 +968,10 @@ pub(crate) fn resolve_player_for_context_ref(
     ability: &ResolvedAbility,
     target_filter: &TargetFilter,
 ) -> PlayerId {
+    if matches!(target_filter, TargetFilter::ScopedPlayer) {
+        return ability.scoped_player.unwrap_or(ability.controller);
+    }
+
     // CR 115.1: For non-context-ref filters (e.g. `TargetFilter::Player` from
     // "target player draws"), the drawing player was chosen at announcement
     // and lives in `ability.targets`. Context-ref filters (Controller,
@@ -926,6 +1000,9 @@ pub(crate) fn resolve_player_for_context_ref(
                 .map(|obj| obj.controller)
                 .unwrap_or(ability.controller),
         };
+    }
+    if matches!(target_filter, TargetFilter::Controller) {
+        return ability.controller;
     }
     // CR 115.1d: `ParentTargetController` resolves the controller of the parent
     // ability's targeted object. In a spell-resolution chain (no
@@ -1040,8 +1117,9 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
         // (e.g., TriggeringPlayer) rather than a fresh target prompt.
         | Effect::SetLifeTotal { target, .. }
         | Effect::SkipNextTurn { target, .. }
+        | Effect::SkipNextStep { target, .. }
         | Effect::ControlNextTurn { target, .. }
-        | Effect::AdditionalCombatPhase { target, .. }
+        | Effect::AdditionalPhase { target, .. }
         | Effect::GiveControl { target, .. }
         | Effect::Detain { target, .. }
         | Effect::TargetOnly { target } => target,
@@ -1123,6 +1201,21 @@ fn previous_effect_amount_from_events(effect: &Effect, events: &[GameEvent]) -> 
     (amount > 0).then_some(amount)
 }
 
+fn previous_effect_counts_by_player_from_events(
+    effect: &Effect,
+    events: &[GameEvent],
+) -> HashMap<PlayerId, i32> {
+    let mut counts = HashMap::new();
+    if matches!(effect, Effect::Discard { .. } | Effect::DiscardCard { .. }) {
+        for event in events {
+            if let GameEvent::Discarded { player_id, .. } = event {
+                *counts.entry(*player_id).or_insert(0) += 1;
+            }
+        }
+    }
+    counts
+}
+
 /// Resolve an ability and follow its sub_ability chain using typed nested structs.
 /// No SVar lookup, no parse_ability(). The depth is bounded by the data structure.
 pub fn resolve_ability_chain(
@@ -1142,6 +1235,7 @@ pub fn resolve_ability_chain(
         state.last_revealed_ids.clear();
         state.last_zone_changed_ids.clear();
         state.last_effect_amount = None;
+        state.last_effect_counts_by_player.clear();
         state.exiled_from_hand_this_resolution = 0;
         // CR 603.7: Chain-local tracked-set identity — resets per top-level
         // ability resolution so compound zone changes within one chain
@@ -1154,8 +1248,8 @@ pub fn resolve_ability_chain(
         state.player_actions_this_way.clear();
     }
 
-    // BeginGame abilities are handled at game-start setup, not during stack resolution
-    if matches!(ability.kind, AbilityKind::BeginGame) {
+    // BeginGame abilities are handled by mulligan setup, not normal stack resolution.
+    if matches!(ability.kind, AbilityKind::BeginGame) && !state.resolving_begin_game_abilities {
         return Ok(());
     }
 
@@ -1233,11 +1327,13 @@ pub fn resolve_ability_chain(
     let ability = ability.as_ref();
 
     // CR 608.2: player_scope iteration — when an ability has player_scope set,
-    // execute the scoped instruction once per matching player, temporarily
-    // overriding ability.controller for each iteration so effects like Discard,
-    // Draw, Mill target the correct player. The unscoped tail then resumes
-    // once after the scoped loop, matching the printed instruction order.
+    // execute the scoped instruction once per matching player. Runtime keeps
+    // the scoped player as the acting `controller` for legacy effect handlers
+    // while preserving `original_controller` so "you" quantities still read
+    // the printed ability controller. The unscoped tail then resumes once
+    // after the scoped loop, matching the printed instruction order.
     if let Some(ref scope) = ability.player_scope {
+        let scoped_events_before = events.len();
         let controller = ability.controller;
         let matching_players: Vec<PlayerId> = crate::game::players::apnap_order(state)
             .into_iter()
@@ -1249,7 +1345,9 @@ pub fn resolve_ability_chain(
         let mut paused = false;
         for (i, pid) in matching_players.iter().enumerate() {
             let mut scoped = scoped_template.clone();
+            scoped.set_original_controller_recursive(controller);
             scoped.controller = *pid;
+            scoped.set_scoped_player_recursive(*pid);
             resolve_ability_chain(state, &scoped, events, depth + 1)?;
 
             // CR 608.2e: Break if inner effect entered a player-choice state —
@@ -1262,7 +1360,9 @@ pub fn resolve_ability_chain(
                 // unscoped tail runs once after the final scoped iteration.
                 for &remaining_pid in remaining.iter().rev() {
                     let mut remaining_scoped = scoped_template.clone();
+                    remaining_scoped.set_original_controller_recursive(controller);
                     remaining_scoped.controller = remaining_pid;
+                    remaining_scoped.set_scoped_player_recursive(remaining_pid);
                     if let Some(prev) = tail {
                         super::ability_utils::append_to_sub_chain(&mut remaining_scoped, *prev);
                     }
@@ -1275,6 +1375,18 @@ pub fn resolve_ability_chain(
                 break;
             }
         }
+        let scoped_events = &events[scoped_events_before..];
+        let counts_by_player =
+            previous_effect_counts_by_player_from_events(&scoped_template.effect, scoped_events);
+        if !counts_by_player.is_empty() {
+            state.last_effect_count = counts_by_player.values().copied().max();
+            state.last_effect_amount = state.last_effect_count;
+            state.last_effect_counts_by_player = counts_by_player;
+        } else if let Some(amount) =
+            previous_effect_amount_from_events(&scoped_template.effect, scoped_events)
+        {
+            state.last_effect_amount = Some(amount);
+        }
         if !paused {
             if let Some(after_scope) = after_scope {
                 resolve_ability_chain(state, &after_scope, events, depth + 1)?;
@@ -1284,7 +1396,7 @@ pub fn resolve_ability_chain(
     }
 
     // CR 608.2c: Evaluate top-level condition before emitting any optional or unless-pay
-    // choice. This must run after player_scope rebinding so scoped abilities test
+    // choice. This must run after player_scope binding so scoped abilities test
     // conditions relative to the scoped player.
     if let Some(ref condition) = ability.condition {
         if !evaluate_condition(condition, state, ability) {
@@ -1327,23 +1439,43 @@ pub fn resolve_ability_chain(
     if ability.optional {
         let description = ability.description.clone();
         let prompt_player = optional_prompt_player(state, ability);
+        let may_trigger_key = ability
+            .may_trigger_origin
+            .map(|origin| MayTriggerAutoChoiceKey {
+                player: prompt_player,
+                source_id: ability.source_id,
+                origin,
+            });
+        if let Some(key) = may_trigger_key {
+            if let Some(choice) = state.may_trigger_auto_choice(&key) {
+                resolve_optional_effect_decision(
+                    state,
+                    ability.clone(),
+                    choice,
+                    events,
+                    depth + 1,
+                )?;
+                return Ok(());
+            }
+        }
         state.pending_optional_effect = Some(Box::new(ability.clone()));
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: prompt_player,
             source_id: ability.source_id,
             description,
+            may_trigger_key,
         };
         return Ok(());
     }
 
     // CR 118.12: "Effect unless [player] pays {cost}" — tax trigger modifier.
     if let Some(ref unless_pay) = ability.unless_pay {
-        if let Some(payer) = resolve_unless_payer(state, &unless_pay.payer) {
+        if let Some(payer) = resolve_unless_payer(state, ability, &unless_pay.payer) {
             // CR 702.21a: Non-mana costs (PayLife, DiscardCard, Sacrifice) bypass
             // mana resolution — pass through to UnlessPayment directly.
             match &unless_pay.cost {
                 UnlessCost::PayLife { .. }
-                | UnlessCost::DiscardCard
+                | UnlessCost::DiscardCard { .. }
                 | UnlessCost::Sacrifice { .. }
                 | UnlessCost::ReturnToHand { .. } => {
                     let mut pending = ability.clone();
@@ -1372,7 +1504,7 @@ pub fn resolve_ability_chain(
                 }
                 // Non-mana costs handled above.
                 UnlessCost::PayLife { .. }
-                | UnlessCost::DiscardCard
+                | UnlessCost::DiscardCard { .. }
                 | UnlessCost::Sacrifice { .. }
                 | UnlessCost::ReturnToHand { .. } => unreachable!(),
             };
@@ -1813,6 +1945,7 @@ pub fn resolve_ability_chain(
                         modal: None,
                         mode_abilities: vec![],
                         description: trigger_description.clone(),
+                        may_trigger_origin: None,
                     });
                     state.waiting_for = WaitingFor::TriggerTargetSelection {
                         player: ability.controller,
@@ -1945,20 +2078,9 @@ fn evaluate_condition(
             kicker_cost,
             min_count,
         } => {
-            if kicker_cost.is_some() && variant.is_none() {
-                false
-            } else {
-                match variant {
-                    Some(kicker) => ability.context.kickers_paid.contains(kicker),
-                    None => {
-                        if *min_count <= 1 {
-                            ability.context.additional_cost_paid
-                        } else {
-                            ability.context.kickers_paid.len() >= *min_count as usize
-                        }
-                    }
-                }
-            }
+            ability
+                .context
+                .additional_cost_paid_matches(*variant, kicker_cost.as_ref(), *min_count)
         }
         AbilityCondition::IfYouDo | AbilityCondition::IfAPlayerDoes => {
             ability.context.optional_effect_performed && !state.cost_payment_failed_flag
@@ -2171,8 +2293,11 @@ fn evaluate_condition(
                     && crate::game::filter::matches_target_filter(state, o.id, filter, &ctx)
             })
         }
-        // CR 608.2c: "If it's your turn" — check active player against controller.
-        AbilityCondition::IsYourTurn => state.active_player == ability.controller,
+        // CR 608.2c: "If it's your turn" — check active player against the
+        // scoped player during each-player iteration, otherwise the controller.
+        AbilityCondition::IsYourTurn => {
+            state.active_player == ability.scoped_player.unwrap_or(ability.controller)
+        }
         // CR 500.8 + CR 506.1 + CR 608.2c: "if it's the first combat phase
         // of the turn" gates follow-up effects such as additional combats.
         AbilityCondition::FirstCombatPhaseOfTurn => state.combat_phases_started_this_turn == 1,
@@ -2186,6 +2311,17 @@ fn evaluate_condition(
                 .last_zone_changed_ids
                 .iter()
                 .any(|&id| crate::game::filter::matches_target_filter(state, id, filter, &ctx))
+        }
+        AbilityCondition::CostPaidObjectMatchesFilter { filter } => {
+            ability.cost_paid_object.as_ref().is_some_and(|snapshot| {
+                crate::game::filter::matches_target_filter_on_lki_snapshot(
+                    state,
+                    snapshot.object_id,
+                    &snapshot.lki,
+                    filter,
+                    &crate::game::filter::FilterContext::from_ability(ability),
+                )
+            })
         }
         // CR 611.2b: "if this creature/permanent is tapped" — check source object.
         // For the untapped sense, wrap with `Not`.
@@ -2234,6 +2370,10 @@ fn evaluate_condition(
                 false
             }
         }
+        AbilityCondition::SourceLacksKeyword { keyword } => state
+            .objects
+            .get(&ability.source_id)
+            .is_some_and(|obj| !obj.has_keyword(keyword)),
     }
 }
 
@@ -2242,6 +2382,7 @@ fn evaluate_condition(
 /// (e.g., the opponent who cast a spell for Esper Sentinel).
 fn resolve_unless_payer(
     state: &GameState,
+    ability: &ResolvedAbility,
     payer: &TargetFilter,
 ) -> Option<crate::types::player::PlayerId> {
     match payer {
@@ -2256,6 +2397,9 @@ fn resolve_unless_payer(
                 })
         }
         TargetFilter::Controller => Some(state.active_player),
+        TargetFilter::ParentTargetController => {
+            crate::game::targeting::resolve_effect_player_ref(state, ability, payer)
+        }
         _ => None,
     }
 }
@@ -2388,12 +2532,15 @@ mod tests {
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
     use crate::types::format::FormatConfig;
-    use crate::types::game_state::{ExileLink, ExileLinkKind, LinkedExileSnapshot};
+    use crate::types::game_state::{
+        AutoMayChoice, ExileLink, ExileLinkKind, LinkedExileSnapshot, MayTriggerAutoChoiceKey,
+        MayTriggerOrigin,
+    };
     use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
     use crate::types::mana::ManaColor;
     use crate::types::mana::ManaCost;
     use crate::types::phase::Phase;
-    use crate::types::player::PlayerId;
+    use crate::types::player::{PlayerCounterKind, PlayerId};
     use crate::types::zones::Zone;
 
     #[test]
@@ -2435,6 +2582,137 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    fn optional_gain_life(
+        source_id: ObjectId,
+        controller: PlayerId,
+        amount: i32,
+    ) -> ResolvedAbility {
+        let mut ability = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: amount },
+                player: GainLifePlayer::Controller,
+            },
+            vec![],
+            source_id,
+            controller,
+        );
+        ability.optional = true;
+        ability
+    }
+
+    #[test]
+    fn optional_trigger_prompt_includes_may_trigger_key() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = ObjectId(100);
+        let mut ability = optional_gain_life(source_id, PlayerId(0), 1);
+        ability.set_may_trigger_origin_recursive(MayTriggerOrigin::Printed { trigger_index: 2 });
+
+        resolve_ability_chain(&mut state, &ability, &mut Vec::new(), 0).unwrap();
+
+        match state.waiting_for {
+            WaitingFor::OptionalEffectChoice {
+                may_trigger_key: Some(key),
+                ..
+            } => {
+                assert_eq!(key.player, PlayerId(0));
+                assert_eq!(key.source_id, source_id);
+                assert_eq!(key.origin, MayTriggerOrigin::Printed { trigger_index: 2 });
+            }
+            other => panic!("expected keyed OptionalEffectChoice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn saved_accept_for_may_trigger_resolves_without_prompt() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = ObjectId(100);
+        let origin = MayTriggerOrigin::Printed { trigger_index: 0 };
+        let key = MayTriggerAutoChoiceKey {
+            player: PlayerId(0),
+            source_id,
+            origin,
+        };
+        state.set_may_trigger_auto_choice(key, AutoMayChoice::Accept);
+        let mut ability = optional_gain_life(source_id, PlayerId(0), 3);
+        ability.set_may_trigger_origin_recursive(origin);
+
+        resolve_ability_chain(&mut state, &ability, &mut Vec::new(), 0).unwrap();
+
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert_eq!(state.players[0].life, 23);
+    }
+
+    #[test]
+    fn saved_decline_for_may_trigger_resolves_without_prompt() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = ObjectId(100);
+        let origin = MayTriggerOrigin::Printed { trigger_index: 0 };
+        let key = MayTriggerAutoChoiceKey {
+            player: PlayerId(0),
+            source_id,
+            origin,
+        };
+        state.set_may_trigger_auto_choice(key, AutoMayChoice::Decline);
+        let mut ability = optional_gain_life(source_id, PlayerId(0), 3);
+        ability.set_may_trigger_origin_recursive(origin);
+
+        resolve_ability_chain(&mut state, &ability, &mut Vec::new(), 0).unwrap();
+
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert_eq!(state.players[0].life, 20);
+    }
+
+    #[test]
+    fn saved_may_trigger_choice_is_scoped_to_prompt_player() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = ObjectId(100);
+        let origin = MayTriggerOrigin::Printed { trigger_index: 0 };
+        state.set_may_trigger_auto_choice(
+            MayTriggerAutoChoiceKey {
+                player: PlayerId(0),
+                source_id,
+                origin,
+            },
+            AutoMayChoice::Accept,
+        );
+        let mut ability = optional_gain_life(source_id, PlayerId(1), 3);
+        ability.set_may_trigger_origin_recursive(origin);
+
+        resolve_ability_chain(&mut state, &ability, &mut Vec::new(), 0).unwrap();
+
+        match state.waiting_for {
+            WaitingFor::OptionalEffectChoice {
+                may_trigger_key: Some(key),
+                ..
+            } => assert_eq!(key.player, PlayerId(1)),
+            other => panic!("expected prompt for player 1, got {other:?}"),
+        }
+        assert_eq!(state.players[1].life, 20);
+    }
+
+    #[test]
+    fn may_trigger_origin_stamps_optional_sub_abilities() {
+        let source_id = ObjectId(100);
+        let origin = MayTriggerOrigin::Printed { trigger_index: 4 };
+        let mut root = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        root.sub_ability = Some(Box::new(optional_gain_life(source_id, PlayerId(0), 1)));
+        root.set_may_trigger_origin_recursive(origin);
+
+        assert_eq!(root.may_trigger_origin, Some(origin));
+        assert_eq!(
+            root.sub_ability.as_ref().unwrap().may_trigger_origin,
+            Some(origin)
+        );
+    }
+
     #[test]
     fn resolve_unless_payer_uses_player_action_event_player() {
         let mut state = GameState::new_two_player(42);
@@ -2442,8 +2720,50 @@ mod tests {
             player_id: PlayerId(1),
             action: crate::types::events::PlayerActionKind::SearchedLibrary,
         });
+        let ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
         assert_eq!(
-            resolve_unless_payer(&state, &TargetFilter::TriggeringPlayer),
+            resolve_unless_payer(&state, &ability, &TargetFilter::TriggeringPlayer),
+            Some(PlayerId(1))
+        );
+    }
+
+    #[test]
+    fn resolve_unless_payer_uses_parent_target_controller() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let target = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Target".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: Some(TargetFilter::ParentTargetController),
+            },
+            vec![TargetRef::Object(target)],
+            source,
+            PlayerId(0),
+        );
+
+        assert_eq!(
+            resolve_unless_payer(&state, &ability, &TargetFilter::ParentTargetController),
             Some(PlayerId(1))
         );
     }
@@ -4280,6 +4600,47 @@ mod tests {
     }
 
     #[test]
+    fn player_scope_opponent_counter_then_unscoped_draw() {
+        let mut state = GameState::new_two_player(42);
+        create_object(
+            &mut state,
+            CardId(30),
+            PlayerId(0),
+            "P0 Draw".to_string(),
+            Zone::Library,
+        );
+
+        let mut ability = ResolvedAbility::new(
+            Effect::GivePlayerCounter {
+                counter_kind: PlayerCounterKind::Poison,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.player_scope = Some(PlayerFilter::Opponent);
+        ability.sub_ability = Some(Box::new(ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )));
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert_eq!(state.players[0].poison_counters, 0);
+        assert_eq!(state.players[1].poison_counters, 1);
+        assert_eq!(state.players[0].hand.len(), 1);
+        assert_eq!(state.players[1].hand.len(), 0);
+    }
+
+    #[test]
     fn resolve_ability_chain_player_scope_all_draw() {
         let mut state = GameState::new_two_player(42);
         // Add a card in each player's library so Draw has something to draw
@@ -4323,6 +4684,200 @@ mod tests {
             1,
             "opponent should have drawn a card"
         );
+    }
+
+    #[test]
+    fn player_scope_discard_then_dark_deal_draws_per_players_discard_count_minus_one() {
+        let mut state = GameState::new_two_player(42);
+        for i in 0..3 {
+            create_object(
+                &mut state,
+                CardId(10 + i),
+                PlayerId(0),
+                format!("P0 Hand {i}"),
+                Zone::Hand,
+            );
+            create_object(
+                &mut state,
+                CardId(20 + i),
+                PlayerId(0),
+                format!("P0 Library {i}"),
+                Zone::Library,
+            );
+            create_object(
+                &mut state,
+                CardId(30 + i),
+                PlayerId(1),
+                format!("P1 Library {i}"),
+                Zone::Library,
+            );
+        }
+        create_object(
+            &mut state,
+            CardId(40),
+            PlayerId(1),
+            "P1 Hand".to_string(),
+            Zone::Hand,
+        );
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Discard {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize {
+                        player: PlayerScope::ScopedPlayer,
+                    },
+                },
+                target: TargetFilter::Controller,
+                random: false,
+                unless_filter: None,
+                filter: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.player_scope = Some(PlayerFilter::All);
+        let mut draw = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Offset {
+                    inner: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount,
+                    }),
+                    offset: -1,
+                },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        draw.player_scope = Some(PlayerFilter::All);
+        ability.sub_ability = Some(Box::new(draw));
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert_eq!(state.players[0].hand.len(), 2);
+        assert_eq!(state.players[1].hand.len(), 0);
+        assert_eq!(state.players[0].graveyard.len(), 3);
+        assert_eq!(state.players[1].graveyard.len(), 1);
+    }
+
+    #[test]
+    fn player_scope_discard_then_windfall_draws_greatest_discard_count() {
+        let mut state = GameState::new_two_player(42);
+        for i in 0..3 {
+            create_object(
+                &mut state,
+                CardId(50 + i),
+                PlayerId(0),
+                format!("P0 Hand {i}"),
+                Zone::Hand,
+            );
+            create_object(
+                &mut state,
+                CardId(60 + i),
+                PlayerId(0),
+                format!("P0 Library {i}"),
+                Zone::Library,
+            );
+            create_object(
+                &mut state,
+                CardId(70 + i),
+                PlayerId(1),
+                format!("P1 Library {i}"),
+                Zone::Library,
+            );
+        }
+        create_object(
+            &mut state,
+            CardId(80),
+            PlayerId(1),
+            "P1 Hand".to_string(),
+            Zone::Hand,
+        );
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Discard {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize {
+                        player: PlayerScope::ScopedPlayer,
+                    },
+                },
+                target: TargetFilter::Controller,
+                random: false,
+                unless_filter: None,
+                filter: None,
+            },
+            vec![],
+            ObjectId(101),
+            PlayerId(0),
+        );
+        ability.player_scope = Some(PlayerFilter::All);
+        let mut draw = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::PreviousEffectAmount,
+                },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(101),
+            PlayerId(0),
+        );
+        draw.player_scope = Some(PlayerFilter::All);
+        ability.sub_ability = Some(Box::new(draw));
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert_eq!(state.players[0].hand.len(), 3);
+        assert_eq!(state.players[1].hand.len(), 3);
+        assert_eq!(state.players[0].graveyard.len(), 3);
+        assert_eq!(state.players[1].graveyard.len(), 1);
+    }
+
+    #[test]
+    fn player_scope_preserves_controller_for_you_quantities() {
+        let mut state = GameState::new_two_player(42);
+        state.players[0].life_gained_this_turn = 3;
+        state.players[1].life_gained_this_turn = 0;
+
+        for i in 0..5 {
+            create_object(
+                &mut state,
+                CardId(10 + i),
+                PlayerId(1),
+                format!("Opponent Card {i}"),
+                Zone::Library,
+            );
+        }
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Mill {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeGainedThisTurn {
+                        player: PlayerScope::Controller,
+                    },
+                },
+                target: TargetFilter::Controller,
+                destination: Zone::Graveyard,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.player_scope = Some(PlayerFilter::Opponent);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert_eq!(
+            state.players[1].graveyard.len(),
+            3,
+            "opponent should mill based on the original controller's life gained"
+        );
+        assert_eq!(state.players[1].library.len(), 2);
     }
 
     #[test]
@@ -5653,6 +6208,304 @@ mod tests {
                 &ability
             ),
             "NthResolutionThisTurn must evaluate false when ability lacks an index"
+        );
+    }
+
+    /// Abandon Attachments: "You may discard a card. If you do, draw two cards."
+    /// Regression test for #81: after discarding, the IfYouDo draw-2 sub-ability
+    /// must fire via the continuation chain. The bug was that context propagation
+    /// or cost_payment_failed_flag was blocking the IfYouDo condition.
+    #[test]
+    fn optional_discard_if_you_do_draw_fires_after_choice() {
+        let mut state = GameState::new_two_player(42);
+
+        // Card in hand to discard
+        let _hand_card = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Fodder".to_string(),
+            Zone::Hand,
+        );
+
+        // Cards in library to draw
+        create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(0),
+            "Draw A".to_string(),
+            Zone::Library,
+        );
+        create_object(
+            &mut state,
+            CardId(12),
+            PlayerId(0),
+            "Draw B".to_string(),
+            Zone::Library,
+        );
+
+        // Build Abandon Attachments: optional Discard 1 → sub: Draw 2 (IfYouDo)
+        let sub = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .condition(AbilityCondition::IfYouDo);
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+                random: false,
+                unless_filter: None,
+                filter: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(sub);
+        ability.optional = true;
+
+        // Step 1: resolve_ability_chain → OptionalEffectChoice
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }),
+            "Expected OptionalEffectChoice, got {:?}",
+            state.waiting_for
+        );
+
+        // Step 2: Accept optional effect → forced discard (1 card in hand, count=1)
+        // then IfYouDo sub-ability should fire drawing 2 cards.
+        let waiting = crate::game::engine_payment_choices::handle_optional_effect_choice(
+            &mut state,
+            true,
+            &mut events,
+        )
+        .unwrap();
+
+        // Forced discard (hand_size == count) skips DiscardChoice, resolves inline.
+        // After: discard 1 (-1), draw 2 (+2) = 2 cards in hand.
+        let hand_after = state.players[0].hand.len();
+        assert_eq!(
+            hand_after,
+            2,
+            "After discarding 1 and drawing 2, hand should have 2 cards, got {}. \
+             IfYouDo sub-ability likely did not fire. waiting_for={:?}, Events: {:?}",
+            hand_after,
+            waiting,
+            events
+                .iter()
+                .filter(|e| matches!(
+                    e,
+                    GameEvent::EffectResolved { .. }
+                        | GameEvent::Discarded { .. }
+                        | GameEvent::CardsDrawn { .. }
+                ))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// Abandon Attachments #81: interactive discard (player has 2+ cards) → IfYouDo draw 2.
+    /// When the discard requires player interaction (DiscardChoice), the sub-ability
+    /// must be stashed as a continuation and fire after the player selects a card.
+    #[test]
+    fn optional_discard_if_you_do_draw_fires_after_interactive_choice() {
+        let mut state = GameState::new_two_player(42);
+
+        // Two cards in hand so the discard is interactive (player must choose 1 of 2)
+        let hand_card_a = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Fodder A".to_string(),
+            Zone::Hand,
+        );
+        let _hand_card_b = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(0),
+            "Fodder B".to_string(),
+            Zone::Hand,
+        );
+
+        // Cards in library to draw
+        create_object(
+            &mut state,
+            CardId(12),
+            PlayerId(0),
+            "Draw A".to_string(),
+            Zone::Library,
+        );
+        create_object(
+            &mut state,
+            CardId(13),
+            PlayerId(0),
+            "Draw B".to_string(),
+            Zone::Library,
+        );
+
+        // Build: optional Discard 1 → sub: Draw 2 (IfYouDo)
+        let sub = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .condition(AbilityCondition::IfYouDo);
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+                random: false,
+                unless_filter: None,
+                filter: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(sub);
+        ability.optional = true;
+
+        // Step 1: resolve_ability_chain → OptionalEffectChoice
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }),
+            "Expected OptionalEffectChoice, got {:?}",
+            state.waiting_for
+        );
+
+        // Step 2: Accept optional effect → DiscardChoice (2 cards, must choose 1)
+        let waiting = crate::game::engine_payment_choices::handle_optional_effect_choice(
+            &mut state,
+            true,
+            &mut events,
+        )
+        .unwrap();
+        assert!(
+            matches!(waiting, WaitingFor::DiscardChoice { .. }),
+            "Expected DiscardChoice after accepting optional with 2 cards in hand, got {:?}",
+            waiting
+        );
+
+        // Verify the sub-ability was stashed as a pending continuation
+        assert!(
+            state.pending_continuation.is_some(),
+            "IfYouDo sub-ability should be stashed as pending_continuation during DiscardChoice"
+        );
+
+        // Step 3: Select one card to discard
+        let wf = state.waiting_for.clone();
+        let _result = crate::game::engine_resolution_choices::handle_resolution_choice(
+            &mut state,
+            wf,
+            crate::types::GameAction::SelectCards {
+                cards: vec![hand_card_a],
+            },
+            &mut events,
+        )
+        .unwrap();
+
+        // After: started with 2 in hand, discarded 1 (-1), drew 2 (+2) = 3 cards in hand.
+        let hand_after = state.players[0].hand.len();
+        assert_eq!(
+            hand_after, 3,
+            "After discarding 1 of 2 and drawing 2, hand should have 3 cards, got {}. \
+             IfYouDo sub-ability likely did not fire.",
+            hand_after,
+        );
+    }
+
+    /// Abandon Attachments #81: stale cost_payment_failed_flag from a previous resolution
+    /// must not block the IfYouDo condition. The flag should be cleared when accepting
+    /// an optional effect.
+    #[test]
+    fn optional_discard_if_you_do_not_blocked_by_stale_flag() {
+        let mut state = GameState::new_two_player(42);
+
+        // Simulate a previous resolution that left the flag set
+        state.cost_payment_failed_flag = true;
+
+        // Card in hand to discard
+        create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Fodder".to_string(),
+            Zone::Hand,
+        );
+
+        // Cards in library to draw
+        create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(0),
+            "Draw A".to_string(),
+            Zone::Library,
+        );
+        create_object(
+            &mut state,
+            CardId(12),
+            PlayerId(0),
+            "Draw B".to_string(),
+            Zone::Library,
+        );
+
+        // Build: optional Discard 1 → sub: Draw 2 (IfYouDo)
+        let sub = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .condition(AbilityCondition::IfYouDo);
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+                random: false,
+                unless_filter: None,
+                filter: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(sub);
+        ability.optional = true;
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        // Accept → forced discard (1 card, count=1) → should draw 2
+        let _waiting = crate::game::engine_payment_choices::handle_optional_effect_choice(
+            &mut state,
+            true,
+            &mut events,
+        )
+        .unwrap();
+
+        let hand_after = state.players[0].hand.len();
+        assert_eq!(
+            hand_after, 2,
+            "Stale cost_payment_failed_flag should be cleared by handle_optional_effect_choice. \
+             Hand should have 2 cards (discard 1 + draw 2), got {}.",
+            hand_after,
         );
     }
 }

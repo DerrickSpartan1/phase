@@ -88,6 +88,7 @@ pub fn find_legal_targets(
                     // CR 109.4: TargetPlayer is nonsensical when enumerating target
                     // candidates (the "target player" is what's being chosen here).
                     // Fail closed.
+                    Some(ControllerRef::ScopedPlayer) => false,
                     Some(ControllerRef::TargetPlayer) => false,
                     Some(ControllerRef::DefendingPlayer) => false,
                     None => true,
@@ -257,7 +258,8 @@ pub fn resolve_event_context_target(
     match filter {
         TargetFilter::DefendingPlayer
         | TargetFilter::AttachedTo
-        | TargetFilter::PostReplacementSourceController => {
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageTarget => {
             resolve_event_context_target_for_event_or_state(state, filter, source_id, None)
         }
         _ => {
@@ -294,7 +296,7 @@ pub fn resolve_event_context_targets(
         .collect()
 }
 
-fn resolve_event_context_target_for_event_or_state(
+pub(crate) fn resolve_event_context_target_for_event_or_state(
     state: &GameState,
     filter: &TargetFilter,
     source_id: ObjectId,
@@ -355,6 +357,7 @@ fn resolve_event_context_target_for_event_or_state(
             let controller = state.objects.get(&source_obj_id)?.controller;
             Some(TargetRef::Player(controller))
         }
+        TargetFilter::PostReplacementDamageTarget => state.post_replacement_event_target.clone(),
         _ => None,
     }
 }
@@ -371,7 +374,8 @@ pub fn resolve_effect_player_ref(
     filter: &TargetFilter,
 ) -> Option<PlayerId> {
     match filter {
-        TargetFilter::Controller => Some(ability.controller),
+        TargetFilter::Controller => Some(ability.scoped_player.unwrap_or(ability.controller)),
+        TargetFilter::ScopedPlayer => ability.scoped_player,
         TargetFilter::Player => ability.targets.iter().find_map(|target| match target {
             TargetRef::Player(player) => Some(*player),
             _ => None,

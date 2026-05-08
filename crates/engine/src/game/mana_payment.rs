@@ -144,42 +144,46 @@ pub fn produce_mana_with_attributes(
     use crate::game::replacement::{self, ReplacementResult};
     use crate::types::proposed_event::ProposedEvent;
 
-    let proposed = ProposedEvent::produce_mana(source_id, player_id, mana_type);
-    let final_mana_type = match replacement::replace_event(state, proposed, events) {
+    let proposed =
+        ProposedEvent::produce_mana_with_context(source_id, player_id, mana_type, tapped_for_mana);
+    let (final_mana_type, final_count) = match replacement::replace_event(state, proposed, events) {
         ReplacementResult::Execute(ProposedEvent::ProduceMana {
             mana_type: resolved,
+            count,
             ..
-        }) => resolved,
+        }) => (resolved, count),
         // CR 614.1: A fully-prevented mana production produces no mana.
         ReplacementResult::Prevented => return,
         // CR 614.5: Mana-type replacements do not require a player choice; any
         // other outcome (including unexpected pipeline results) falls back to
         // the original type so mana production is never silently dropped.
-        _ => mana_type,
+        _ => (mana_type, 1),
     };
 
-    let unit = ManaUnit {
-        color: final_mana_type,
-        source_id,
-        snow: false,
-        restrictions: restrictions.to_vec(),
-        grants: grants.to_vec(),
-        expiry,
-    };
+    for _ in 0..final_count {
+        let unit = ManaUnit {
+            color: final_mana_type,
+            source_id,
+            snow: false,
+            restrictions: restrictions.to_vec(),
+            grants: grants.to_vec(),
+            expiry,
+        };
 
-    let player = state
-        .players
-        .iter_mut()
-        .find(|p| p.id == player_id)
-        .expect("player exists");
-    player.mana_pool.add(unit);
+        let player = state
+            .players
+            .iter_mut()
+            .find(|p| p.id == player_id)
+            .expect("player exists");
+        player.mana_pool.add(unit);
 
-    events.push(GameEvent::ManaAdded {
-        player_id,
-        mana_type: final_mana_type,
-        source_id,
-        tapped_for_mana,
-    });
+        events.push(GameEvent::ManaAdded {
+            player_id,
+            mana_type: final_mana_type,
+            source_id,
+            tapped_for_mana,
+        });
+    }
 }
 
 /// Check if the mana pool can pay the given cost (CR 202.1a).
@@ -1490,6 +1494,79 @@ mod tests {
         assert_eq!(state.players[0].mana_pool.count_color(ManaType::Green), 0);
     }
 
+    #[test]
+    fn produce_mana_replacement_multiplier_adds_each_unit() {
+        // CR 106.12b: A tapped-for-mana replacement modifies the production
+        // event while the mana ability resolves, preserving source metadata on
+        // each produced mana unit.
+        use crate::game::game_object::GameObject;
+        use crate::types::ability::{
+            ControllerRef, ManaModification, ManaReplacementScope, ReplacementDefinition,
+            TargetFilter, TypedFilter,
+        };
+        use crate::types::card_type::CoreType;
+        use crate::types::identifiers::CardId;
+        use crate::types::replacements::ReplacementEvent;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        let repl = ReplacementDefinition::new(ReplacementEvent::ProduceMana)
+            .mana_modification(ManaModification::Multiply { factor: 3 })
+            .mana_replacement_scope(ManaReplacementScope::TappedForMana)
+            .valid_card(TargetFilter::Typed(
+                TypedFilter::permanent().controller(ControllerRef::You),
+            ));
+        let nyxbloom_id = ObjectId(99);
+        let mut nyxbloom = GameObject::new(
+            nyxbloom_id,
+            CardId(1),
+            PlayerId(0),
+            "Nyxbloom Ancient".to_string(),
+            Zone::Battlefield,
+        );
+        nyxbloom.replacement_definitions = vec![repl].into();
+        state.objects.insert(nyxbloom_id, nyxbloom);
+        state.battlefield.push_back(nyxbloom_id);
+
+        let land_id = ObjectId(10);
+        let mut forest = GameObject::new(
+            land_id,
+            CardId(2),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        forest.card_types.core_types.push(CoreType::Land);
+        state.objects.insert(land_id, forest);
+        state.battlefield.push_back(land_id);
+
+        let mut events = Vec::new();
+        produce_mana(
+            &mut state,
+            land_id,
+            ManaType::Green,
+            PlayerId(0),
+            true,
+            &mut events,
+        );
+
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Green), 3);
+        let mana_added_events: Vec<_> = events
+            .iter()
+            .filter(|event| matches!(event, GameEvent::ManaAdded { .. }))
+            .collect();
+        assert_eq!(mana_added_events.len(), 3);
+        assert!(mana_added_events.iter().all(|event| matches!(
+            event,
+            GameEvent::ManaAdded {
+                player_id: PlayerId(0),
+                mana_type: ManaType::Green,
+                source_id,
+                tapped_for_mana: true,
+            } if *source_id == land_id
+        )));
+    }
+
     // --- can_pay tests ---
 
     #[test]
@@ -1834,6 +1911,60 @@ mod tests {
             &pool,
             &cost,
             Some(&goblin_ctx),
+            false,
+            0
+        ));
+    }
+
+    #[test]
+    fn can_pay_colorless_eldrazi_spell_with_eldrazi_temple_restricted_mana() {
+        let mut pool = ManaPool::default();
+        for _ in 0..2 {
+            pool.add(ManaUnit {
+                color: ManaType::Colorless,
+                source_id: ObjectId(1),
+                snow: false,
+                restrictions: vec![ManaRestriction::OnlyForTypeSpellsOrAbilities(
+                    "Colorless Eldrazi".to_string(),
+                )],
+                grants: vec![],
+                expiry: None,
+            });
+        }
+        for _ in 0..2 {
+            pool.add(make_unit(ManaType::Colorless));
+        }
+
+        let thought_knot_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Colorless],
+            generic: 3,
+        };
+        let thought_knot = SpellMeta {
+            types: vec!["Creature".to_string(), "Colorless".to_string()],
+            subtypes: vec!["Eldrazi".to_string()],
+            keyword_kinds: vec![],
+            cast_from_zone: None,
+        };
+        let thought_knot_ctx = PaymentContext::Spell(&thought_knot);
+        assert!(can_pay_for_spell(
+            &pool,
+            &thought_knot_cost,
+            Some(&thought_knot_ctx),
+            false,
+            0
+        ));
+
+        let colored_eldrazi = SpellMeta {
+            types: vec!["Creature".to_string()],
+            subtypes: vec!["Eldrazi".to_string()],
+            keyword_kinds: vec![],
+            cast_from_zone: None,
+        };
+        let colored_eldrazi_ctx = PaymentContext::Spell(&colored_eldrazi);
+        assert!(!can_pay_for_spell(
+            &pool,
+            &thought_knot_cost,
+            Some(&colored_eldrazi_ctx),
             false,
             0
         ));

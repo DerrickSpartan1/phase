@@ -13,6 +13,7 @@ import { ServerPicker } from "./ServerPicker";
 interface LobbyViewProps {
   onHostGame: () => void;
   onHostP2P: () => void;
+  onHostDraft?: () => void;
   /**
    * Called when the user elects to join a game. `context` is the full
    * `LobbyGame` row when the join originates from the lobby list, so
@@ -47,10 +48,11 @@ const FORMAT_FILTER_GROUPS = (Object.keys(FILTER_GROUP_ORDER) as FormatGroup[])
 
 const FILTER_ALL_SENTINEL = "__all__";
 
-type RoomTypeFilter = "all" | "p2p" | "server";
+type RoomTypeFilter = "all" | "p2p" | "server" | "draft";
 
 const ROOM_TYPE_FILTERS: { value: RoomTypeFilter; label: string }[] = [
   { value: "all", label: "All" },
+  { value: "draft", label: "Draft" },
   { value: "p2p", label: "P2P" },
   { value: "server", label: "Server" },
 ];
@@ -58,6 +60,7 @@ const ROOM_TYPE_FILTERS: { value: RoomTypeFilter; label: string }[] = [
 export function LobbyView({
   onHostGame,
   onHostP2P,
+  onHostDraft,
   onJoinGame,
   connectionMode,
   onServerOffline,
@@ -226,11 +229,13 @@ export function LobbyView({
   // (older server builds pre-`is_p2p`) count as server-run, not unknown.
   const hasP2PRow = useMemo(() => games.some((g) => g.is_p2p === true), [games]);
   const hasServerRow = useMemo(() => games.some((g) => g.is_p2p !== true), [games]);
-  const showRoomTypeFilter = hasP2PRow && hasServerRow;
+  const hasDraftRow = useMemo(() => games.some((g) => g.draft_metadata != null), [games]);
+  const showRoomTypeFilter = hasP2PRow && hasServerRow || hasDraftRow;
 
   const filteredGames = useMemo(() => {
     return games.filter((g) => {
       if (formatFilter && (g.format ?? "Standard") !== formatFilter) return false;
+      if (roomTypeFilter === "draft" && g.draft_metadata == null) return false;
       if (roomTypeFilter === "p2p" && g.is_p2p !== true) return false;
       if (roomTypeFilter === "server" && g.is_p2p === true) return false;
       return true;
@@ -407,22 +412,32 @@ export function LobbyView({
             {isP2P ? "Create a direct room for one opponent." : "Open a room and wait for players."}
           </div>
         </div>
-        {isServer && (
-          <button
-            onClick={handleHost}
-            className={menuButtonClass({ tone: "emerald", size: "md" })}
-          >
-            Host Game
-          </button>
-        )}
-        {isP2P && (
-          <button
-            onClick={onHostP2P}
-            className={menuButtonClass({ tone: "cyan", size: "md" })}
-          >
-            Host P2P Game
-          </button>
-        )}
+        <div className="flex items-center gap-2">
+          {onHostDraft && (
+            <button
+              onClick={onHostDraft}
+              className={menuButtonClass({ tone: "purple", size: "md" })}
+            >
+              Host Draft
+            </button>
+          )}
+          {isServer && (
+            <button
+              onClick={handleHost}
+              className={menuButtonClass({ tone: "emerald", size: "md" })}
+            >
+              Host Game
+            </button>
+          )}
+          {isP2P && (
+            <button
+              onClick={onHostP2P}
+              className={menuButtonClass({ tone: "cyan", size: "md" })}
+            >
+              Host P2P Game
+            </button>
+          )}
+        </div>
       </div>
 
       {serverPickerOpen && (

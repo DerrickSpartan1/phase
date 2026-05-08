@@ -65,7 +65,7 @@ export function IncomingAttackersPopover({
   return (
     <div
       aria-hidden
-      className="pointer-events-none absolute left-1/2 top-full z-50 mt-2 max-w-[calc(100vw-1rem)] -translate-x-1/2 rounded-lg border border-red-400/50 bg-slate-950/95 px-2.5 py-2 shadow-xl backdrop-blur-xl"
+      className="pointer-events-none max-w-[calc(100vw-1rem)] rounded-lg border border-red-400/50 bg-slate-950/95 px-2.5 py-2 shadow-xl backdrop-blur-xl"
     >
       <div className="mb-1.5 whitespace-nowrap text-[10px] font-semibold uppercase tracking-[0.16em] text-red-300">
         ⚔×{attackerIds.length} incoming from {opponentName}

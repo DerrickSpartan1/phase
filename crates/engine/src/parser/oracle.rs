@@ -1,25 +1,27 @@
+use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::combinator::{all_consuming, opt, value};
 use nom::Parser;
-use nom_language::error::VerboseError;
 use serde::{Deserialize, Serialize};
 
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
-    AdditionalCost, CastingRestriction, Comparator, ContinuousModification, Effect, ModalChoice,
+    AdditionalCost, CastingRestriction, Comparator, ContinuousModification,
+    DelayedTriggerCondition, Effect, ManaProduction, ModalChoice, QuantityExpr,
     ReplacementDefinition, SolveCondition, SpellCastingOption, StaticCondition, StaticDefinition,
     TargetFilter, TriggerCondition, TriggerDefinition, TypedFilter,
 };
 use crate::types::keywords::{FlashbackCost, Keyword, KeywordKind};
 use crate::types::mana::ManaCost;
+use crate::types::phase::Phase;
+use crate::types::player::PlayerId;
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 
 use super::oracle_nom::bridge::{nom_on_lower, split_once_on_lower};
 use super::oracle_nom::condition::parse_inner_condition;
 use super::oracle_nom::primitives::scan_contains;
-use super::oracle_warnings::{clear_warnings, push_warning, take_warnings};
 
 use super::oracle_casting::{
     parse_additional_cost_line, parse_casting_restriction_line, parse_spell_casting_option_line,
@@ -35,7 +37,13 @@ use super::oracle_classifier::{
 use super::oracle_condition::parse_restriction_condition;
 use super::oracle_cost::{parse_oracle_cost, try_parse_cost_reduction};
 use super::oracle_dispatch::{dispatch_line_nom, make_unimplemented_with_effect};
-use super::oracle_effect::{parse_effect_chain, parse_effect_chain_with_context, ParseContext};
+use super::oracle_effect::{
+    lower_effect_chain_ir, parse_effect_chain, parse_effect_chain_with_context,
+    try_parse_temporal_delayed_trigger_ability,
+};
+use super::oracle_ir::context::ParseContext;
+use super::oracle_ir::diagnostic::OracleDiagnostic;
+use super::oracle_ir::doc::{OracleDocIr, OracleItemIr};
 pub use super::oracle_keyword::keyword_display_name;
 use super::oracle_keyword::{
     extract_keyword_line, is_keyword_cost_line, parse_keyword_from_oracle,
@@ -46,7 +54,7 @@ use super::oracle_modal::{
     extract_ability_word_reminder_body, lower_oracle_block, parse_oracle_block, strip_ability_word,
     strip_ability_word_with_name,
 };
-use super::oracle_replacement::parse_replacement_line;
+use super::oracle_replacement::{lower_replacement_ir, parse_replacement_line};
 use super::oracle_saga::{is_saga_chapter, parse_saga_chapters};
 use super::oracle_spacecraft::parse_spacecraft_threshold_lines;
 use super::oracle_special::{
@@ -55,9 +63,10 @@ use super::oracle_special::{
     parse_harmonize_keyword, parse_solve_condition, try_parse_die_roll_table,
 };
 use super::oracle_static::{
-    parse_static_line_multi, try_parse_graveyard_keyword_grant_clause, GraveyardGrantedKeywordKind,
+    lower_static_ir, parse_static_line_multi, try_parse_graveyard_keyword_grant_clause,
+    GraveyardGrantedKeywordKind,
 };
-use super::oracle_trigger::parse_trigger_lines_at_index;
+use super::oracle_trigger::{lower_trigger_ir, parse_trigger_lines_at_index};
 use super::oracle_util::{
     normalize_card_name_refs, parse_mana_symbols, parse_number, strip_reminder_text, TextPair,
 };
@@ -92,9 +101,9 @@ pub struct ParsedAbilities {
     /// "This spell costs {X} more to cast for each target beyond the first."
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strive_cost: Option<ManaCost>,
-    /// Diagnostic warnings from silent fallback patterns during parsing.
+    /// Typed diagnostic warnings from silent fallback patterns during parsing (D-12).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub parse_warnings: Vec<String>,
+    pub parse_warnings: Vec<OracleDiagnostic>,
 }
 
 fn merge_kicker_additional_cost(slot: &mut Option<AdditionalCost>, incoming: AdditionalCost) {
@@ -143,15 +152,13 @@ fn definition_grants_flashback(def: &AbilityDefinition) -> bool {
             .is_some_and(definition_grants_flashback)
 }
 
-fn parse_commander_permission_sentence(input: &str) -> nom::IResult<&str, (), VerboseError<&str>> {
+fn parse_commander_permission_sentence(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
     let (input, subject) = take_until(" can be your commander").parse(input)?;
     if subject.trim().is_empty() {
-        return Err(nom::Err::Error(VerboseError {
-            errors: vec![(
-                input,
-                nom_language::error::VerboseErrorKind::Nom(nom::error::ErrorKind::TakeUntil),
-            )],
-        }));
+        return Err(nom::Err::Error(OracleError::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
     }
     let (input, _) = tag(" can be your commander").parse(input)?;
     let (input, _) = opt(tag(".")).parse(input)?;
@@ -172,6 +179,58 @@ pub fn oracle_text_allows_commander(oracle_text: &str, card_name: &str) -> bool 
     let normalized = normalize_card_name_refs(oracle_text, card_name);
     normalized.lines().any(is_commander_permission_sentence)
         || scan_contains(&oracle_text.to_ascii_lowercase(), "can be your commander")
+}
+
+fn try_parse_opening_hand_reveal_delayed_trigger(
+    line: &str,
+    lower: &str,
+) -> Option<AbilityDefinition> {
+    let (condition, rest) = nom_on_lower(line, lower, |input| {
+        let (input, _) =
+            tag("you may reveal this card from your opening hand. if you do, ").parse(input)?;
+        let (input, condition) = alt((
+            value(
+                DelayedTriggerCondition::AtNextPhaseForPlayer {
+                    phase: Phase::Upkeep,
+                    player: PlayerId(0),
+                },
+                tag("at the beginning of your first upkeep, "),
+            ),
+            value(
+                DelayedTriggerCondition::AtNextPhase {
+                    phase: Phase::Upkeep,
+                },
+                tag("at the beginning of the first upkeep, "),
+            ),
+        ))
+        .parse(input)?;
+        Ok((input, condition))
+    })?;
+
+    let effect = parse_effect_chain(rest, AbilityKind::Spell);
+    if has_unimplemented(&effect) {
+        return None;
+    }
+
+    let delayed = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::CreateDelayedTrigger {
+            condition,
+            effect: Box::new(effect),
+            uses_tracked_set: false,
+        },
+    );
+
+    let mut def = AbilityDefinition::new(
+        AbilityKind::BeginGame,
+        Effect::Reveal {
+            target: TargetFilter::SelfRef,
+        },
+    )
+    .sub_ability(delayed)
+    .description(line.to_string());
+    def.optional = true;
+    Some(def)
 }
 
 fn parsed_result_recently_granted_flashback(result: &ParsedAbilities) -> bool {
@@ -287,21 +346,7 @@ fn parse_static_line_with_graveyard_keyword_continuation(line: &str) -> Vec<Stat
     parse_static_line_multi(line)
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(super) struct ActivatedConstraintAst {
-    pub(super) restrictions: Vec<ActivationRestriction>,
-    /// CR 602.2: "Any player may activate this ability." — annotation recognized
-    /// during parsing. Runtime enforcement is a future item; currently stripped
-    /// so the sentence does not produce an `Unimplemented` fallback.
-    pub(super) any_player_may_activate: bool,
-}
-
-impl ActivatedConstraintAst {
-    pub(super) fn sorcery_speed(&self) -> bool {
-        self.restrictions
-            .contains(&ActivationRestriction::AsSorcery)
-    }
-}
+use crate::parser::oracle_ir::ast::ActivatedConstraintAst;
 
 /// CR 608.2c: Pre-strip "instead if [condition]" or trailing "instead" from effect text.
 /// The "instead" keyword signals a cross-line replacement pattern. The trailing
@@ -387,9 +432,9 @@ fn is_self_exile_cleanup_line(line: &str, card_name: &str) -> bool {
         value(
             (),
             (
-                tag::<_, _, VerboseError<&str>>("exile "),
-                tag::<_, _, VerboseError<&str>>("~"),
-                opt(tag::<_, _, VerboseError<&str>>(".")),
+                tag::<_, _, OracleError<'_>>("exile "),
+                tag::<_, _, OracleError<'_>>("~"),
+                opt(tag::<_, _, OracleError<'_>>(".")),
             ),
         )
         .parse(i)
@@ -418,8 +463,8 @@ fn is_standalone_spell_keyword_action_line(line: &str) -> bool {
     let parsed = all_consuming(value(
         (),
         (
-            tag::<_, _, VerboseError<&str>>("time travel"),
-            opt(tag::<_, _, VerboseError<&str>>(".")),
+            tag::<_, _, OracleError<'_>>("time travel"),
+            opt(tag::<_, _, OracleError<'_>>(".")),
         ),
     ))
     .parse(lower.as_str())
@@ -456,6 +501,7 @@ fn is_spell_resolution_instruction_line(
     card_name: &str,
     mtgjson_keyword_names: &[String],
     parsed_so_far: &ParsedAbilities,
+    ctx: &mut ParseContext,
 ) -> bool {
     let line = &prepared.line;
     let lower = line.to_lowercase();
@@ -489,7 +535,10 @@ fn is_spell_resolution_instruction_line(
         return false;
     }
 
-    if is_commander_permission_sentence(line) || try_parse_loyalty_line(line).is_some() {
+    let loyalty_snap = ctx.diagnostics.len();
+    let is_loyalty = try_parse_loyalty_line(line, ctx).is_some();
+    ctx.diagnostics.truncate(loyalty_snap);
+    if is_commander_permission_sentence(line) || is_loyalty {
         return false;
     }
 
@@ -579,7 +628,7 @@ fn is_spell_resolution_instruction_line(
         || lower_starts_with(&lower, "buyback")
         || lower_starts_with(&lower, "this spell costs ")
         || alt((
-            tag::<_, _, VerboseError<&str>>("kicker"),
+            tag::<_, _, OracleError<'_>>("kicker"),
             tag("multikicker"),
             tag("replicate"),
             tag("mayhem"),
@@ -590,21 +639,9 @@ fn is_spell_resolution_instruction_line(
         return false;
     }
 
-    let saved_warnings = take_warnings();
-    let parsed = parse_effect_chain_with_context(
-        &prepared.effect_text,
-        AbilityKind::Spell,
-        &ParseContext {
-            subject: None,
-            card_name: Some(card_name.to_string()),
-            actor: None,
-            ..Default::default()
-        },
-    );
-    let _candidate_warnings = take_warnings();
-    for warning in saved_warnings {
-        push_warning(warning);
-    }
+    let snapshot = ctx.diagnostics.len();
+    let parsed = parse_effect_chain_with_context(&prepared.effect_text, AbilityKind::Spell, ctx);
+    ctx.diagnostics.truncate(snapshot);
     !has_unimplemented(&parsed)
 }
 
@@ -808,42 +845,96 @@ fn ability_word_to_trigger_condition(
     }
 }
 
-/// Parse Oracle text into structured ability definitions.
+/// Lower an `OracleDocIr` into the final `ParsedAbilities` via exhaustive match
+/// on each `OracleItemIr` variant.
 ///
-/// Splits on newlines, strips reminder text, then classifies each line
-/// according to a priority table (keywords, enchant, equip, activated,
-/// triggered, static, replacement, spell effect, modal, loyalty, etc.).
+/// Core IR variants are lowered through their dedicated lowering functions.
+/// PreLowered variants are identity-lowered (pushed directly to the result).
+pub(crate) fn lower_oracle_ir(ir: &OracleDocIr) -> ParsedAbilities {
+    let mut result = ParsedAbilities {
+        abilities: Vec::new(),
+        triggers: Vec::new(),
+        statics: Vec::new(),
+        replacements: Vec::new(),
+        extracted_keywords: Vec::new(),
+        modal: None,
+        additional_cost: None,
+        casting_restrictions: Vec::new(),
+        casting_options: Vec::new(),
+        solve_condition: None,
+        strive_cost: None,
+        parse_warnings: Vec::new(),
+    };
+    for item in &ir.items {
+        match item {
+            OracleItemIr::Spell(effect_ir) => {
+                result.abilities.push(lower_effect_chain_ir(effect_ir));
+            }
+            OracleItemIr::Trigger(trigger_ir) => {
+                result.triggers.push(lower_trigger_ir(trigger_ir));
+            }
+            OracleItemIr::Static(static_ir) => {
+                result.statics.push(lower_static_ir(static_ir));
+            }
+            OracleItemIr::Replacement(replacement_ir) => {
+                result
+                    .replacements
+                    .push(lower_replacement_ir(replacement_ir));
+            }
+            OracleItemIr::Keyword(kw) => {
+                result.extracted_keywords.push(kw.clone());
+            }
+            OracleItemIr::Modal(modal) => {
+                result.modal = Some(modal.clone());
+            }
+            OracleItemIr::AdditionalCost(cost) => {
+                result.additional_cost = Some(cost.clone());
+            }
+            OracleItemIr::CastingRestriction(restriction) => {
+                result.casting_restrictions.push(restriction.clone());
+            }
+            OracleItemIr::CastingOption(option) => {
+                result.casting_options.push(option.clone());
+            }
+            OracleItemIr::SolveCondition(condition) => {
+                result.solve_condition = Some(condition.clone());
+            }
+            OracleItemIr::StriveCost(cost) => {
+                result.strive_cost = Some(cost.clone());
+            }
+            OracleItemIr::PreLoweredTrigger(def) => {
+                result.triggers.push(def.clone());
+            }
+            OracleItemIr::PreLoweredStatic(def) => {
+                result.statics.push(def.clone());
+            }
+            OracleItemIr::PreLoweredReplacement(def) => {
+                result.replacements.push(def.clone());
+            }
+            OracleItemIr::PreLoweredSpell(def) => {
+                result.abilities.push(def.clone());
+            }
+        }
+    }
+    result.parse_warnings = ir.diagnostics.clone();
+    result
+}
+
+/// Produce an `OracleDocIr` from Oracle text — the IR-production half of the
+/// parse/lower split (Phase 49, Plan 03).
 ///
-/// `mtgjson_keyword_names` are the raw lowercased keyword names from MTGJSON
-/// (e.g. `["flying", "protection"]`). Used to identify keyword-only lines
-/// and to avoid re-extracting keywords MTGJSON already provides.
-///
-/// # Self-reference normalization
-///
-/// This function is the **single normalization entry point** for the parser.
-/// It invokes [`normalize_card_name_refs`] once on the raw Oracle text (CR
-/// 201.4b) so every downstream block parser — saga chapters, class levels,
-/// leveler blocks, modal mode bodies, triggers, statics, effects, replacements,
-/// spacecraft thresholds — receives text with the card's self-references
-/// rewritten to `~`.
-///
-/// The `pub fn` wrappers exposed for direct testing
-/// (`parse_replacement_line`, `parse_trigger_line`, `parse_trigger_lines`,
-/// `parse_class_oracle_text`, etc.) re-invoke `normalize_card_name_refs`
-/// internally; when called via this function the re-invocation is an
-/// idempotent no-op.
-#[tracing::instrument(
-    level = "info",
-    skip(oracle_text, mtgjson_keyword_names, types, subtypes)
-)]
-pub fn parse_oracle_text(
+/// Contains all pre-processing (saga, class, leveler, modal, spacecraft, strive)
+/// and the full per-line dispatch loop. Parsed items are wrapped in `OracleItemIr`
+/// variants. Pre-processors and complex dispatch paths use `PreLowered*` variants
+/// carrying already-assembled engine types; future phases will incrementally
+/// migrate these to proper IR types.
+pub(crate) fn parse_oracle_ir(
     oracle_text: &str,
     card_name: &str,
     mtgjson_keyword_names: &[String],
     types: &[String],
     subtypes: &[String],
-) -> ParsedAbilities {
-    clear_warnings();
+) -> OracleDocIr {
     let is_spell = types.iter().any(|t| t == "Instant" || t == "Sorcery");
 
     let mut result = ParsedAbilities {
@@ -859,6 +950,11 @@ pub fn parse_oracle_text(
         solve_condition: None,
         strive_cost: None,
         parse_warnings: Vec::new(),
+    };
+
+    let mut ctx = ParseContext {
+        card_name: Some(card_name.to_string()),
+        ..Default::default()
     };
 
     // CR 201.4b: A card's Oracle text uses its name to refer to itself.
@@ -884,10 +980,9 @@ pub fn parse_oracle_text(
 
     // CR 716: Pre-parse Class level sections into level-gated abilities.
     if subtypes.iter().any(|s| s == "Class") {
-        let mut class_result =
+        let class_result =
             parse_class_oracle_text(&lines, card_name, mtgjson_keyword_names, result);
-        class_result.parse_warnings = take_warnings();
-        return class_result;
+        return parsed_abilities_to_doc_ir(class_result, oracle_text, card_name, &mut ctx);
     }
 
     // CR 711: Pre-parse leveler LEVEL blocks into counter-gated static abilities.
@@ -914,11 +1009,18 @@ pub fn parse_oracle_text(
             let normalized_cost_text = normalize_self_refs_for_static(cost_text, card_name);
             let cost = parse_oracle_cost(&normalized_cost_text);
 
-            let mut def = parse_effect_chain(&effect_text, AbilityKind::Activated);
+            ctx.subject = None;
+            ctx.actor = None;
+            let mut def =
+                parse_effect_chain_with_context(&effect_text, AbilityKind::Activated, &mut ctx);
             if has_unimplemented(&def) {
                 let normalized_effect = normalize_self_refs_for_static(&effect_text, card_name);
                 if normalized_effect != effect_text {
-                    let alt = parse_effect_chain(&normalized_effect, AbilityKind::Activated);
+                    let alt = parse_effect_chain_with_context(
+                        &normalized_effect,
+                        AbilityKind::Activated,
+                        &mut ctx,
+                    );
                     if !has_unimplemented(&alt) {
                         def = alt;
                     }
@@ -949,8 +1051,12 @@ pub fn parse_oracle_text(
         // CR 707.9a: Thread the running trigger count as the base index so
         // any "and it has this ability" except clause inside a leveler trigger
         // body resolves to the correct printed-trigger slot.
-        let mut triggers =
-            parse_trigger_lines_at_index(ability_text, card_name, Some(result.triggers.len()));
+        let mut triggers = parse_trigger_lines_at_index(
+            ability_text,
+            card_name,
+            Some(result.triggers.len()),
+            &mut ctx,
+        );
         for trigger in &mut triggers {
             trigger.condition = Some(trigger_condition.clone());
         }
@@ -1188,7 +1294,7 @@ pub fn parse_oracle_text(
             }
         }
         // Priority 11: Planeswalker loyalty abilities: +N:, −N:, 0:, [+N]:, [−N]:, [0]:
-        if let Some(ability) = try_parse_loyalty_line(&line) {
+        if let Some(ability) = try_parse_loyalty_line(&line, &mut ctx) {
             result.abilities.push(ability);
             i += 1;
             continue;
@@ -1240,7 +1346,10 @@ pub fn parse_oracle_text(
                 let (effect_text, constraints) = strip_activated_constraints(effect_text);
                 let cost = parse_oracle_cost(cost_text);
 
-                let mut def = parse_effect_chain(&effect_text, AbilityKind::Activated);
+                ctx.subject = None;
+                ctx.actor = None;
+                let mut def =
+                    parse_effect_chain_with_context(&effect_text, AbilityKind::Activated, &mut ctx);
                 def.cost = Some(cost);
                 def.description = Some(line.to_string());
                 // CR 719.3c: Solved abilities only activate while Case is solved.
@@ -1272,7 +1381,10 @@ pub fn parse_oracle_text(
                 let effect_text = line[prefix_len + colon_pos + 1..].trim();
                 let (effect_text, constraints) = strip_activated_constraints(effect_text);
                 let cost = parse_oracle_cost(cost_text);
-                let mut def = parse_effect_chain(&effect_text, AbilityKind::Activated);
+                ctx.subject = None;
+                ctx.actor = None;
+                let mut def =
+                    parse_effect_chain_with_context(&effect_text, AbilityKind::Activated, &mut ctx);
                 def.cost = Some(cost);
                 // CR 207.2c: Channel is an ability word; the underlying ability activates from hand.
                 def.activation_zone = Some(Zone::Hand);
@@ -1304,7 +1416,11 @@ pub fn parse_oracle_text(
             // Retry with `~` normalization if the first pass left an
             // Unimplemented node or emitted a `target-fallback` warning
             // (Metalhead class: PutCounter silently fell back to `Any`).
-            let mut def = parse_activated_with_self_ref_fallback(&effect_text, card_name);
+            let mut def = parse_activated_with_self_ref_fallback(&effect_text, card_name, &mut ctx);
+            normalize_activated_mana_instead_delta(&mut def);
+            if def.activation_zone.is_none() {
+                def.activation_zone = activation_zone_from_self_cost(&cost);
+            }
             def.cost = Some(cost);
             def.description = Some(line.to_string());
             if constraints.sorcery_speed() {
@@ -1341,6 +1457,20 @@ pub fn parse_oracle_text(
             }
         }
 
+        // CR 603.7a-b: Instant/sorcery text like "Whenever [event] this turn, ..."
+        // creates a delayed triggered ability during resolution. It is not a
+        // permanent's printed triggered ability, so spell cards must get one
+        // chance to route trigger-shaped temporal text through the effect parser
+        // before generic trigger dispatch.
+        if is_spell && has_trigger_prefix(&lower) && scan_contains(&lower, "this turn") {
+            if let Some(def) = try_parse_temporal_delayed_trigger_ability(&line, AbilityKind::Spell)
+            {
+                result.abilities.push(def);
+                i += 1;
+                continue;
+            }
+        }
+
         // Priority 5-6: Triggered abilities — starts with When/Whenever/At
         // CR 603.2: Compound triggers ("When X and when Y, effect") produce
         // multiple TriggerDefinitions sharing the same execute effect.
@@ -1348,8 +1478,12 @@ pub fn parse_oracle_text(
             // CR 707.9a: Pass the running trigger count as the base index so
             // any "and it has this ability" except clause in this trigger's
             // body resolves to the correct printed-trigger slot.
-            let mut triggers =
-                parse_trigger_lines_at_index(&line, card_name, Some(result.triggers.len()));
+            let mut triggers = parse_trigger_lines_at_index(
+                &line,
+                card_name,
+                Some(result.triggers.len()),
+                &mut ctx,
+            );
             i += 1;
             // CR 706: If the trigger's effect ends with "roll a dN", consume
             // subsequent d20 table lines and attach them as die result branches.
@@ -1376,6 +1510,7 @@ pub fn parse_oracle_text(
                     &effect_text,
                     card_name,
                     Some(result.triggers.len()),
+                    &mut ctx,
                 );
                 // B7: Attach ability-word condition as fallback when extract_if_condition
                 // doesn't recognize the intervening-if pattern.
@@ -1419,7 +1554,13 @@ pub fn parse_oracle_text(
             if let Some(((), effect_rest)) = nom_on_lower(rest_trimmed, &rest_lower, |i| {
                 value((), tag("when you do, ")).parse(i)
             }) {
-                let effect_def = parse_effect_chain(effect_rest.trim(), AbilityKind::Spell);
+                ctx.subject = None;
+                ctx.actor = None;
+                let effect_def = parse_effect_chain_with_context(
+                    effect_rest.trim(),
+                    AbilityKind::Spell,
+                    &mut ctx,
+                );
                 let trigger = TriggerDefinition::new(TriggerMode::Exerted)
                     .valid_card(TargetFilter::SelfRef)
                     .trigger_zones(vec![Zone::Battlefield])
@@ -1436,7 +1577,13 @@ pub fn parse_oracle_text(
             && scan_contains(&lower, "attacks")
         {
             if let Some((_, effect_text)) = split_once_on_lower(&line, &lower, ". when you do, ") {
-                let effect_def = parse_effect_chain(effect_text.trim(), AbilityKind::Spell);
+                ctx.subject = None;
+                ctx.actor = None;
+                let effect_def = parse_effect_chain_with_context(
+                    effect_text.trim(),
+                    AbilityKind::Spell,
+                    &mut ctx,
+                );
                 let trigger = TriggerDefinition::new(TriggerMode::Exerted)
                     .valid_card(TargetFilter::SelfRef)
                     .trigger_zones(vec![Zone::Battlefield])
@@ -1453,7 +1600,13 @@ pub fn parse_oracle_text(
             && scan_contains(&lower, "attacks")
         {
             if let Some((_, effect_text)) = split_once_on_lower(&line, &lower, ". when you do, ") {
-                let effect_def = parse_effect_chain(effect_text.trim(), AbilityKind::Spell);
+                ctx.subject = None;
+                ctx.actor = None;
+                let effect_def = parse_effect_chain_with_context(
+                    effect_text.trim(),
+                    AbilityKind::Spell,
+                    &mut ctx,
+                );
                 let trigger = TriggerDefinition::new(TriggerMode::Exerted)
                     .valid_card(TargetFilter::SelfRef)
                     .trigger_zones(vec![Zone::Battlefield])
@@ -1617,16 +1770,9 @@ pub fn parse_oracle_text(
         // preserve any preceding clauses ("You gain 1 life for each ...")
         // before the replacement classifier sees the prevention marker.
         if is_spell && scan_contains(&lower, "prevent") && scan_contains(&lower, "damage") {
-            let def = parse_effect_chain_with_context(
-                &line,
-                AbilityKind::Spell,
-                &ParseContext {
-                    subject: None,
-                    card_name: Some(card_name.to_string()),
-                    actor: None,
-                    ..Default::default()
-                },
-            );
+            ctx.subject = None;
+            ctx.actor = None;
+            let def = parse_effect_chain_with_context(&line, AbilityKind::Spell, &mut ctx);
             if !has_unimplemented(&def) {
                 result.abilities.push(def);
                 i += 1;
@@ -1641,6 +1787,12 @@ pub fn parse_oracle_text(
                 i += 1;
                 continue;
             }
+        }
+
+        if let Some(def) = try_parse_opening_hand_reveal_delayed_trigger(&line, &lower) {
+            result.abilities.push(def);
+            i += 1;
+            continue;
         }
 
         // Priority 8c: "If this card is in your opening hand, you may begin the game with it on the battlefield"
@@ -1755,7 +1907,7 @@ pub fn parse_oracle_text(
         // Note: "mayhem" IS in is_keyword_cost_line and is handled at Priority 1b via MTGJSON
         // keywords when present; this guard catches it when keywords[] is empty.
         if alt((
-            tag::<_, _, VerboseError<&str>>("kicker"),
+            tag::<_, _, OracleError<'_>>("kicker"),
             tag("multikicker"),
             tag("replicate"),
             tag("mayhem"),
@@ -1844,6 +1996,7 @@ pub fn parse_oracle_text(
                         card_name,
                         mtgjson_keyword_names,
                         &result,
+                        &mut ctx,
                     )
                 {
                     break;
@@ -1868,16 +2021,9 @@ pub fn parse_oracle_text(
             } else {
                 effect_line.as_str()
             };
-            let mut def = parse_effect_chain_with_context(
-                parse_line,
-                AbilityKind::Spell,
-                &ParseContext {
-                    subject: None,
-                    card_name: Some(card_name.to_string()),
-                    actor: None,
-                    ..Default::default()
-                },
-            );
+            ctx.subject = None;
+            ctx.actor = None;
+            let mut def = parse_effect_chain_with_context(parse_line, AbilityKind::Spell, &mut ctx);
             def.description = Some(description);
             // CR 608.2c: Compose ability word condition with chain-extracted condition.
             // When both exist (e.g., Revolt + MV ≤ 4), compose through
@@ -1994,12 +2140,9 @@ pub fn parse_oracle_text(
         }
 
         // Priority 13b: Kicker/Multikicker — skip (handled by keywords)
-        if alt((
-            tag::<_, _, VerboseError<&str>>("kicker"),
-            tag("multikicker"),
-        ))
-        .parse(lower.as_str())
-        .is_ok()
+        if alt((tag::<_, _, OracleError<'_>>("kicker"), tag("multikicker")))
+            .parse(lower.as_str())
+            .is_ok()
         {
             i += 1;
             continue;
@@ -2040,6 +2183,7 @@ pub fn parse_oracle_text(
                     &effect_text,
                     card_name,
                     Some(result.triggers.len()),
+                    &mut ctx,
                 );
                 i += 1;
                 // CR 706: Consume subsequent d20 table lines for triggered die rolls.
@@ -2072,16 +2216,9 @@ pub fn parse_oracle_text(
                 }
             }
             // Try as effect
-            let def = parse_effect_chain_with_context(
-                &effect_text,
-                AbilityKind::Spell,
-                &ParseContext {
-                    subject: None,
-                    card_name: Some(card_name.to_string()),
-                    actor: None,
-                    ..Default::default()
-                },
-            );
+            ctx.subject = None;
+            ctx.actor = None;
+            let def = parse_effect_chain_with_context(&effect_text, AbilityKind::Spell, &mut ctx);
             if !has_unimplemented(&def) {
                 result.abilities.push(def);
                 i += 1;
@@ -2123,9 +2260,106 @@ pub fn parse_oracle_text(
     // resented clause surfaces as a parse_warning instead of disappearing
     // (Phase 1: observability only — see swallow_check.rs for detector
     // catalog and Phase 2 demotion plan).
-    super::swallow_check::check_swallowed_clauses(oracle_text, &result);
-    result.parse_warnings = take_warnings();
-    result
+    let mut swallow_diags = Vec::new();
+    super::swallow_check::check_swallowed_clauses(oracle_text, &result, &mut swallow_diags);
+    for d in swallow_diags {
+        ctx.push_diagnostic(d);
+    }
+
+    parsed_abilities_to_doc_ir(result, oracle_text, card_name, &mut ctx)
+}
+
+fn activation_zone_from_self_cost(cost: &AbilityCost) -> Option<Zone> {
+    match cost {
+        AbilityCost::Discard { self_ref: true, .. } => Some(Zone::Hand),
+        AbilityCost::Exile {
+            filter: Some(TargetFilter::SelfRef),
+            zone: Some(zone),
+            ..
+        } => Some(*zone),
+        AbilityCost::Composite { costs } => costs.iter().find_map(activation_zone_from_self_cost),
+        _ => None,
+    }
+}
+
+/// Convert a `ParsedAbilities` into an `OracleDocIr` using `PreLowered*` variants.
+///
+/// Preserves source ordering: abilities, triggers, statics, replacements are pushed
+/// in their parsed order. Scalar fields (modal, additional_cost, solve_condition,
+/// strive_cost) are pushed as their corresponding `OracleItemIr` variants.
+fn parsed_abilities_to_doc_ir(
+    result: ParsedAbilities,
+    oracle_text: &str,
+    card_name: &str,
+    ctx: &mut ParseContext,
+) -> OracleDocIr {
+    let mut items: Vec<OracleItemIr> = Vec::new();
+    for def in result.abilities {
+        items.push(OracleItemIr::PreLoweredSpell(def));
+    }
+    for def in result.triggers {
+        items.push(OracleItemIr::PreLoweredTrigger(def));
+    }
+    for def in result.statics {
+        items.push(OracleItemIr::PreLoweredStatic(def));
+    }
+    for def in result.replacements {
+        items.push(OracleItemIr::PreLoweredReplacement(def));
+    }
+    for kw in result.extracted_keywords {
+        items.push(OracleItemIr::Keyword(kw));
+    }
+    if let Some(modal) = result.modal {
+        items.push(OracleItemIr::Modal(modal));
+    }
+    if let Some(cost) = result.additional_cost {
+        items.push(OracleItemIr::AdditionalCost(cost));
+    }
+    for restriction in result.casting_restrictions {
+        items.push(OracleItemIr::CastingRestriction(restriction));
+    }
+    for option in result.casting_options {
+        items.push(OracleItemIr::CastingOption(option));
+    }
+    if let Some(condition) = result.solve_condition {
+        items.push(OracleItemIr::SolveCondition(condition));
+    }
+    if let Some(cost) = result.strive_cost {
+        items.push(OracleItemIr::StriveCost(cost));
+    }
+    OracleDocIr {
+        items,
+        source_text: oracle_text.to_string(),
+        card_name: card_name.to_string(),
+        diagnostics: std::mem::take(&mut ctx.diagnostics),
+    }
+}
+
+/// Parse Oracle text into structured ability definitions.
+///
+/// This is the public API entry point — a thin wrapper around [`parse_oracle_ir`]
+/// (IR production) and [`lower_oracle_ir`] (IR lowering). `parse_oracle_ir`
+/// creates a fresh `ParseContext` internally so diagnostics start empty;
+/// they flow through `OracleDocIr.diagnostics` → `ParsedAbilities.parse_warnings`.
+#[tracing::instrument(
+    level = "debug",
+    skip(oracle_text, mtgjson_keyword_names, types, subtypes)
+)]
+pub fn parse_oracle_text(
+    oracle_text: &str,
+    card_name: &str,
+    mtgjson_keyword_names: &[String],
+    types: &[String],
+    subtypes: &[String],
+) -> ParsedAbilities {
+    let ir = parse_oracle_ir(
+        oracle_text,
+        card_name,
+        mtgjson_keyword_names,
+        types,
+        subtypes,
+    );
+    lower_oracle_ir(&ir)
 }
 
 /// Try to parse "Equip {cost}" or "Equip — {cost}" lines.
@@ -2166,14 +2400,13 @@ fn try_parse_equip(line: &str) -> Option<AbilityDefinition> {
     }
 
     let (cost_text, constraints) = strip_activated_constraints(cost_text);
+    let target = parse_equip_target_filter(&cost_text)?;
     let cost = parse_equip_cost(&cost_text);
     let mut ability = AbilityDefinition::new(
         AbilityKind::Activated,
         Effect::Attach {
             attachment: crate::types::ability::TargetFilter::SelfRef,
-            target: crate::types::ability::TargetFilter::Typed(
-                TypedFilter::creature().controller(crate::types::ability::ControllerRef::You),
-            ),
+            target,
         },
     )
     .cost(cost)
@@ -2190,6 +2423,92 @@ fn try_parse_equip(line: &str) -> Option<AbilityDefinition> {
     Some(ability)
 }
 
+fn parse_equip_target_filter(cost_text: &str) -> Option<TargetFilter> {
+    let lower = cost_text.to_ascii_lowercase();
+    let Ok((_, descriptor)) =
+        nom::sequence::terminated(take_until::<_, _, OracleError<'_>>("{"), tag("{"))
+            .parse(lower.as_str())
+    else {
+        return Some(default_equip_target_filter());
+    };
+    let descriptor = descriptor.trim();
+    if descriptor.is_empty() {
+        return Some(default_equip_target_filter());
+    }
+
+    if tag::<_, _, OracleError<'_>>("pay")
+        .parse(descriptor)
+        .is_ok()
+    {
+        return Some(default_equip_target_filter());
+    }
+
+    if alt((
+        tag::<_, _, OracleError<'_>>("abilities"),
+        tag::<_, _, OracleError<'_>>("costs"),
+    ))
+    .parse(descriptor)
+    .is_ok()
+    {
+        return None;
+    }
+
+    if all_consuming(tag::<_, _, OracleError<'_>>("commander"))
+        .parse(descriptor)
+        .is_ok()
+    {
+        return Some(TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(crate::types::ability::ControllerRef::You)
+                .properties(vec![crate::types::ability::FilterProp::IsCommander]),
+        ));
+    }
+
+    let (filter, rest) = super::oracle_target::parse_type_phrase(descriptor);
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    equip_target_filter_with_controller(filter)
+}
+
+fn equip_target_filter_with_controller(filter: TargetFilter) -> Option<TargetFilter> {
+    match filter {
+        TargetFilter::Typed(mut typed) => {
+            typed.controller = Some(crate::types::ability::ControllerRef::You);
+            if !equip_target_has_explicit_attachable_type(&typed) {
+                typed
+                    .type_filters
+                    .insert(0, crate::types::ability::TypeFilter::Creature);
+            }
+            Some(TargetFilter::Typed(typed))
+        }
+        TargetFilter::Or { filters } => Some(TargetFilter::Or {
+            filters: filters
+                .into_iter()
+                .map(equip_target_filter_with_controller)
+                .collect::<Option<Vec<_>>>()?,
+        }),
+        _ => None,
+    }
+}
+
+fn equip_target_has_explicit_attachable_type(typed: &TypedFilter) -> bool {
+    typed.type_filters.iter().any(|filter| {
+        matches!(
+            filter,
+            crate::types::ability::TypeFilter::Creature
+                | crate::types::ability::TypeFilter::Planeswalker
+        )
+    })
+}
+
+fn default_equip_target_filter() -> TargetFilter {
+    TargetFilter::Typed(
+        TypedFilter::creature().controller(crate::types::ability::ControllerRef::You),
+    )
+}
+
 fn parse_equip_cost(cost_text: &str) -> AbilityCost {
     let cost = parse_oracle_cost(cost_text);
     if !matches!(cost, AbilityCost::Unimplemented { .. }) {
@@ -2204,7 +2523,7 @@ fn parse_equip_cost(cost_text: &str) -> AbilityCost {
 fn parse_first_mana_cost_in_text(text: &str) -> Option<ManaCost> {
     let upper = text.to_ascii_uppercase();
     let (_, cost) = nom::sequence::preceded(
-        take_until::<_, _, VerboseError<&str>>("{"),
+        take_until::<_, _, OracleError<'_>>("{"),
         super::oracle_nom::primitives::parse_mana_cost,
     )
     .parse(upper.as_str())
@@ -2229,7 +2548,7 @@ fn split_trailing_self_cost_reduction(
 }
 
 /// Try to parse a planeswalker loyalty line: "+N:", "−N:", "0:", "[+N]:", "[−N]:", "[0]:"
-fn try_parse_loyalty_line(line: &str) -> Option<AbilityDefinition> {
+fn try_parse_loyalty_line(line: &str, ctx: &mut ParseContext) -> Option<AbilityDefinition> {
     let trimmed = line.trim();
 
     // Try bracket format first: [+2]: ..., [−1]: ..., [0]: ...
@@ -2238,7 +2557,10 @@ fn try_parse_loyalty_line(line: &str) -> Option<AbilityDefinition> {
             if let Some(effect_text) = rest.trim().strip_prefix(':') {
                 if let Some(amount) = parse_loyalty_number(inner) {
                     let effect_text = effect_text.trim();
-                    let mut def = parse_effect_chain(effect_text, AbilityKind::Activated);
+                    ctx.subject = None;
+                    ctx.actor = None;
+                    let mut def =
+                        parse_effect_chain_with_context(effect_text, AbilityKind::Activated, ctx);
                     def.cost = Some(AbilityCost::Loyalty { amount });
                     def.description = Some(trimmed.to_string());
                     apply_loyalty_restrictions(&mut def);
@@ -2260,7 +2582,10 @@ fn try_parse_loyalty_line(line: &str) -> Option<AbilityDefinition> {
                 || prefix.trim() == "0"
             {
                 let effect_text = effect_text.trim();
-                let mut def = parse_effect_chain(effect_text, AbilityKind::Activated);
+                ctx.subject = None;
+                ctx.actor = None;
+                let mut def =
+                    parse_effect_chain_with_context(effect_text, AbilityKind::Activated, ctx);
                 def.cost = Some(AbilityCost::Loyalty { amount });
                 def.description = Some(trimmed.to_string());
                 apply_loyalty_restrictions(&mut def);
@@ -2774,9 +3099,9 @@ fn strip_condition_suffix(
     restrictions: &mut Vec<ActivationRestriction>,
 ) -> bool {
     let lower = condition_text.to_lowercase();
-    let suffix_len = match take_until::<_, _, VerboseError<&str>>(suffix).parse(lower.as_str()) {
+    let suffix_len = match take_until::<_, _, OracleError<'_>>(suffix).parse(lower.as_str()) {
         Ok((rest, _))
-            if all_consuming(tag::<_, _, VerboseError<&str>>(suffix))
+            if all_consuming(tag::<_, _, OracleError<'_>>(suffix))
                 .parse(rest)
                 .is_ok() =>
         {
@@ -2820,7 +3145,7 @@ fn strip_x_cant_be_zero_suffix(line: &str) -> String {
 ///
 /// Create an Unimplemented fallback ability.
 pub(super) fn make_unimplemented(line: &str) -> AbilityDefinition {
-    tracing::warn!(oracle_text = line, "unimplemented ability line");
+    tracing::debug!(oracle_text = line, "unimplemented ability line");
     AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Unimplemented {
@@ -2855,75 +3180,106 @@ pub(super) fn has_unimplemented(def: &AbilityDefinition) -> bool {
 pub(super) fn parse_activated_with_self_ref_fallback(
     effect_text: &str,
     card_name: &str,
+    ctx: &mut ParseContext,
 ) -> AbilityDefinition {
-    let pre_warnings = take_warnings();
+    // Pre-diagnostics stay in ctx naturally — only manage trial-parse diagnostics.
+    let pre_snapshot = ctx.diagnostics.len();
 
-    let def = parse_effect_chain(effect_text, AbilityKind::Activated);
-    let first_warnings = take_warnings();
-    let first_has_target_fallback = first_warnings
+    ctx.subject = None;
+    ctx.actor = None;
+    let def = parse_effect_chain_with_context(effect_text, AbilityKind::Activated, ctx);
+    let first_has_target_fallback = ctx.diagnostics[pre_snapshot..]
         .iter()
-        .any(|w| w.starts_with("target-fallback"));
+        .any(|d| matches!(d, OracleDiagnostic::TargetFallback { .. }));
     let first_clean = !has_unimplemented(&def) && !first_has_target_fallback;
 
     if first_clean {
-        for w in pre_warnings {
-            push_warning(w);
-        }
-        for w in first_warnings {
-            push_warning(w);
-        }
+        // First parse is clean — keep its diagnostics.
         return def;
     }
 
     let normalized = normalize_self_refs_for_static(effect_text, card_name);
     if normalized == effect_text {
-        for w in pre_warnings {
-            push_warning(w);
-        }
-        for w in first_warnings {
-            push_warning(w);
-        }
+        // No normalization change — keep first-pass diagnostics.
         return def;
     }
 
-    let alt = parse_effect_chain(&normalized, AbilityKind::Activated);
-    let alt_warnings = take_warnings();
-    let alt_has_target_fallback = alt_warnings
+    // Save first-pass diagnostics for potential restoration.
+    let first_diagnostics: Vec<OracleDiagnostic> = ctx.diagnostics[pre_snapshot..].to_vec();
+    ctx.diagnostics.truncate(pre_snapshot);
+
+    ctx.subject = None;
+    ctx.actor = None;
+    let alt = parse_effect_chain_with_context(&normalized, AbilityKind::Activated, ctx);
+    let alt_has_target_fallback = ctx.diagnostics[pre_snapshot..]
         .iter()
-        .any(|w| w.starts_with("target-fallback"));
+        .any(|d| matches!(d, OracleDiagnostic::TargetFallback { .. }));
     let alt_clean = !has_unimplemented(&alt) && !alt_has_target_fallback;
 
-    for w in pre_warnings {
-        push_warning(w);
-    }
     if alt_clean {
-        // Normalized pass is strictly better — keep only its (empty) warnings.
-        for w in alt_warnings {
-            push_warning(w);
-        }
+        // Normalized pass is strictly better — keep only its diagnostics (already in ctx).
         alt
     } else {
         // Neither pass was clean; prefer the original result and preserve
-        // first-pass diagnostics so the coverage dashboard reflects reality.
-        for w in first_warnings {
-            push_warning(w);
-        }
-        for w in alt_warnings {
-            push_warning(w);
-        }
+        // both passes' diagnostics so the coverage dashboard reflects reality.
+        let alt_diagnostics: Vec<OracleDiagnostic> = ctx.diagnostics[pre_snapshot..].to_vec();
+        ctx.diagnostics.truncate(pre_snapshot);
+        ctx.diagnostics.extend(first_diagnostics);
+        ctx.diagnostics.extend(alt_diagnostics);
         def
     }
+}
+
+fn normalize_activated_mana_instead_delta(def: &mut AbilityDefinition) {
+    let Effect::Mana {
+        produced:
+            ManaProduction::Colorless {
+                count: QuantityExpr::Fixed { value: base_count },
+            },
+        ..
+    } = def.effect.as_ref()
+    else {
+        return;
+    };
+    let Some(sub) = def.sub_ability.as_mut() else {
+        return;
+    };
+    let Some(AbilityCondition::ConditionInstead { inner }) = sub.condition.take() else {
+        return;
+    };
+    let Effect::Mana {
+        produced:
+            ManaProduction::Colorless {
+                count:
+                    QuantityExpr::Fixed {
+                        value: replacement_count,
+                    },
+            },
+        ..
+    } = sub.effect.as_mut()
+    else {
+        sub.condition = Some(AbilityCondition::ConditionInstead { inner });
+        return;
+    };
+    let delta = replacement_count.saturating_sub(*base_count);
+    if delta == 0 {
+        sub.condition = Some(AbilityCondition::ConditionInstead { inner });
+        return;
+    }
+    *replacement_count = delta;
+    sub.condition = Some(*inner);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::oracle_effect::parse_effect_chain;
     use crate::types::ability::{
         AbilityCondition, AggregateFunction, Comparator, ContinuousModification, ControllerRef,
-        FilterProp, ManaSpendRestriction, ModalSelectionCondition, ModalSelectionConstraint,
-        ObjectScope, ParsedCondition, PlayerFilter, PlayerScope, PtValue, QuantityExpr,
+        FilterProp, ManaProduction, ManaSpendRestriction, ModalSelectionConstraint, ObjectScope,
+        ParsedCondition, PlayerFilter, PlayerScope, PreventionAmount, PtValue, QuantityExpr,
         QuantityRef, ReplacementCondition, RoundingMode, SharedQuality, SharedQualityRelation,
-        StaticCondition, TargetFilter, TypeFilter, TypedFilter,
+        ShieldKind, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::keywords::{FlashbackCost, KeywordKind, WardCost};
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
@@ -3152,6 +3508,30 @@ mod tests {
     }
 
     #[test]
+    fn harrow_parses_required_sacrifice_land_additional_cost() {
+        let r = parse(
+            "As an additional cost to cast this spell, sacrifice a land.\nSearch your library for up to two basic land cards, put them onto the battlefield, then shuffle.",
+            "Harrow",
+            &[],
+            &["Instant"],
+            &[],
+        );
+
+        match r.additional_cost.expect("additional cost") {
+            AdditionalCost::Required(AbilityCost::Sacrifice { target, count }) => {
+                assert_eq!(count, 1);
+                assert_eq!(
+                    target,
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Land))
+                );
+            }
+            other => panic!("expected required sacrifice-land cost, got {other:?}"),
+        }
+        assert_eq!(r.abilities.len(), 1);
+        assert!(r.abilities[0].cost.is_none());
+    }
+
+    #[test]
     fn llanowar_elves_mana_ability() {
         let r = parse(
             "{T}: Add {G}.",
@@ -3274,9 +3654,11 @@ mod tests {
             assert_eq!(r.triggers.len(), 1);
             assert_eq!(r.triggers[0].mode, TriggerMode::BecomesBlocked);
             assert!(
-                r.parse_warnings
-                    .iter()
-                    .all(|warning| warning.split_whitespace().next() != Some("Swallow:DynamicQty")),
+                r.parse_warnings.iter().all(|warning| warning
+                    .to_string()
+                    .split_whitespace()
+                    .next()
+                    != Some("Swallow:DynamicQty")),
                 "unexpected DynamicQty warning for {name}: {:?}",
                 r.parse_warnings
             );
@@ -3319,9 +3701,11 @@ mod tests {
 
             assert_eq!(r.statics.len(), 1, "{name}: {r:#?}");
             assert!(
-                r.parse_warnings
-                    .iter()
-                    .all(|warning| warning.split_whitespace().next() != Some("Swallow:DynamicQty")),
+                r.parse_warnings.iter().all(|warning| warning
+                    .to_string()
+                    .split_whitespace()
+                    .next()
+                    != Some("Swallow:DynamicQty")),
                 "unexpected DynamicQty warning for {name}: {:?}",
                 r.parse_warnings
             );
@@ -3349,8 +3733,9 @@ mod tests {
                         },
                     comparator: Comparator::LE,
                     rhs:
-                        QuantityExpr::HalfRounded {
+                        QuantityExpr::DivideRounded {
                             inner,
+                            divisor: 2,
                             rounding: RoundingMode::Down,
                         },
                 } => {
@@ -3688,6 +4073,66 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn devourer_of_destiny_opening_hand_reveal_creates_first_upkeep_dig() {
+        let r = parse(
+            "You may reveal this card from your opening hand. If you do, at the beginning of your first upkeep, look at the top four cards of your library. You may put one of those cards back on top of your library. Exile the rest.\nWhen you cast this spell, exile target permanent that's one or more colors.",
+            "Devourer of Destiny",
+            &[],
+            &["Creature"],
+            &["Eldrazi"],
+        );
+
+        assert_eq!(r.abilities.len(), 1);
+        let begin_game = &r.abilities[0];
+        assert_eq!(begin_game.kind, AbilityKind::BeginGame);
+        assert!(begin_game.optional);
+        assert!(matches!(
+            &*begin_game.effect,
+            Effect::Reveal {
+                target: TargetFilter::SelfRef
+            }
+        ));
+
+        let delayed = begin_game
+            .sub_ability
+            .as_deref()
+            .expect("reveal should create a delayed first-upkeep trigger");
+        let Effect::CreateDelayedTrigger {
+            condition, effect, ..
+        } = &*delayed.effect
+        else {
+            panic!("expected CreateDelayedTrigger, got {:?}", delayed.effect);
+        };
+        assert_eq!(
+            condition,
+            &DelayedTriggerCondition::AtNextPhaseForPlayer {
+                phase: Phase::Upkeep,
+                player: PlayerId(0),
+            }
+        );
+
+        let Effect::Dig {
+            count,
+            destination,
+            keep_count,
+            up_to,
+            filter,
+            rest_destination,
+            reveal,
+        } = &*effect.effect
+        else {
+            panic!("expected Dig payload, got {:?}", effect.effect);
+        };
+        assert_eq!(*count, QuantityExpr::Fixed { value: 4 });
+        assert_eq!(*destination, Some(Zone::Library));
+        assert_eq!(*keep_count, Some(1));
+        assert!(*up_to);
+        assert!(matches!(filter, TargetFilter::Any));
+        assert_eq!(*rest_destination, Some(Zone::Exile));
+        assert!(!reveal);
     }
 
     #[test]
@@ -4135,7 +4580,7 @@ mod tests {
             }
             effect => panic!("expected optional CastFromZone, got {effect:?}"),
         }
-        assert_eq!(r.parse_warnings, Vec::<String>::new());
+        assert!(r.parse_warnings.is_empty());
     }
 
     #[test]
@@ -4309,6 +4754,41 @@ mod tests {
     }
 
     #[test]
+    fn parses_urza_tower_conditional_mana_as_delta() {
+        let r = parse(
+            "{T}: Add {C}. If you control an Urza's Mine and an Urza's Power-Plant, add {C}{C}{C} instead.",
+            "Urza's Tower",
+            &[],
+            &["Land"],
+            &["Urza's", "Tower"],
+        );
+        assert_eq!(r.abilities.len(), 1);
+        let ability = &r.abilities[0];
+        match ability.effect.as_ref() {
+            Effect::Mana {
+                produced: ManaProduction::Colorless { count },
+                ..
+            } => assert_eq!(*count, QuantityExpr::Fixed { value: 1 }),
+            other => panic!("expected base colorless mana, got {other:?}"),
+        }
+        let sub = ability
+            .sub_ability
+            .as_ref()
+            .expect("expected conditional delta");
+        match sub.effect.as_ref() {
+            Effect::Mana {
+                produced: ManaProduction::Colorless { count },
+                ..
+            } => assert_eq!(*count, QuantityExpr::Fixed { value: 2 }),
+            other => panic!("expected colorless mana delta, got {other:?}"),
+        }
+        match sub.condition.as_ref().expect("expected condition") {
+            AbilityCondition::And { conditions } => assert_eq!(conditions.len(), 2),
+            other => panic!("expected conjunction condition, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parses_compound_activate_only_constraints() {
         let r = parse(
             "{T}: Add {R}. Activate only as a sorcery and only once each turn.",
@@ -4381,7 +4861,7 @@ mod tests {
                 })
             }
         )));
-        assert_eq!(r.parse_warnings, Vec::<String>::new());
+        assert!(r.parse_warnings.is_empty());
     }
 
     #[test]
@@ -4404,10 +4884,11 @@ mod tests {
                 })
             }
         )));
-        assert!(r
-            .parse_warnings
-            .iter()
-            .all(|warning| warning.split_whitespace().next() != Some("Swallow:Condition_If")));
+        assert!(r.parse_warnings.iter().all(|warning| warning
+            .to_string()
+            .split_whitespace()
+            .next()
+            != Some("Swallow:Condition_If")));
     }
 
     #[test]
@@ -4427,10 +4908,11 @@ mod tests {
                 condition: Some(ParsedCondition::HandSizeOneOf { counts })
             } if counts == &vec![0, 1]
         )));
-        assert!(r
-            .parse_warnings
-            .iter()
-            .all(|warning| warning.split_whitespace().next() != Some("Swallow:Condition_If")));
+        assert!(r.parse_warnings.iter().all(|warning| warning
+            .to_string()
+            .split_whitespace()
+            .next()
+            != Some("Swallow:Condition_If")));
     }
 
     #[test]
@@ -4637,17 +5119,19 @@ mod tests {
         );
         let modal = r.modal.expect("should have modal metadata");
         assert_eq!(modal.min_choices, 1);
-        assert_eq!(modal.max_choices, 2);
+        assert_eq!(modal.max_choices, 1);
         assert_eq!(modal.mode_count, 2);
         assert_eq!(
             modal.constraints,
             vec![ModalSelectionConstraint::ConditionalMaxChoices {
-                condition: ModalSelectionCondition::ControlsCommander,
+                condition: crate::types::ability::ModalSelectionCondition::Static {
+                    condition: StaticCondition::ControlsCommander,
+                },
                 max_choices: 2,
                 otherwise_max_choices: 1,
             }]
         );
-        assert_eq!(r.parse_warnings, Vec::<String>::new());
+        assert!(r.parse_warnings.is_empty());
         assert!(matches!(
             *r.abilities[0].effect,
             Effect::Draw {
@@ -4665,6 +5149,144 @@ mod tests {
     }
 
     #[test]
+    fn conditional_modal_max_reuses_static_condition_parser() {
+        let r = parse(
+            "Choose one. If you control a Wizard as you cast this spell, you may choose two instead.\n• Target player draws two cards.\n• Destroy target artifact.\n• ~ deals 5 damage to target creature.",
+            "Flame Test",
+            &[],
+            &["Instant"],
+            &[],
+        );
+        let modal = r.modal.expect("should have modal metadata");
+        assert_eq!(modal.min_choices, 1);
+        assert_eq!(modal.max_choices, 1);
+        assert_eq!(modal.mode_count, 3);
+        assert_eq!(modal.constraints.len(), 1);
+        assert!(matches!(
+            modal.constraints[0],
+            ModalSelectionConstraint::ConditionalMaxChoices {
+                condition: crate::types::ability::ModalSelectionCondition::Static {
+                    condition: StaticCondition::IsPresent { .. },
+                },
+                max_choices: 2,
+                otherwise_max_choices: 1,
+            }
+        ));
+        assert!(r.parse_warnings.is_empty());
+    }
+
+    #[test]
+    fn conditional_modal_max_supports_compound_presence_conditions() {
+        let r = parse(
+            "Choose one. If you control an artifact and an enchantment as you cast this spell, you may choose both instead.\n• Exile target creature or planeswalker.\n• Return target creature or planeswalker card from your graveyard to your hand.",
+            "Soul Test",
+            &[],
+            &["Sorcery"],
+            &[],
+        );
+        let modal = r.modal.expect("should have modal metadata");
+        assert_eq!(modal.min_choices, 1);
+        assert_eq!(modal.max_choices, 1);
+        assert_eq!(modal.mode_count, 2);
+        assert_eq!(modal.constraints.len(), 1);
+        assert!(matches!(
+            modal.constraints[0],
+            ModalSelectionConstraint::ConditionalMaxChoices {
+                condition: crate::types::ability::ModalSelectionCondition::Static {
+                    condition: StaticCondition::And { .. },
+                },
+                max_choices: 2,
+                otherwise_max_choices: 1,
+            }
+        ));
+        assert!(r.parse_warnings.is_empty());
+    }
+
+    #[test]
+    fn conditional_modal_max_supports_kicker_condition() {
+        let r = parse(
+            "Kicker {2}{G}\nChoose one. If this spell was kicked, choose any number instead.\n• Draw a card.\n• Gain 3 life.\n• Scry 1.",
+            "Inscription Test",
+            &[],
+            &["Sorcery"],
+            &[],
+        );
+        let modal = r.modal.expect("should have modal metadata");
+        assert_eq!(modal.min_choices, 1);
+        assert_eq!(modal.max_choices, 1);
+        assert_eq!(modal.mode_count, 3);
+        assert!(matches!(
+            modal.constraints[0],
+            ModalSelectionConstraint::ConditionalMaxChoices {
+                condition: crate::types::ability::ModalSelectionCondition::AdditionalCostPaid {
+                    variant: None,
+                    kicker_cost: None,
+                    min_count: 1,
+                },
+                max_choices: 3,
+                otherwise_max_choices: 1,
+            }
+        ));
+        assert!(r.parse_warnings.is_empty());
+    }
+
+    #[test]
+    fn spell_temporal_whenever_line_builds_delayed_trigger() {
+        let r = parse(
+            "Whenever you cast a creature spell this turn, draw a card.",
+            "Glimpse Test",
+            &[],
+            &["Sorcery"],
+            &[],
+        );
+        assert!(r.triggers.is_empty());
+        assert_eq!(r.abilities.len(), 1);
+        assert!(matches!(
+            *r.abilities[0].effect,
+            Effect::CreateDelayedTrigger { .. }
+        ));
+        let Effect::CreateDelayedTrigger { condition, .. } = &*r.abilities[0].effect else {
+            panic!("expected delayed trigger, got {:?}", r.abilities[0].effect);
+        };
+        let crate::types::ability::DelayedTriggerCondition::WheneverEvent { trigger } = condition
+        else {
+            panic!("expected WheneverEvent, got {condition:?}");
+        };
+        assert_eq!(trigger.mode, TriggerMode::SpellCast);
+        assert_eq!(trigger.valid_target, Some(TargetFilter::Controller));
+        assert!(trigger.valid_card.is_some());
+        assert!(r.parse_warnings.is_empty());
+    }
+
+    #[test]
+    fn spell_temporal_enters_line_builds_delayed_trigger() {
+        let r = parse(
+            "Whenever a creature enters this turn, you may draw a card.",
+            "Beck Test",
+            &[],
+            &["Sorcery"],
+            &[],
+        );
+        assert!(r.triggers.is_empty());
+        assert_eq!(r.abilities.len(), 1);
+        let Effect::CreateDelayedTrigger {
+            condition, effect, ..
+        } = &*r.abilities[0].effect
+        else {
+            panic!("expected delayed trigger, got {:?}", r.abilities[0].effect);
+        };
+        let crate::types::ability::DelayedTriggerCondition::WheneverEvent { trigger } = condition
+        else {
+            panic!("expected WheneverEvent, got {condition:?}");
+        };
+        assert_eq!(trigger.mode, TriggerMode::ChangesZone);
+        assert_eq!(trigger.destination, Some(Zone::Battlefield));
+        assert!(trigger.valid_card.is_some());
+        assert!(effect.optional);
+        assert!(r.parse_warnings.is_empty());
+    }
+
+    #[test]
     fn ability_word_modal_block_strips_prefix_before_modal_parse() {
         let r = parse(
             "Delirium — Choose one. If there are four or more card types among cards in your graveyard, choose both instead.\n• Draw a card.\n• Gain 3 life.",
@@ -4675,8 +5297,9 @@ mod tests {
         );
         let modal = r.modal.expect("should have modal metadata");
         assert_eq!(modal.min_choices, 1);
-        assert_eq!(modal.max_choices, 2);
+        assert_eq!(modal.max_choices, 1);
         assert_eq!(modal.mode_count, 2);
+        assert_eq!(modal.constraints.len(), 1);
         assert!(matches!(
             *r.abilities[0].effect,
             Effect::Draw {
@@ -4898,6 +5521,37 @@ mod tests {
     }
 
     #[test]
+    fn triggered_modal_commander_condition_caps_choose_both() {
+        let r = parse(
+            "At the beginning of combat on your turn, choose one. If you control a commander, you may choose both instead.\n• Create a 1/1 white Soldier creature token.\n• Put a +1/+1 counter on each Soldier you control.",
+            "SOLDIER Military Program",
+            &[],
+            &["Enchantment"],
+            &[],
+        );
+        assert_eq!(r.triggers.len(), 1);
+        let execute = r.triggers[0]
+            .execute
+            .as_ref()
+            .expect("trigger should have execute");
+        let modal = execute.modal.as_ref().expect("execute should be modal");
+        assert_eq!(modal.min_choices, 1);
+        assert_eq!(modal.max_choices, 1);
+        assert_eq!(modal.mode_count, 2);
+        assert_eq!(
+            modal.constraints,
+            vec![ModalSelectionConstraint::ConditionalMaxChoices {
+                condition: crate::types::ability::ModalSelectionCondition::Static {
+                    condition: StaticCondition::ControlsCommander,
+                },
+                max_choices: 2,
+                otherwise_max_choices: 1,
+            }]
+        );
+        assert!(r.parse_warnings.is_empty());
+    }
+
+    #[test]
     fn monument_to_endurance_parses_no_repeat_this_turn() {
         let r = parse(
             "At the beginning of your end step, choose one that hasn't been chosen this turn —\n• Put a +1/+1 counter on Monument to Endurance.\n• You gain 4 life.\n• Create a 0/0 green Hydra creature token with \"This creature gets +1/+1 for each counter on it.\"",
@@ -5075,6 +5729,33 @@ mod tests {
     }
 
     #[test]
+    fn tiered_restoration_magic_parses_modal_with_mode_costs() {
+        let text = "Tiered (Choose one additional cost.)\n\
+                    • Cure — {0} — Target permanent gains hexproof and indestructible until end of turn.\n\
+                    • Cura — {1} — Target permanent gains hexproof and indestructible until end of turn. You gain 3 life.\n\
+                    • Curaga — {3}{W} — Permanents you control gain hexproof and indestructible until end of turn. You gain 6 life.";
+        let result = parse(text, "Restoration Magic", &[], &["Instant"], &[]);
+        let modal = result.modal.expect("Tiered should parse as modal");
+        assert_eq!(modal.min_choices, 1);
+        assert_eq!(modal.max_choices, 1);
+        assert_eq!(modal.mode_count, 3);
+        assert_eq!(modal.mode_costs.len(), 3);
+        assert_eq!(modal.mode_costs[0], ManaCost::zero());
+        assert_eq!(modal.mode_costs[1], ManaCost::generic(1));
+        assert_eq!(
+            modal.mode_costs[2],
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::White],
+                generic: 3
+            }
+        );
+        assert!(result
+            .abilities
+            .iter()
+            .all(|ability| { !matches!(*ability.effect, Effect::Unimplemented { .. }) }));
+    }
+
+    #[test]
     fn parse_saga_the_eldest_reborn() {
         let oracle = "(As this Saga enters and after your draw step, add a lore counter. Sacrifice after III.)\nI — Each opponent discards a card.\nII — Put target creature card from a graveyard onto the battlefield under your control.\nIII — Return target nonland permanent card from your graveyard to the battlefield under your control.";
         let result = parse_oracle_text(
@@ -5114,6 +5795,42 @@ mod tests {
         let etb = &result.replacements[0];
         assert_eq!(etb.event, ReplacementEvent::Moved);
         assert_eq!(etb.valid_card, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn discard_self_to_battlefield_instead_is_replacement_not_spell_ability() {
+        let result = parse(
+            "If a spell or ability an opponent controls causes you to discard this card, put it onto the battlefield instead of putting it into your graveyard.",
+            "Loxodon Smiter",
+            &[],
+            &["Creature"],
+            &["Elephant", "Soldier"],
+        );
+
+        assert_eq!(result.replacements.len(), 1);
+        assert!(result.abilities.is_empty());
+        assert!(result
+            .parse_warnings
+            .iter()
+            .all(|warning| warning.category_name() != "swallowed-clause"));
+    }
+
+    #[test]
+    fn damage_to_self_counter_instead_is_replacement_not_spell_ability() {
+        let result = parse(
+            "If damage would be dealt to this creature, put that many +1/+1 counters on it instead.",
+            "Phytohydra",
+            &[],
+            &["Creature"],
+            &["Plant", "Hydra"],
+        );
+
+        assert_eq!(result.replacements.len(), 1);
+        assert!(result.abilities.is_empty());
+        assert!(result
+            .parse_warnings
+            .iter()
+            .all(|warning| warning.category_name() != "swallowed-clause"));
     }
 
     #[test]
@@ -5622,10 +6339,11 @@ mod tests {
             }
         ));
         assert!(
-            parsed
-                .parse_warnings
-                .iter()
-                .all(|warning| warning.split_whitespace().next() != Some("Swallow:DynamicQty")),
+            parsed.parse_warnings.iter().all(|warning| warning
+                .to_string()
+                .split_whitespace()
+                .next()
+                != Some("Swallow:DynamicQty")),
             "unexpected dynamic quantity warning: {:?}",
             parsed.parse_warnings
         );
@@ -5829,6 +6547,30 @@ mod tests {
         assert_eq!(r.abilities.len(), 1);
         assert_eq!(r.abilities[0].kind, AbilityKind::Activated);
         assert_eq!(r.abilities[0].activation_zone, Some(Zone::Hand));
+    }
+
+    #[test]
+    fn self_exile_from_hand_mana_ability_activates_from_hand() {
+        let r = parse(
+            "Exile this creature from your hand: Add {G}.",
+            "Elvish Spirit Guide",
+            &[],
+            &["Creature"],
+            &["Elf", "Spirit"],
+        );
+        assert_eq!(r.abilities.len(), 1);
+        let ability = &r.abilities[0];
+        assert_eq!(ability.kind, AbilityKind::Activated);
+        assert_eq!(ability.activation_zone, Some(Zone::Hand));
+        assert!(matches!(*ability.effect, Effect::Mana { .. }));
+        assert!(matches!(
+            ability.cost,
+            Some(AbilityCost::Exile {
+                filter: Some(TargetFilter::SelfRef),
+                zone: Some(Zone::Hand),
+                count: 1,
+            })
+        ));
     }
 
     // ── Escape keyword parsing ──────────────────────────────────────────────
@@ -6765,6 +7507,21 @@ mod tests {
     }
 
     #[test]
+    fn mana_spend_restriction_colorless_eldrazi_spell_or_activation() {
+        use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
+        use crate::types::ability::ManaSpendRestriction;
+        let result = parse_mana_spend_restriction(
+            "spend this mana only to cast colorless eldrazi spells or activate abilities of colorless eldrazi",
+        );
+        assert_eq!(
+            result.map(|(r, _)| r),
+            Some(ManaSpendRestriction::SpellTypeOrAbilityActivation(
+                "Colorless Eldrazi".to_string()
+            ))
+        );
+    }
+
+    #[test]
     fn mana_spend_restriction_flashback_spells() {
         use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
         let result =
@@ -7112,7 +7869,7 @@ mod tests {
             Some(AbilityCondition::QuantityCheck {
                 lhs: QuantityExpr::Ref {
                     qty: QuantityRef::HandSize {
-                        player: PlayerScope::Controller
+                        player: PlayerScope::ScopedPlayer
                     }
                 },
                 comparator: Comparator::EQ,
@@ -7215,7 +7972,8 @@ mod tests {
         assert!(
             r.parse_warnings
                 .iter()
-                .all(|warning| warning.split_whitespace().next() != Some("Swallow:DynamicQty")),
+                .all(|warning| warning.to_string().split_whitespace().next()
+                    != Some("Swallow:DynamicQty")),
             "unexpected DynamicQty warning: {:?}",
             r.parse_warnings
         );
@@ -7459,7 +8217,7 @@ mod tests {
             assert!(
                 r.parse_warnings
                     .iter()
-                    .all(|warning| warning.split_whitespace().next() != Some("Swallow:DynamicQty")),
+                    .all(|warning| warning.to_string().split_whitespace().next() != Some("Swallow:DynamicQty")),
                 "unexpected DynamicQty warning for {name}: {:?}",
                 r.parse_warnings
             );
@@ -8207,10 +8965,9 @@ mod tests {
             &["Instant".to_string()],
             &[],
         );
-        assert!(r
-            .parse_warnings
-            .iter()
-            .all(|warning| { warning.split_whitespace().next() != Some("Swallow:Condition_If") }));
+        assert!(r.parse_warnings.iter().all(|warning| {
+            warning.to_string().split_whitespace().next() != Some("Swallow:Condition_If")
+        }));
         let base = r
             .abilities
             .first()
@@ -8485,11 +9242,11 @@ mod tests {
     // each time." chain exercises all four fixes landed in the punisher-chain
     // commit:
     //   A. player_scope rewrite: `their life` / `their hand` → LifeTotal /
-    //      HandSize so per-player iteration resolves against the rebound
-    //      controller, not the empty targets list.
+    //      HandSize so per-player iteration resolves against the scoped
+    //      player, not the empty targets list or original controller.
     //   B. half-rounded inner: `half the cards in their hand` parses through
     //      the new `parse_cards_in_possessive_zone` combinator, producing a
-    //      HalfRounded count rather than collapsing to 1.
+    //      DivideRounded count rather than collapsing to 1.
     //   C. Sacrifice.count: a dynamic count lifted from
     //      `half the permanents they control` into the new count field, and
     //      the embedded ObjectCount filter lifted into `Sacrifice.target` so
@@ -8522,59 +9279,74 @@ mod tests {
             ability.player_scope
         );
 
-        // Fix A: LoseLife amount uses controller-scoped LifeTotal.
+        // Fix A: LoseLife amount uses per-player-scoped LifeTotal.
         match &*ability.effect {
             Effect::LoseLife { amount, .. } => match amount {
-                QuantityExpr::HalfRounded { inner, rounding } => {
+                QuantityExpr::DivideRounded {
+                    inner,
+                    divisor,
+                    rounding,
+                } => {
+                    assert_eq!(*divisor, 2);
                     assert_eq!(*rounding, RoundingMode::Down);
                     assert!(
                         matches!(
                             **inner,
                             QuantityExpr::Ref {
                                 qty: QuantityRef::LifeTotal {
-                                    player: crate::types::ability::PlayerScope::Controller
+                                    player: crate::types::ability::PlayerScope::ScopedPlayer
                                 }
                             }
                         ),
                         "expected LifeTotal, got {inner:?}"
                     );
                 }
-                other => panic!("expected HalfRounded LoseLife amount, got {other:?}"),
+                other => panic!("expected DivideRounded LoseLife amount, got {other:?}"),
             },
             other => panic!("expected LoseLife top-level, got {other:?}"),
         }
 
-        // Fix B + A: Discard count uses HalfRounded(HandSize).
+        // Fix B + A: Discard count uses DivideRounded(HandSize) for the scoped player.
         let discard = ability.sub_ability.as_ref().expect("discard sub_ability");
         match &*discard.effect {
             Effect::Discard { count, .. } => match count {
-                QuantityExpr::HalfRounded { inner, rounding } => {
+                QuantityExpr::DivideRounded {
+                    inner,
+                    divisor,
+                    rounding,
+                } => {
+                    assert_eq!(*divisor, 2);
                     assert_eq!(*rounding, RoundingMode::Down);
                     assert!(
                         matches!(
                             **inner,
                             QuantityExpr::Ref {
                                 qty: QuantityRef::HandSize {
-                                    player: crate::types::ability::PlayerScope::Controller
+                                    player: crate::types::ability::PlayerScope::ScopedPlayer
                                 }
                             }
                         ),
                         "expected HandSize, got {inner:?}"
                     );
                 }
-                other => panic!("expected HalfRounded Discard count, got {other:?}"),
+                other => panic!("expected DivideRounded Discard count, got {other:?}"),
             },
             other => panic!("expected Discard mid-chain, got {other:?}"),
         }
 
-        // Fix C: Sacrifice carries HalfRounded(ObjectCount{Permanent,you-control})
+        // Fix C: Sacrifice carries DivideRounded(ObjectCount{Permanent,you-control})
         // as count, and the same Typed filter lifted into target.
         let sacrifice = discard.sub_ability.as_ref().expect("sacrifice sub_ability");
         match &*sacrifice.effect {
             Effect::Sacrifice { target, count } => {
                 assert!(!count.is_up_to(), "expected non-UpTo sacrifice count");
                 match count {
-                    QuantityExpr::HalfRounded { inner, rounding } => {
+                    QuantityExpr::DivideRounded {
+                        inner,
+                        divisor,
+                        rounding,
+                    } => {
+                        assert_eq!(*divisor, 2);
                         assert_eq!(*rounding, RoundingMode::Down);
                         match &**inner {
                             QuantityExpr::Ref {
@@ -8588,7 +9360,7 @@ mod tests {
                             other => panic!("expected ObjectCount inner, got {other:?}"),
                         }
                     }
-                    other => panic!("expected HalfRounded Sacrifice count, got {other:?}"),
+                    other => panic!("expected DivideRounded Sacrifice count, got {other:?}"),
                 }
                 match target {
                     TargetFilter::Typed(tf) => {
@@ -8641,10 +9413,11 @@ mod tests {
         let parsed = parse(oracle, "Acolyte's Reward", &[], &["Instant"], &[]);
 
         assert!(
-            parsed
-                .parse_warnings
-                .iter()
-                .all(|warning| warning.split_whitespace().next() != Some("Swallow:Condition_If")),
+            parsed.parse_warnings.iter().all(|warning| warning
+                .to_string()
+                .split_whitespace()
+                .next()
+                != Some("Swallow:Condition_If")),
             "unexpected condition warning: {:?}",
             parsed.parse_warnings
         );
@@ -8673,7 +9446,8 @@ mod tests {
 
         assert!(
             parsed.parse_warnings.iter().all(|warning| {
-                let label = warning.split_whitespace().next();
+                let label = warning.to_string();
+                let label = label.split_whitespace().next();
                 label != Some("Swallow:Condition_If") && label != Some("Swallow:Optional_YouMay")
             }),
             "unexpected replacement choice warning: {:?}",
@@ -8694,10 +9468,11 @@ mod tests {
         );
 
         assert!(
-            parsed
-                .parse_warnings
-                .iter()
-                .all(|warning| warning.split_whitespace().next() != Some("Swallow:Optional_YouMay")),
+            parsed.parse_warnings.iter().all(|warning| warning
+                .to_string()
+                .split_whitespace()
+                .next()
+                != Some("Swallow:Optional_YouMay")),
             "unexpected optional warning: {:?}",
             parsed.parse_warnings
         );
@@ -8729,10 +9504,11 @@ mod tests {
         );
 
         assert!(
-            parsed
-                .parse_warnings
-                .iter()
-                .all(|warning| warning.split_whitespace().next() != Some("Swallow:Optional_YouMay")),
+            parsed.parse_warnings.iter().all(|warning| warning
+                .to_string()
+                .split_whitespace()
+                .next()
+                != Some("Swallow:Optional_YouMay")),
             "unexpected optional warning: {:?}",
             parsed.parse_warnings
         );
@@ -8761,10 +9537,11 @@ mod tests {
         );
 
         assert!(
-            parsed
-                .parse_warnings
-                .iter()
-                .all(|warning| warning.split_whitespace().next() != Some("Swallow:Condition_If")),
+            parsed.parse_warnings.iter().all(|warning| warning
+                .to_string()
+                .split_whitespace()
+                .next()
+                != Some("Swallow:Condition_If")),
             "unexpected condition warning: {:?}",
             parsed.parse_warnings
         );
@@ -8780,10 +9557,11 @@ mod tests {
         let parsed = parse(oracle, "Math is for Blockers", &[], &["Sorcery"], &[]);
 
         assert!(
-            parsed
-                .parse_warnings
-                .iter()
-                .all(|warning| warning.split_whitespace().next() != Some("Swallow:Condition_If")),
+            parsed.parse_warnings.iter().all(|warning| warning
+                .to_string()
+                .split_whitespace()
+                .next()
+                != Some("Swallow:Condition_If")),
             "unexpected condition warning: {:?}",
             parsed.parse_warnings
         );
@@ -8804,10 +9582,11 @@ mod tests {
         let parsed = parse(oracle, "Arch of Orazca", &[], &["Land"], &[]);
 
         assert!(
-            parsed
-                .parse_warnings
-                .iter()
-                .all(|warning| warning.split_whitespace().next() != Some("Swallow:Condition_If")),
+            parsed.parse_warnings.iter().all(|warning| warning
+                .to_string()
+                .split_whitespace()
+                .next()
+                != Some("Swallow:Condition_If")),
             "unexpected condition warning: {:?}",
             parsed.parse_warnings
         );
@@ -8838,7 +9617,7 @@ mod tests {
             &["Goblin", "Warrior"],
         );
 
-        assert_eq!(parsed.parse_warnings, Vec::<String>::new());
+        assert!(parsed.parse_warnings.is_empty());
         let damage_ability = parsed
             .abilities
             .iter()
@@ -8860,7 +9639,7 @@ mod tests {
         let oracle = "{T}: You gain 2 life. Activate only if you've cast an instant or sorcery spell this turn.";
         let parsed = parse(oracle, "Potioner's Trove", &[], &["Artifact"], &[]);
 
-        assert_eq!(parsed.parse_warnings, Vec::<String>::new());
+        assert!(parsed.parse_warnings.is_empty());
         let gain_life_ability = parsed
             .abilities
             .iter()
@@ -8888,16 +9667,54 @@ mod tests {
     }
 
     #[test]
+    fn crumbling_sanctuary_parses_as_replacement_without_swallowed_clause() {
+        let parsed = parse(
+            "If damage would be dealt to a player, that player exiles that many cards from the top of their library instead.",
+            "Crumbling Sanctuary",
+            &[],
+            &["Artifact"],
+            &[],
+        );
+
+        assert!(parsed.abilities.is_empty());
+        assert_eq!(parsed.replacements.len(), 1);
+        assert!(parsed.parse_warnings.iter().all(|warning| {
+            warning.category_name() != "swallowed-clause"
+                && warning.category_name() != "ignored-remainder"
+        }));
+
+        let replacement = &parsed.replacements[0];
+        assert_eq!(replacement.event, ReplacementEvent::DamageDone);
+        assert_eq!(
+            replacement.shield_kind,
+            ShieldKind::Prevention {
+                amount: PreventionAmount::All
+            }
+        );
+        let execute = replacement.execute.as_ref().expect("execute present");
+        assert!(matches!(
+            *execute.effect,
+            Effect::ExileTop {
+                player: TargetFilter::PostReplacementDamageTarget,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount
+                },
+            }
+        ));
+    }
+
+    #[test]
     fn dynamic_mana_per_color_does_not_emit_dynamic_qty_warning() {
         let oracle =
             "Vivid — {T}: For each color among permanents you control, add one mana of that color.";
         let parsed = parse(oracle, "Bloom Tender", &[], &["Creature"], &[]);
 
         assert!(
-            parsed
-                .parse_warnings
-                .iter()
-                .all(|warning| warning.split_whitespace().next() != Some("Swallow:DynamicQty")),
+            parsed.parse_warnings.iter().all(|warning| warning
+                .to_string()
+                .split_whitespace()
+                .next()
+                != Some("Swallow:DynamicQty")),
             "unexpected dynamic quantity warning: {:?}",
             parsed.parse_warnings
         );
@@ -8913,6 +9730,48 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn source_filtered_copy_token_does_not_emit_dynamic_qty_warning() {
+        let parsed = parse(
+            "As this enchantment enters, choose a creature type.\nCreatures you control of the chosen type get +1/+0.\nAt the beginning of your end step, for each token you control of the chosen type that entered this turn, create a token that's a copy of it.",
+            "Renewed Solidarity",
+            &[],
+            &["Enchantment"],
+            &[],
+        );
+
+        assert!(
+            parsed.parse_warnings.iter().all(|warning| warning
+                .to_string()
+                .split_whitespace()
+                .next()
+                != Some("Swallow:DynamicQty")),
+            "unexpected DynamicQty warning: {:?}",
+            parsed.parse_warnings
+        );
+    }
+
+    #[test]
+    fn choose_one_of_branch_optional_does_not_emit_you_may_warning() {
+        let parsed = parse(
+            "Flying\nAt the beginning of your end step, draw a card. Then each opponent faces a villainous choice — That player discards a card, or you may put a Construct, Robot, or Vehicle card from your hand onto the battlefield.",
+            "Dr. Eggman",
+            &[],
+            &["Legendary", "Creature"],
+            &["Human", "Scientist"],
+        );
+
+        assert!(
+            parsed.parse_warnings.iter().all(|warning| warning
+                .to_string()
+                .split_whitespace()
+                .next()
+                != Some("Swallow:Optional_YouMay")),
+            "unexpected Optional_YouMay warning: {:?}",
+            parsed.parse_warnings
+        );
     }
 
     #[test]
@@ -8957,10 +9816,11 @@ mod tests {
             static_def.modifications
         );
         assert!(
-            parsed
-                .parse_warnings
-                .iter()
-                .all(|warning| warning.split_whitespace().next() != Some("Swallow:DynamicQty")),
+            parsed.parse_warnings.iter().all(|warning| warning
+                .to_string()
+                .split_whitespace()
+                .next()
+                != Some("Swallow:DynamicQty")),
             "unexpected DynamicQty warning: {:?}",
             parsed.parse_warnings
         );
@@ -8987,7 +9847,7 @@ mod tests {
                 parsed
                     .parse_warnings
                     .iter()
-                    .all(|warning| warning.split_whitespace().next() != Some("Swallow:DynamicQty")),
+                    .all(|warning| warning.to_string().split_whitespace().next() != Some("Swallow:DynamicQty")),
                 "unexpected DynamicQty warning for {name}: {:?}",
                 parsed.parse_warnings
             );
@@ -9062,10 +9922,13 @@ mod tests {
                 parsed
                     .parse_warnings
                     .iter()
-                    .all(|warning| !matches!(
-                        warning.split_whitespace().next(),
-                        Some("Swallow:DynamicQty" | "Swallow:Condition_AsLongAs")
-                    )),
+                    .all(|warning| {
+                        let s = warning.to_string();
+                        !matches!(
+                            s.split_whitespace().next(),
+                            Some("Swallow:DynamicQty" | "Swallow:Condition_AsLongAs")
+                        )
+                    }),
                 "unexpected toughness-damage warning for {name}: {:?}",
                 parsed.parse_warnings
             );
@@ -9117,10 +9980,13 @@ mod tests {
                 parsed
                     .parse_warnings
                     .iter()
-                    .all(|warning| !matches!(
-                        warning.split_whitespace().next(),
-                        Some("Swallow:DynamicQty" | "Swallow:Condition_AsLongAs")
-                    )),
+                    .all(|warning| {
+                        let s = warning.to_string();
+                        !matches!(
+                            s.split_whitespace().next(),
+                            Some("Swallow:DynamicQty" | "Swallow:Condition_AsLongAs")
+                        )
+                    }),
                 "unexpected toughness-damage warning for {name}: {:?}",
                 parsed.parse_warnings
             );
@@ -9418,6 +10284,144 @@ mod tests {
     }
 
     #[test]
+    fn restricted_equip_costs_preserve_target_requirement() {
+        let legendary = super::try_parse_equip("Equip legendary creature {1}")
+            .expect("legendary equip should parse");
+        let Effect::Attach { target, .. } = *legendary.effect else {
+            panic!("expected Attach, got {:?}", legendary.effect);
+        };
+        let TargetFilter::Typed(tf) = target else {
+            panic!("expected typed target, got {:?}", target);
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        assert!(tf.properties.contains(&FilterProp::HasSupertype {
+            value: crate::types::card_type::Supertype::Legendary,
+        }));
+
+        let commander =
+            super::try_parse_equip("Equip commander {3}").expect("commander equip should parse");
+        let Effect::Attach { target, .. } = *commander.effect else {
+            panic!("expected Attach, got {:?}", commander.effect);
+        };
+        let TargetFilter::Typed(tf) = target else {
+            panic!("expected typed target, got {:?}", target);
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        assert!(tf.properties.contains(&FilterProp::IsCommander));
+    }
+
+    #[test]
+    fn restricted_equip_costs_cover_observed_target_classes() {
+        for line in [
+            "Equip Citizen {1}",
+            "Equip Detective {1}",
+            "Equip Elf {2}",
+            "Equip Halfling {1}",
+            "Equip Human {1}",
+            "Equip Knight {1}",
+            "Equip Pirate {1}",
+            "Equip Soldier {W}",
+        ] {
+            let ability = super::try_parse_equip(line).expect("subtype equip should parse");
+            let Effect::Attach { target, .. } = *ability.effect else {
+                panic!("expected Attach, got {:?}", ability.effect);
+            };
+            let TargetFilter::Typed(tf) = target else {
+                panic!("expected typed target, got {:?}", target);
+            };
+            assert_eq!(tf.controller, Some(ControllerRef::You), "{line}");
+            assert!(tf.type_filters.contains(&TypeFilter::Creature), "{line}");
+            assert!(
+                tf.type_filters
+                    .iter()
+                    .any(|filter| matches!(filter, TypeFilter::Subtype(_))),
+                "{line}"
+            );
+        }
+
+        let class_union = super::try_parse_equip("Equip Shaman, Warlock, or Wizard {1}")
+            .expect("multi-subtype equip should parse");
+        let Effect::Attach { target, .. } = *class_union.effect else {
+            panic!("expected Attach, got {:?}", class_union.effect);
+        };
+        let TargetFilter::Or { filters } = target else {
+            panic!("expected or target, got {:?}", target);
+        };
+        assert_eq!(filters.len(), 3);
+        for expected_subtype in ["Shaman", "Warlock", "Wizard"] {
+            assert!(filters.iter().any(|filter| matches!(
+                filter,
+                TargetFilter::Typed(tf)
+                    if tf.controller == Some(ControllerRef::You)
+                        && tf.type_filters.contains(&TypeFilter::Creature)
+                        && tf
+                            .type_filters
+                            .contains(&TypeFilter::Subtype(expected_subtype.to_string()))
+            )));
+        }
+
+        let token = super::try_parse_equip("Equip creature token {1}")
+            .expect("creature-token equip should parse");
+        let Effect::Attach { target, .. } = *token.effect else {
+            panic!("expected Attach, got {:?}", token.effect);
+        };
+        let TargetFilter::Typed(tf) = target else {
+            panic!("expected typed target, got {:?}", target);
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        assert!(tf.properties.contains(&FilterProp::Token));
+
+        let planeswalker = super::try_parse_equip("Equip planeswalker {1}")
+            .expect("planeswalker equip should parse");
+        let Effect::Attach { target, .. } = *planeswalker.effect else {
+            panic!("expected Attach, got {:?}", planeswalker.effect);
+        };
+        let TargetFilter::Typed(tf) = target else {
+            panic!("expected typed target, got {:?}", target);
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(tf.type_filters.contains(&TypeFilter::Planeswalker));
+        assert!(!tf.type_filters.contains(&TypeFilter::Creature));
+
+        let creature_or_planeswalker = super::try_parse_equip("Equip creature or planeswalker {3}")
+            .expect("creature-or-planeswalker equip should parse");
+        let Effect::Attach { target, .. } = *creature_or_planeswalker.effect else {
+            panic!("expected Attach, got {:?}", creature_or_planeswalker.effect);
+        };
+        let TargetFilter::Or { filters } = target else {
+            panic!("expected or target, got {:?}", target);
+        };
+        assert!(filters.iter().any(|filter| matches!(
+            filter,
+            TargetFilter::Typed(tf)
+                if tf.controller == Some(ControllerRef::You)
+                    && tf.type_filters.contains(&TypeFilter::Creature)
+        )));
+        assert!(filters.iter().any(|filter| matches!(
+            filter,
+            TargetFilter::Typed(tf)
+                if tf.controller == Some(ControllerRef::You)
+                    && tf.type_filters.contains(&TypeFilter::Planeswalker)
+        )));
+    }
+
+    #[test]
+    fn equip_cost_modifier_lines_are_not_equip_abilities() {
+        for line in [
+            "Equip abilities you activate cost {1} less to activate.",
+            "Equip costs you pay cost {1} less.",
+        ] {
+            assert!(
+                super::try_parse_equip(line).is_none(),
+                "{line} must not parse as an equip activated ability"
+            );
+        }
+    }
+
+    #[test]
     fn equip_once_per_turn_constraint_strips_from_cost() {
         let ability = super::try_parse_equip("Equip {0}. Activate only once each turn.")
             .expect("equip should parse");
@@ -9527,10 +10531,11 @@ mod tests {
             static_def.modifications
         );
         assert!(
-            result
-                .parse_warnings
-                .iter()
-                .all(|warning| warning.split_whitespace().next() != Some("Swallow:DynamicQty")),
+            result.parse_warnings.iter().all(|warning| warning
+                .to_string()
+                .split_whitespace()
+                .next()
+                != Some("Swallow:DynamicQty")),
             "unexpected DynamicQty warning: {:?}",
             result.parse_warnings
         );
@@ -9625,11 +10630,94 @@ mod tests {
         }
         assert!(
             r.parse_warnings.iter().all(|warning| {
-                let tag = warning.split_whitespace().next();
+                let tag = warning.to_string();
+                let tag = tag.split_whitespace().next();
                 tag != Some("Swallow:Optional_YouMay") && tag != Some("Swallow:Condition_If")
             }),
             "unexpected Defiler warnings: {:?}",
             r.parse_warnings
         );
+    }
+}
+
+#[cfg(test)]
+mod pipeline_snapshot_tests {
+    use super::*;
+
+    fn pipeline_parse(
+        oracle_text: &str,
+        card_name: &str,
+        types: &[&str],
+        subtypes: &[&str],
+    ) -> ParsedAbilities {
+        let types: Vec<String> = types.iter().map(|s| s.to_string()).collect();
+        let subtypes: Vec<String> = subtypes.iter().map(|s| s.to_string()).collect();
+        parse_oracle_text(oracle_text, card_name, &[], &types, &subtypes)
+    }
+
+    #[test]
+    fn pipeline_simple_spell() {
+        let result = pipeline_parse(
+            "Deal 3 damage to any target.",
+            "Test Card",
+            &["Sorcery"],
+            &[],
+        );
+        insta::assert_json_snapshot!(result);
+    }
+
+    #[test]
+    fn pipeline_creature_with_keywords_and_trigger() {
+        let result = pipeline_parse(
+            "Flying\nWhen Test Card enters, draw a card.",
+            "Test Card",
+            &["Creature"],
+            &[],
+        );
+        insta::assert_json_snapshot!(result);
+    }
+
+    #[test]
+    fn pipeline_enchantment_with_static_and_replacement() {
+        let result = pipeline_parse(
+            "Creatures you control get +1/+1.\nIf a creature you control would die, exile it instead.",
+            "Test Card",
+            &["Enchantment"],
+            &[],
+        );
+        insta::assert_json_snapshot!(result);
+    }
+
+    #[test]
+    fn pipeline_saga_card() {
+        let result = pipeline_parse(
+            "I — You draw a card and you lose 1 life.\nII — Create a 2/2 black Zombie creature token.\nIII — Target opponent discards a card.",
+            "Test Card",
+            &["Enchantment"],
+            &["Saga"],
+        );
+        insta::assert_json_snapshot!(result);
+    }
+
+    #[test]
+    fn pipeline_class_card() {
+        let result = pipeline_parse(
+            "Creatures you control get +1/+0.\n{1}{R}: Level 2\nWhenever you attack, target creature you control gains first strike until end of turn.",
+            "Test Card",
+            &["Enchantment"],
+            &["Class"],
+        );
+        insta::assert_json_snapshot!(result);
+    }
+
+    #[test]
+    fn pipeline_modal_spell() {
+        let result = pipeline_parse(
+            "Choose one —\n• Destroy target artifact.\n• Destroy target enchantment.",
+            "Test Card",
+            &["Instant"],
+            &[],
+        );
+        insta::assert_json_snapshot!(result);
     }
 }

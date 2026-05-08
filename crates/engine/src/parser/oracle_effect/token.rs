@@ -1,11 +1,12 @@
 use std::str::FromStr;
 
+use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::combinator::{rest, value};
+use nom::combinator::{map, opt, rest, value};
 use nom::Parser;
-use nom_language::error::VerboseError;
 
+use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_nom::error::OracleResult;
 use crate::types::ability::{
     ContinuousModification, Effect, FilterProp, PtValue, QuantityExpr, QuantityRef,
@@ -15,12 +16,12 @@ use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
 
 use super::super::oracle_nom::primitives as nom_primitives;
-use super::super::oracle_static::parse_static_line_multi;
+use super::super::oracle_static::{parse_quoted_ability_modifications, parse_static_line_multi};
 use super::super::oracle_target::parse_target;
 use super::super::oracle_util::{
-    normalize_card_name_refs, parse_number, strip_reminder_text, TextPair,
+    normalize_card_name_refs, parse_count_expr, strip_reminder_text, TextPair,
 };
-use super::types::*;
+use crate::parser::oracle_ir::ast::*;
 
 /// Bridge: run a nom combinator on a lowercase copy, mapping the consumed length
 /// back to the original-case text to compute the correct remainder.
@@ -33,14 +34,17 @@ where
     Some((result, &text[consumed..]))
 }
 
-pub(super) fn try_parse_token(_lower: &str, text: &str) -> Option<Effect> {
+pub(super) fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) -> Option<Effect> {
     let text = strip_reminder_text(text);
     let lower = text.to_lowercase();
 
     // "create a token that's a copy of {target}"
-    if lower.contains("token that's a copy of") || lower.contains("token thats a copy of") {
+    if let Ok((_, (tapped, enters_attacking, count))) = parse_copy_token_entry_modifiers(&lower) {
         let tp = TextPair::new(&text, &lower);
-        let after_copy_tp = tp.strip_after("copy of ").unwrap_or(tp);
+        let after_copy_tp = tp
+            .strip_after("copy of ")
+            .or_else(|| tp.strip_after("copies of "))
+            .unwrap_or(tp);
         // Handle "another target ..." -- strip "another" prefix and add FilterProp::Another
         let has_another = nom_on_lower(after_copy_tp.original, after_copy_tp.lower, |i| {
             value((), tag("another ")).parse(i)
@@ -62,8 +66,13 @@ pub(super) fn try_parse_token(_lower: &str, text: &str) -> Option<Effect> {
         // `SetName` arms in the except clause decline gracefully when
         // `card_name` is empty (see `become_copy_except.rs::parse_name_override`).
         let (target_text, extra_keywords, additional_modifications) =
-            split_token_except_clause(target_text);
-        let (mut target, _) = parse_target(target_text);
+            split_token_except_clause(target_text, ctx);
+        let target_lower = target_text.trim().to_lowercase();
+        let (mut target, _) = if parse_cost_paid_object_copy_target(&target_lower) {
+            (TargetFilter::CostPaidObject, "")
+        } else {
+            parse_target(target_text)
+        };
         if has_another {
             if let TargetFilter::Typed(ref mut typed) = target {
                 if !typed.properties.contains(&FilterProp::Another) {
@@ -73,9 +82,10 @@ pub(super) fn try_parse_token(_lower: &str, text: &str) -> Option<Effect> {
         }
         return Some(Effect::CopyTokenOf {
             target,
-            enters_attacking: false,
-            tapped: false,
-            count: QuantityExpr::Fixed { value: 1 },
+            source_filter: None,
+            enters_attacking,
+            tapped,
+            count,
             extra_keywords,
             additional_modifications,
         });
@@ -104,6 +114,55 @@ pub(super) fn try_parse_token(_lower: &str, text: &str) -> Option<Effect> {
     })
 }
 
+pub(super) fn parse_copy_token_entry_modifiers(
+    input: &str,
+) -> OracleResult<'_, (bool, bool, QuantityExpr)> {
+    let (rest, _) = tag("create ").parse(input)?;
+    let (rest, count) = opt(alt((
+        value(
+            QuantityExpr::Fixed { value: 1 },
+            alt((tag("a "), tag("one "))),
+        ),
+        map(nom_primitives::parse_number, |value| QuantityExpr::Fixed {
+            value: value as i32,
+        }),
+    )))
+    .parse(rest)?;
+    let (rest, _) = if count.is_some() {
+        opt(tag(" ")).parse(rest)?
+    } else {
+        (rest, None)
+    };
+    let (rest, flags) = alt((
+        value((true, true), tag("tapped and attacking ")),
+        value((true, false), tag("tapped ")),
+        value((false, true), tag("attacking ")),
+        value((false, false), tag("")),
+    ))
+    .parse(rest)?;
+    let (rest, _) = alt((
+        tag("token that's a copy of"),
+        tag("token thats a copy of"),
+        tag("tokens that are copies of"),
+    ))
+    .parse(rest)?;
+    Ok((
+        rest,
+        (
+            flags.0,
+            flags.1,
+            count.unwrap_or(QuantityExpr::Fixed { value: 1 }),
+        ),
+    ))
+}
+
+fn parse_cost_paid_object_copy_target(lower: &str) -> bool {
+    matches!(
+        lower.trim_end_matches('.'),
+        "the exiled card" | "the card exiled this way"
+    )
+}
+
 /// CR 707.2 + CR 707.9: Split off a trailing `, except <body>` clause from a
 /// copy-of-target phrase, channeling both keyword grants and non-keyword
 /// modifications through the shared `parse_except_clause` building block.
@@ -122,7 +181,10 @@ pub(super) fn try_parse_token(_lower: &str, text: &str) -> Option<Effect> {
 ///
 /// Example: `"it, except the token isn't legendary"` →
 ///   (`"it"`, `vec![]`, `vec![RemoveSupertype { Legendary }]`)
-fn split_token_except_clause(text: &str) -> (&str, Vec<Keyword>, Vec<ContinuousModification>) {
+fn split_token_except_clause<'a>(
+    text: &'a str,
+    ctx: &ParseContext,
+) -> (&'a str, Vec<Keyword>, Vec<ContinuousModification>) {
     let lower = text.to_lowercase();
     // structural: not dispatch — locate the `, except ` boundary on the
     // lower-cased copy to compute the cut byte index in the original-case text.
@@ -137,14 +199,11 @@ fn split_token_except_clause(text: &str) -> (&str, Vec<Keyword>, Vec<ContinuousM
     // removals, conditional counter placement, etc.
     let except_input = &lower[pos..];
     let card_name = ""; // SetName cannot apply to token-copy (source unknown at parse time).
-    let (_, modifications) = match super::become_copy_except::parse_except_clause(
-        except_input,
-        card_name,
-        super::become_copy_except::ExceptClauseContext::default(),
-    ) {
-        Some(parts) => parts,
-        None => return (head, Vec::new(), Vec::new()),
-    };
+    let (_, modifications) =
+        match super::become_copy_except::parse_except_clause(except_input, card_name, ctx) {
+            Some(parts) => parts,
+            None => return (head, Vec::new(), Vec::new()),
+        };
 
     let mut extra_keywords = Vec::new();
     let mut additional_modifications = Vec::new();
@@ -249,8 +308,8 @@ pub(crate) fn parse_token_description(text: &str) -> Option<TokenDescription> {
     rest = strip_token_supertypes(rest);
 
     let (mut power, mut toughness, rest) =
-        if let Some((power, toughness, rest)) = parse_token_pt_prefix(rest) {
-            (Some(power), Some(toughness), rest)
+        if let Ok((rest, (power, toughness))) = nom_primitives::parse_pt_value.parse(rest) {
+            (Some(power), Some(toughness), rest.trim_start())
         } else {
             (None, None, rest)
         };
@@ -359,17 +418,6 @@ fn parse_token_count_prefix(text: &str) -> Option<(QuantityExpr, &str)> {
     let trimmed = text.trim_start();
     let lower = trimmed.to_lowercase();
 
-    // "X " / "x " -> Variable X
-    if let Some((_, rest)) = nom_on_lower(trimmed, &lower, |i| value((), tag("x ")).parse(i)) {
-        return Some((
-            QuantityExpr::Ref {
-                qty: QuantityRef::Variable {
-                    name: "X".to_string(),
-                },
-            },
-            rest,
-        ));
-    }
     // "that many " -> EventContextAmount
     if let Some((_, rest)) =
         nom_on_lower(trimmed, &lower, |i| value((), tag("that many ")).parse(i))
@@ -394,16 +442,10 @@ fn parse_token_count_prefix(text: &str) -> Option<(QuantityExpr, &str)> {
             rest,
         ));
     }
-    let (count, rest) = parse_number(trimmed)?;
-    if count == 0 && trimmed.starts_with(['x', 'X']) {
-        return None;
-    }
-    Some((
-        QuantityExpr::Fixed {
-            value: count as i32,
-        },
-        rest,
-    ))
+    // Delegate to parse_count_expr for all numeric/variable/multiplied
+    // quantities: "X", "twice X", "three", "half X rounded up", etc.
+    let (count, rest) = parse_count_expr(trimmed)?;
+    Some((count, rest))
 }
 
 fn parse_named_token_preamble(text: &str) -> Option<(String, &str)> {
@@ -417,25 +459,6 @@ fn parse_named_token_preamble(text: &str) -> Option<(String, &str)> {
     let after_lower = after_comma.to_lowercase();
     let (_, rest) = nom_on_lower(after_comma, &after_lower, nom_primitives::parse_article)?;
     Some((name.to_string(), rest))
-}
-
-fn parse_token_pt_prefix(text: &str) -> Option<(PtValue, PtValue, &str)> {
-    let text = text.trim_start();
-    let word_end = text.find(char::is_whitespace).unwrap_or(text.len());
-    let token = &text[..word_end];
-    let slash = token.find('/')?;
-    let power = token[..slash].trim();
-    let toughness = token[slash + 1..].trim();
-    let power = parse_token_pt_component(power)?;
-    let toughness = parse_token_pt_component(toughness)?;
-    Some((power, toughness, text[word_end..].trim_start()))
-}
-
-fn parse_token_pt_component(text: &str) -> Option<PtValue> {
-    if text.eq_ignore_ascii_case("x") {
-        return Some(PtValue::Variable("X".to_string()));
-    }
-    text.parse::<i32>().ok().map(PtValue::Fixed)
 }
 
 fn strip_token_supertypes(mut text: &str) -> &str {
@@ -559,41 +582,111 @@ fn parse_token_name_clause(text: &str) -> (Option<String>, &str) {
 /// Handles patterns like:
 /// - `and "This token can't block."` → `[StaticDefinition::new(StaticMode::CantBlock)]`
 /// - `and "This creature can't block."` → same
-/// - `and '~ can't block.'` → same
+/// - `with 'This token gets +1/+1 for each artifact you control.'` → continuous
+///   `BoostByCount`-style modifications.
+///
+/// Double-quoted spans are unambiguous and parsed greedily. Single-quoted spans
+/// only appear when the token-creation effect is itself nested inside a
+/// double-quoted activated ability ("This Saga gains \"…create a token with
+/// 'X.'\""). They are extracted only via a structurally-anchored single pass:
+/// the opening `'` must follow a phrase boundary (`with `, `and `, `or `, or
+/// `, `) and the closing `'` is the last `'` in the text. This pairing rule
+/// guarantees that any `'` inside the span (apostrophes from "can't" /
+/// possessives) is never mistaken for the close quote.
 fn extract_token_static_abilities(text: &str, token_name: &str) -> Vec<StaticDefinition> {
     let mut statics = Vec::new();
 
-    // Look for quoted ability text between double quotes.
-    // Single quotes are unreliable because "can't" contains an apostrophe.
-    for (open, close) in [('"', '"')] {
-        let search = text;
-        let mut pos = 0;
-        while pos < search.len() {
-            if let Some(start) = search[pos..].find(open) {
-                let abs_start = pos + start + open.len_utf8();
-                if let Some(end) = search[abs_start..].find(close) {
-                    let quoted = &search[abs_start..abs_start + end];
-                    let ability_text = quoted.trim();
-                    let normalized;
-                    let static_text = if token_name.is_empty() {
-                        ability_text
-                    } else {
-                        normalized = normalize_card_name_refs(ability_text, token_name);
-                        &normalized
-                    };
-                    statics.extend(parse_static_line_multi(static_text));
+    // Pass 1: double-quoted abilities — unambiguous delimiters.
+    let mut pos = 0;
+    while pos < text.len() {
+        let Some(start) = text[pos..].find('"') else {
+            break;
+        };
+        let abs_start = pos + start + '"'.len_utf8();
+        let Some(end) = text[abs_start..].find('"') else {
+            break;
+        };
+        let quoted = &text[abs_start..abs_start + end];
+        push_parsed_statics(quoted.trim(), token_name, &mut statics);
+        pos = abs_start + end + '"'.len_utf8();
+    }
 
-                    pos = abs_start + end + close.len_utf8();
-                } else {
-                    break;
-                }
-            } else {
-                break;
-            }
+    // Pass 2: single-quoted abilities (nested inside a double-quoted
+    // activated ability). Skipped when double-quoted spans were found —
+    // Oracle text never mixes both delimiters at the same nesting level.
+    if statics.is_empty() {
+        if let Some(span) = find_anchored_single_quoted_span(text) {
+            push_parsed_statics(span.trim(), token_name, &mut statics);
         }
     }
 
     statics
+}
+
+fn push_parsed_statics(ability_text: &str, token_name: &str, out: &mut Vec<StaticDefinition>) {
+    let normalized;
+    let static_text = if token_name.is_empty() {
+        ability_text
+    } else {
+        normalized = normalize_card_name_refs(ability_text, token_name);
+        &normalized
+    };
+    let static_definitions = parse_static_line_multi(static_text);
+    if !static_definitions.is_empty() {
+        out.extend(static_definitions);
+        return;
+    }
+
+    let quoted = format!("\"{static_text}\"");
+    let modifications = parse_quoted_ability_modifications(&quoted);
+    if !modifications.is_empty() {
+        out.push(
+            StaticDefinition::continuous()
+                .affected(TargetFilter::SelfRef)
+                .modifications(modifications),
+        );
+    }
+}
+
+/// Locate a single-quoted ability span in `text`, returning the content
+/// between the open and close quotes (exclusive).
+///
+/// Anchoring rules (both must hold):
+///   - The opening `'` must immediately follow one of the phrase boundaries
+///     `with `, `and `, `or `, `, ` — at the start of `text` or preceded by
+///     whitespace (so apostrophes embedded in possessives like "creature's"
+///     cannot pose as opening quotes).
+///   - The closing `'` is the last `'` in `text` (so any internal apostrophe
+///     from contractions or possessives is treated as content, not delimiter).
+fn find_anchored_single_quoted_span(text: &str) -> Option<&str> {
+    let close = text.rfind('\'')?;
+    let prefix = &text[..close];
+
+    // Phrase anchors paired (start-of-text form, mid-text form). The mid-text
+    // form requires a leading space; the start form does not.
+    const ANCHORS: &[(&str, &str)] = &[
+        ("with '", " with '"),
+        ("and '", " and '"),
+        ("or '", " or '"),
+        (", '", ", '"),
+    ];
+    let mut earliest: Option<usize> = None;
+    for &(start_anchor, mid_anchor) in ANCHORS {
+        if prefix.starts_with(start_anchor) {
+            let open = start_anchor.len();
+            earliest = Some(earliest.map_or(open, |prev| prev.min(open)));
+        }
+        if let Some(pos) = prefix.find(mid_anchor) {
+            let open = pos + mid_anchor.len();
+            earliest = Some(earliest.map_or(open, |prev| prev.min(open)));
+        }
+    }
+
+    let open = earliest?;
+    if close <= open {
+        return None;
+    }
+    Some(&text[open..close])
 }
 
 fn extract_token_where_x_expression(text: &str) -> Option<String> {
@@ -607,8 +700,8 @@ fn extract_token_where_x_expression(text: &str) -> Option<String> {
     // expression has no trailing period.
     let after = tp.strip_after("where x is ")?.original.trim();
     let (_, x_expr) = alt((
-        take_until::<_, _, VerboseError<&str>>("."),
-        rest::<_, VerboseError<&str>>,
+        take_until::<_, _, OracleError<'_>>("."),
+        rest::<_, OracleError<'_>>,
     ))
     .parse(after)
     .ok()?;
@@ -809,6 +902,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn copy_tokens_of_exiled_cost_card_use_cost_paid_object_source() {
+        let effect = try_parse_token(
+            "create two tokens that are copies of the exiled card",
+            "Create two tokens that are copies of the exiled card",
+            &mut ParseContext::default(),
+        )
+        .expect("expected CopyTokenOf");
+        let Effect::CopyTokenOf { target, count, .. } = effect else {
+            panic!("expected CopyTokenOf, got {effect:?}");
+        };
+        assert_eq!(target, TargetFilter::CostPaidObject);
+        assert_eq!(count, QuantityExpr::Fixed { value: 2 });
+    }
+
+    #[test]
     fn keyword_clause_with_trailing_comma_before_where() {
         // "with flying, where X is..." -- comma must not poison the keyword
         let kws = parse_token_keyword_clause("with flying, where X is that spell's mana value");
@@ -868,17 +976,69 @@ mod tests {
     }
 
     #[test]
-    fn extract_static_no_false_positive_on_single_quotes() {
-        // Single quotes around "can't" are ambiguous (apostrophe = close quote).
-        // Only double quotes reliably delimit abilities in Oracle text.
+    fn extract_static_single_quoted_ability_with_apostrophe_content() {
+        use crate::types::ability::TargetFilter;
+        use crate::types::statics::StaticMode;
+
+        // Anchored single-quoted span: open `'` follows `and `, close `'`
+        // is the last apostrophe. The internal apostrophe in "can't" is
+        // treated as content, not a delimiter.
         let statics = extract_token_static_abilities("and '~ can't block.'", "");
-        assert!(statics.is_empty());
+        assert_eq!(statics.len(), 1);
+        assert_eq!(statics[0].mode, StaticMode::CantBlock);
+        assert_eq!(statics[0].affected, Some(TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn extract_static_single_quoted_boost_by_count() {
+        // Urza's Saga's chapter II ability: the create-token clause is itself
+        // nested inside a double-quoted activated ability, so the granted
+        // static uses single quotes. The Construct token must enter with the
+        // +1/+1 modifier or it dies to SBAs as a 0/0 immediately.
+        let statics = extract_token_static_abilities(
+            "with 'This token gets +1/+1 for each artifact you control.'",
+            "Construct",
+        );
+        assert_eq!(
+            statics.len(),
+            1,
+            "expected one continuous static from single-quoted ability, got {statics:?}",
+        );
     }
 
     #[test]
     fn extract_static_empty_when_no_quoted_ability() {
         let statics = extract_token_static_abilities("with flying and haste", "");
         assert!(statics.is_empty());
+    }
+
+    #[test]
+    fn token_with_quoted_trigger_and_activated_ability_grants_both() {
+        let token = parse_token_description(
+            "a tapped colorless artifact token named Meteorite with \"When this token enters, it deals 2 damage to any target\" and \"{T}: Add one mana of any color.\"",
+        )
+        .expect("expected token description");
+
+        assert_eq!(token.name, "Meteorite");
+        let modifications: Vec<_> = token
+            .static_abilities
+            .iter()
+            .flat_map(|static_definition| static_definition.modifications.iter())
+            .collect();
+        assert!(
+            modifications.iter().any(|modification| matches!(
+                modification,
+                ContinuousModification::GrantTrigger { .. }
+            )),
+            "expected quoted ETB ability to become a granted trigger: {modifications:?}",
+        );
+        assert!(
+            modifications.iter().any(|modification| matches!(
+                modification,
+                ContinuousModification::GrantAbility { .. }
+            )),
+            "expected quoted tap ability to become a granted activated ability: {modifications:?}",
+        );
     }
 
     #[test]
@@ -890,6 +1050,7 @@ mod tests {
             &"create two 1/1 white cat creature tokens that are tapped and attacking"
                 .to_lowercase(),
             "create two 1/1 white Cat creature tokens that are tapped and attacking",
+            &mut ParseContext::default(),
         );
         match effect {
             Some(Effect::Token {
@@ -917,6 +1078,7 @@ mod tests {
             &"create two 4/4 white angel creature tokens with flying and vigilance that are attacking"
                 .to_lowercase(),
             "create two 4/4 white Angel creature tokens with flying and vigilance that are attacking",
+            &mut ParseContext::default(),
         );
         match effect {
             Some(Effect::Token {
@@ -943,6 +1105,7 @@ mod tests {
         let effect = try_parse_token(
             &"create a 1/1 colorless phyrexian mite artifact creature token with toxic 1 and \"this token can't block.\"".to_lowercase(),
             "create a 1/1 colorless Phyrexian Mite artifact creature token with toxic 1 and \"This token can't block.\"",
+            &mut ParseContext::default(),
         );
         if let Some(Effect::Token {
             static_abilities, ..

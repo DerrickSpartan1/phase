@@ -12,9 +12,7 @@ use super::ability_utils::{
     validate_selected_targets_for_ability, TargetSelectionAdvance,
 };
 use super::casting::{emit_targeting_events, pay_ability_cost};
-use super::casting_costs::{
-    check_additional_cost_or_pay, check_additional_cost_or_pay_with_distribute,
-};
+use super::casting_costs::finish_pending_cast_cost_or_pay;
 use super::engine::EngineError;
 use super::restrictions;
 use super::stack;
@@ -59,7 +57,8 @@ pub(crate) fn handle_select_modes(
     let abilities = obj.abilities.clone();
 
     // Build a chain of ResolvedAbility from chosen modes (in order)
-    let resolved = build_chained_resolved(&abilities, &indices, pending.object_id, player)?;
+    let mut resolved = build_chained_resolved(&abilities, &indices, pending.object_id, player)?;
+    resolved.set_context_recursive(pending.ability.context.clone());
 
     // Check for targeting on the combined ability
     if state.layers_dirty {
@@ -76,16 +75,8 @@ pub(crate) fn handle_select_modes(
         )? {
             let mut resolved = resolved;
             assign_targets_in_chain(state, &mut resolved, &targets)?;
-            return check_additional_cost_or_pay(
-                state,
-                player,
-                pending.object_id,
-                pending.card_id,
-                resolved,
-                &total_cost,
-                pending.casting_variant,
-                pending.origin_zone,
-                events,
+            return finish_pending_cast_cost_or_pay(
+                state, player, pending, resolved, total_cost, events,
             );
         }
 
@@ -100,6 +91,9 @@ pub(crate) fn handle_select_modes(
         pending_sel.target_constraints = pending.target_constraints;
         pending_sel.casting_variant = pending.casting_variant;
         pending_sel.origin_zone = pending.origin_zone;
+        pending_sel.additional_cost_flow = pending.additional_cost_flow;
+        pending_sel.declared_kickers_to_pay = pending.declared_kickers_to_pay;
+        pending_sel.declined_kickers = pending.declined_kickers;
         return Ok(WaitingFor::TargetSelection {
             player,
             pending_cast: Box::new(pending_sel),
@@ -109,17 +103,7 @@ pub(crate) fn handle_select_modes(
     }
 
     // No targets needed -- check additional cost, then pay
-    check_additional_cost_or_pay(
-        state,
-        player,
-        pending.object_id,
-        pending.card_id,
-        resolved,
-        &total_cost,
-        pending.casting_variant,
-        pending.origin_zone,
-        events,
-    )
+    finish_pending_cast_cost_or_pay(state, player, pending, resolved, total_cost, events)
 }
 
 /// Handle target selection for a pending cast.
@@ -152,7 +136,7 @@ pub(crate) fn handle_select_targets(
         }
     };
 
-    let mut ability = pending.ability;
+    let mut ability = pending.ability.clone();
     assign_targets_in_chain(state, &mut ability, &targets)?;
 
     // CR 601.2d: If this spell requires distribution among targets, trigger
@@ -171,6 +155,9 @@ pub(crate) fn handle_select_targets(
             pending_dist.casting_variant = pending.casting_variant;
             pending_dist.distribute = Some(unit.clone());
             pending_dist.origin_zone = pending.origin_zone;
+            pending_dist.additional_cost_flow = pending.additional_cost_flow.clone();
+            pending_dist.declared_kickers_to_pay = pending.declared_kickers_to_pay.clone();
+            pending_dist.declined_kickers = pending.declined_kickers.clone();
             state.pending_cast = Some(Box::new(pending_dist));
             return Ok(WaitingFor::DistributeAmong {
                 player,
@@ -225,18 +212,8 @@ pub(crate) fn handle_select_targets(
         return Ok(WaitingFor::Priority { player });
     }
 
-    check_additional_cost_or_pay_with_distribute(
-        state,
-        player,
-        pending.object_id,
-        pending.card_id,
-        ability,
-        &pending.cost,
-        pending.casting_variant,
-        pending.distribute,
-        pending.origin_zone,
-        events,
-    )
+    let cost = pending.cost.clone();
+    finish_pending_cast_cost_or_pay(state, player, pending, ability, cost, events)
 }
 
 pub(crate) fn handle_choose_target(
@@ -278,7 +255,7 @@ pub(crate) fn handle_choose_target(
             selection,
         }),
         TargetSelectionAdvance::Complete(selected_slots) => {
-            let mut ability = pending.ability;
+            let mut ability = pending.ability.clone();
             assign_selected_slots_in_chain(&mut ability, &selected_slots)?;
 
             if let Some(ability_index) = pending.activation_ability_index {
@@ -323,17 +300,8 @@ pub(crate) fn handle_choose_target(
                 return Ok(WaitingFor::Priority { player });
             }
 
-            check_additional_cost_or_pay(
-                state,
-                player,
-                pending.object_id,
-                pending.card_id,
-                ability,
-                &pending.cost,
-                pending.casting_variant,
-                pending.origin_zone,
-                events,
-            )
+            let cost = pending.cost.clone();
+            finish_pending_cast_cost_or_pay(state, player, pending, ability, cost, events)
         }
     }
 }

@@ -70,7 +70,7 @@ describe("OpponentHud", () => {
   it("auto-selects the active opponent when Follow is enabled", async () => {
     render(<OpponentHud />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Follow" }));
+    fireEvent.click(screen.getByRole("button", { name: /follow active opponent/i }));
 
     await waitFor(() => {
       expect(useUiStore.getState().focusedOpponent).toBe(2);

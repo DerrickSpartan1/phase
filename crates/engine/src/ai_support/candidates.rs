@@ -18,6 +18,7 @@ use crate::types::mana::ManaType;
 use crate::types::match_config::DeckCardCount;
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
+use crate::types::zones::Zone;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TacticalClass {
@@ -183,32 +184,54 @@ pub fn candidate_actions_exact(state: &GameState) -> Vec<CandidateAction> {
             player,
             valid_targets,
             ..
-        } => valid_targets
-            .iter()
-            .map(|&target_id| {
-                candidate(
-                    GameAction::ChooseTarget {
-                        target: Some(TargetRef::Object(target_id)),
-                    },
+        } => {
+            if valid_targets.is_empty() {
+                // No legal copy targets — skip with no target.
+                vec![candidate(
+                    GameAction::ChooseTarget { target: None },
                     TacticalClass::Selection,
                     Some(*player),
-                )
-            })
-            .collect(),
+                )]
+            } else {
+                valid_targets
+                    .iter()
+                    .map(|&target_id| {
+                        candidate(
+                            GameAction::ChooseTarget {
+                                target: Some(TargetRef::Object(target_id)),
+                            },
+                            TacticalClass::Selection,
+                            Some(*player),
+                        )
+                    })
+                    .collect()
+            }
+        }
         WaitingFor::ExploreChoice {
             player, choosable, ..
-        } => choosable
-            .iter()
-            .map(|&target_id| {
-                candidate(
-                    GameAction::ChooseTarget {
-                        target: Some(TargetRef::Object(target_id)),
-                    },
+        } => {
+            if choosable.is_empty() {
+                // No choosable creatures — skip with no target.
+                vec![candidate(
+                    GameAction::ChooseTarget { target: None },
                     TacticalClass::Selection,
                     Some(*player),
-                )
-            })
-            .collect(),
+                )]
+            } else {
+                choosable
+                    .iter()
+                    .map(|&target_id| {
+                        candidate(
+                            GameAction::ChooseTarget {
+                                target: Some(TargetRef::Object(target_id)),
+                            },
+                            TacticalClass::Selection,
+                            Some(*player),
+                        )
+                    })
+                    .collect()
+            }
+        }
         WaitingFor::DiscoverChoice { player, .. } => vec![
             candidate(
                 GameAction::DiscoverChoice {
@@ -368,19 +391,30 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             player,
             equipment_id,
             valid_targets,
-        } => valid_targets
-            .iter()
-            .map(|&target_id| {
-                candidate(
-                    GameAction::Equip {
-                        equipment_id: *equipment_id,
-                        target_id,
-                    },
-                    TacticalClass::Utility,
+        } => {
+            if valid_targets.is_empty() {
+                // No legal targets — CancelCast backs out the activation.
+                vec![candidate(
+                    GameAction::CancelCast,
+                    TacticalClass::Pass,
                     Some(*player),
-                )
-            })
-            .collect(),
+                )]
+            } else {
+                valid_targets
+                    .iter()
+                    .map(|&target_id| {
+                        candidate(
+                            GameAction::Equip {
+                                equipment_id: *equipment_id,
+                                target_id,
+                            },
+                            TacticalClass::Utility,
+                            Some(*player),
+                        )
+                    })
+                    .collect()
+            }
+        }
         // CR 702.122a: Generate valid creature subsets whose total power >= crew_power.
         WaitingFor::CrewVehicle {
             player,
@@ -612,6 +646,17 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                 })
                 .collect()
         }
+        WaitingFor::ChooseOneOfBranch {
+            player, branches, ..
+        } => (0..branches.len())
+            .map(|index| {
+                candidate(
+                    GameAction::ChooseBranch { index },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         WaitingFor::EffectZoneChoice {
             player,
             cards,
@@ -643,6 +688,22 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                     .collect()
             }
         }
+        WaitingFor::DrawnThisTurnTopdeckChoice {
+            player,
+            cards,
+            count,
+            min_count,
+            ..
+        } => (*min_count..=*count)
+            .flat_map(|size| combinations(cards, size))
+            .map(|combo| {
+                candidate(
+                    GameAction::SelectCards { cards: combo },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         // CR 101.4: Generate all valid per-category permanent assignments.
         WaitingFor::CategoryChoice {
             player,
@@ -1202,6 +1263,18 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                 Some(*player),
             ),
         ],
+        WaitingFor::BestowCostChoice { player, .. } => vec![
+            candidate(
+                GameAction::ChooseBestowCost { use_bestow: true },
+                TacticalClass::Selection,
+                Some(*player),
+            ),
+            candidate(
+                GameAction::ChooseBestowCost { use_bestow: false },
+                TacticalClass::Selection,
+                Some(*player),
+            ),
+        ],
         WaitingFor::OptionalEffectChoice { .. }
         | WaitingFor::OpponentMayChoice { .. }
         | WaitingFor::TributeChoice { .. } => {
@@ -1251,42 +1324,73 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             ]
         }
         // CR 702.21a: Ward discard cost — choose a card from hand.
-        WaitingFor::WardDiscardChoice { player, cards, .. } => cards
-            .iter()
-            .map(|&card| {
-                candidate(
-                    GameAction::SelectCards { cards: vec![card] },
+        WaitingFor::WardDiscardChoice { player, cards, .. } => {
+            if cards.is_empty() {
+                // No cards to discard — empty selection signals inability to pay.
+                vec![candidate(
+                    GameAction::SelectCards { cards: vec![] },
                     TacticalClass::Selection,
                     Some(*player),
-                )
-            })
-            .collect(),
+                )]
+            } else {
+                cards
+                    .iter()
+                    .map(|&card| {
+                        candidate(
+                            GameAction::SelectCards { cards: vec![card] },
+                            TacticalClass::Selection,
+                            Some(*player),
+                        )
+                    })
+                    .collect()
+            }
+        }
         // CR 702.21a: Ward sacrifice cost — choose a permanent.
         WaitingFor::WardSacrificeChoice {
             player, permanents, ..
-        } => permanents
-            .iter()
-            .map(|&perm| {
-                candidate(
-                    GameAction::SelectCards { cards: vec![perm] },
+        } => {
+            if permanents.is_empty() {
+                vec![candidate(
+                    GameAction::SelectCards { cards: vec![] },
                     TacticalClass::Selection,
                     Some(*player),
-                )
-            })
-            .collect(),
+                )]
+            } else {
+                permanents
+                    .iter()
+                    .map(|&perm| {
+                        candidate(
+                            GameAction::SelectCards { cards: vec![perm] },
+                            TacticalClass::Selection,
+                            Some(*player),
+                        )
+                    })
+                    .collect()
+            }
+        }
         // CR 118.12: Unless bounce cost — choose a permanent to return to hand.
         WaitingFor::UnlessBounceChoice {
             player, permanents, ..
-        } => permanents
-            .iter()
-            .map(|&perm| {
-                candidate(
-                    GameAction::SelectCards { cards: vec![perm] },
+        } => {
+            if permanents.is_empty() {
+                vec![candidate(
+                    GameAction::SelectCards { cards: vec![] },
                     TacticalClass::Selection,
                     Some(*player),
-                )
-            })
-            .collect(),
+                )]
+            } else {
+                permanents
+                    .iter()
+                    .map(|&perm| {
+                        candidate(
+                            GameAction::SelectCards { cards: vec![perm] },
+                            TacticalClass::Selection,
+                            Some(*player),
+                        )
+                    })
+                    .collect()
+            }
+        }
         // CR 704.5j: Choose which legend to keep.
         WaitingFor::ChooseLegend {
             player, candidates, ..
@@ -1300,6 +1404,20 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                 )
             })
             .collect(),
+        // CR 903.9a: Commander owner may return it to the command zone.
+        // AI always accepts — returning to command zone is almost always correct.
+        WaitingFor::CommanderZoneChoice { player, .. } => vec![
+            candidate(
+                GameAction::DecideOptionalEffect { accept: true },
+                TacticalClass::Selection,
+                Some(*player),
+            ),
+            candidate(
+                GameAction::DecideOptionalEffect { accept: false },
+                TacticalClass::Selection,
+                Some(*player),
+            ),
+        ],
         // CR 310.10 + CR 704.5w + CR 704.5x: controller chooses a new protector.
         WaitingFor::BattleProtectorChoice {
             player, candidates, ..
@@ -1408,18 +1526,29 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             player,
             valid_tokens,
             ..
-        } => valid_tokens
-            .iter()
-            .map(|&token_id| {
-                candidate(
-                    GameAction::ChooseTarget {
-                        target: Some(TargetRef::Object(token_id)),
-                    },
+        } => {
+            if valid_tokens.is_empty() {
+                // No creature tokens to copy — skip with no target.
+                vec![candidate(
+                    GameAction::ChooseTarget { target: None },
                     TacticalClass::Selection,
                     Some(*player),
-                )
-            })
-            .collect(),
+                )]
+            } else {
+                valid_tokens
+                    .iter()
+                    .map(|&token_id| {
+                        candidate(
+                            GameAction::ChooseTarget {
+                                target: Some(TargetRef::Object(token_id)),
+                            },
+                            TacticalClass::Selection,
+                            Some(*player),
+                        )
+                    })
+                    .collect()
+            }
+        }
         // CR 707.10c: Copy retargeting — pick the first legal alternative for
         // each slot when populated (initial target selection for Prepare /
         // Paradigm copies). Falls back to keeping `current` when no
@@ -1519,7 +1648,14 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             ..
         } => {
             if targets.is_empty() {
-                Vec::new()
+                // No targets — submit an empty distribution.
+                vec![candidate(
+                    GameAction::DistributeAmong {
+                        distribution: Vec::new(),
+                    },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )]
             } else {
                 let per_target = (*total as usize / targets.len()).max(1) as u32;
                 let mut dist: Vec<_> = targets.iter().map(|t| (t.clone(), per_target)).collect();
@@ -1551,18 +1687,28 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             )]
         }
         // CR 701.62a: AI selects one card to manifest — one action per card option
-        WaitingFor::ManifestDreadChoice { player, cards } => cards
-            .iter()
-            .map(|&card_id| {
-                candidate(
-                    GameAction::SelectCards {
-                        cards: vec![card_id],
-                    },
+        WaitingFor::ManifestDreadChoice { player, cards } => {
+            if cards.is_empty() {
+                vec![candidate(
+                    GameAction::SelectCards { cards: vec![] },
                     TacticalClass::Selection,
                     Some(*player),
-                )
-            })
-            .collect(),
+                )]
+            } else {
+                cards
+                    .iter()
+                    .map(|&card_id| {
+                        candidate(
+                            GameAction::SelectCards {
+                                cards: vec![card_id],
+                            },
+                            TacticalClass::Selection,
+                            Some(*player),
+                        )
+                    })
+                    .collect()
+            }
+        }
         WaitingFor::ChooseXValue { player, max, .. } => (0..=*max)
             .map(|value| {
                 candidate(
@@ -1763,6 +1909,11 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
         Some(player),
     )];
 
+    // CR 702.61a + CR 702.61b: While a spell with split second is on the stack,
+    // players can't cast spells or activate non-mana abilities. Special actions
+    // (PlayLand, Foretell) and mana abilities remain permitted.
+    let split_second_active = crate::game::keywords::stack_has_split_second(state);
+
     let p = &state.players[player.0 as usize];
     let is_main_phase = matches!(state.phase, Phase::PreCombatMain | Phase::PostCombatMain);
     let stack_empty = state.stack.is_empty();
@@ -1814,123 +1965,160 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
         }
     }
 
-    for object_id in casting::spell_objects_available_to_cast(state, player) {
-        let Some(obj) = state.objects.get(&object_id) else {
-            continue;
-        };
-        if casting::can_cast_object_now(state, player, object_id) {
+    // CR 702.61a: Spells and non-mana activated abilities are suppressed by split second.
+    if !split_second_active {
+        for object_id in casting::spell_objects_available_to_cast(state, player) {
+            let Some(obj) = state.objects.get(&object_id) else {
+                continue;
+            };
+            if casting::can_cast_object_now(state, player, object_id) {
+                actions.push(candidate(
+                    GameAction::CastSpell {
+                        object_id,
+                        card_id: obj.card_id,
+                        targets: Vec::new(),
+                    },
+                    TacticalClass::Spell,
+                    Some(player),
+                ));
+            }
+        }
+
+        // CR 601.2b + CR 118.9a: Opt-in CastFromHandFree once-per-turn candidates
+        // (Zaffai and the Tempests). Each (hand spell, source) pair that passes the
+        // filter AND hasn't had its slot consumed this turn yields one candidate.
+        for (object_id, source_id, _freq) in casting::hand_cast_free_candidates(state, player) {
+            let Some(obj) = state.objects.get(&object_id) else {
+                continue;
+            };
             actions.push(candidate(
-                GameAction::CastSpell {
+                GameAction::CastSpellForFree {
                     object_id,
                     card_id: obj.card_id,
-                    targets: Vec::new(),
+                    source_id,
                 },
                 TacticalClass::Spell,
                 Some(player),
             ));
         }
-    }
 
-    // CR 601.2b + CR 118.9a: Opt-in CastFromHandFree once-per-turn candidates
-    // (Zaffai and the Tempests). Each (hand spell, source) pair that passes the
-    // filter AND hasn't had its slot consumed this turn yields one candidate.
-    for (object_id, source_id, _freq) in casting::hand_cast_free_candidates(state, player) {
-        let Some(obj) = state.objects.get(&object_id) else {
-            continue;
-        };
-        actions.push(candidate(
-            GameAction::CastSpellForFree {
-                object_id,
-                card_id: obj.card_id,
-                source_id,
-            },
-            TacticalClass::Spell,
-            Some(player),
-        ));
-    }
-
-    for &obj_id in &state.battlefield {
-        if let Some(obj) = state.objects.get(&obj_id) {
-            if obj.controller == player {
-                for (i, ability_def) in obj.abilities.iter().enumerate() {
-                    if ability_def.kind == crate::types::ability::AbilityKind::Activated
-                        && !crate::game::mana_abilities::is_mana_ability(ability_def)
-                        && casting::can_activate_ability_now(state, player, obj_id, i)
-                    {
+        for &obj_id in &state.battlefield {
+            if let Some(obj) = state.objects.get(&obj_id) {
+                if obj.controller == player {
+                    for (i, ability_def) in obj.abilities.iter().enumerate() {
+                        if ability_def.kind == crate::types::ability::AbilityKind::Activated
+                            && !crate::game::mana_abilities::is_mana_ability(ability_def)
+                            && casting::can_activate_ability_now(state, player, obj_id, i)
+                        {
+                            actions.push(candidate(
+                                GameAction::ActivateAbility {
+                                    source_id: obj_id,
+                                    ability_index: i,
+                                },
+                                TacticalClass::Ability,
+                                Some(player),
+                            ));
+                        }
+                    }
+                    // CR 702.xxx: Prepare (Strixhaven) — priority-time offer to
+                    // cast a copy of the prepare-spell face. Gated on
+                    // `prepared.is_some()` (single-authority state flag managed
+                    // by `game::effects::prepare`). Assign when WotC publishes
+                    // SOS CR update.
+                    if obj.prepared.is_some() {
                         actions.push(candidate(
-                            GameAction::ActivateAbility {
-                                source_id: obj_id,
-                                ability_index: i,
-                            },
-                            TacticalClass::Ability,
+                            GameAction::CastPreparedCopy { source: obj_id },
+                            TacticalClass::Spell,
                             Some(player),
                         ));
                     }
                 }
-                // CR 702.xxx: Prepare (Strixhaven) — priority-time offer to
-                // cast a copy of the prepare-spell face. Gated on
-                // `prepared.is_some()` (single-authority state flag managed
-                // by `game::effects::prepare`). Assign when WotC publishes
-                // SOS CR update.
-                if obj.prepared.is_some() {
+            }
+        }
+
+        if is_main_phase && stack_empty && is_active {
+            for &obj_id in &state.battlefield {
+                let Some(obj) = state.objects.get(&obj_id) else {
+                    continue;
+                };
+                if obj.controller != player || !obj.card_types.subtypes.iter().any(|s| s == "Room")
+                {
+                    continue;
+                }
+                let unlocks = obj.room_unlocks.unwrap_or_default();
+                if !unlocks.left_unlocked {
                     actions.push(candidate(
-                        GameAction::CastPreparedCopy { source: obj_id },
-                        TacticalClass::Spell,
+                        GameAction::UnlockRoomDoor {
+                            object_id: obj_id,
+                            door: RoomDoor::Left,
+                        },
+                        TacticalClass::Ability,
+                        Some(player),
+                    ));
+                }
+                if obj.back_face.is_some() && !unlocks.right_unlocked {
+                    actions.push(candidate(
+                        GameAction::UnlockRoomDoor {
+                            object_id: obj_id,
+                            door: RoomDoor::Right,
+                        },
+                        TacticalClass::Ability,
                         Some(player),
                     ));
                 }
             }
         }
-    }
 
-    if is_main_phase && stack_empty && is_active {
-        for &obj_id in &state.battlefield {
-            let Some(obj) = state.objects.get(&obj_id) else {
-                continue;
-            };
-            if obj.controller != player || !obj.card_types.subtypes.iter().any(|s| s == "Room") {
-                continue;
-            }
-            let unlocks = obj.room_unlocks.unwrap_or_default();
-            if !unlocks.left_unlocked {
-                actions.push(candidate(
-                    GameAction::UnlockRoomDoor {
-                        object_id: obj_id,
-                        door: RoomDoor::Left,
-                    },
-                    TacticalClass::Ability,
-                    Some(player),
-                ));
-            }
-            if obj.back_face.is_some() && !unlocks.right_unlocked {
-                actions.push(candidate(
-                    GameAction::UnlockRoomDoor {
-                        object_id: obj_id,
-                        door: RoomDoor::Right,
-                    },
-                    TacticalClass::Ability,
-                    Some(player),
-                ));
+        // CR 602.1: Hand-activated abilities (Cycling per CR 702.29a, etc.)
+        for &obj_id in &state.players[player.0 as usize].hand {
+            if let Some(obj) = state.objects.get(&obj_id) {
+                if obj.controller == player {
+                    for (i, ability_def) in obj.abilities.iter().enumerate() {
+                        if ability_def.kind == crate::types::ability::AbilityKind::Activated
+                            && ability_def.activation_zone == Some(crate::types::zones::Zone::Hand)
+                            && !crate::game::mana_abilities::is_mana_ability(ability_def)
+                            && casting::can_activate_ability_now(state, player, obj_id, i)
+                        {
+                            actions.push(candidate(
+                                GameAction::ActivateAbility {
+                                    source_id: obj_id,
+                                    ability_index: i,
+                                },
+                                TacticalClass::Ability,
+                                Some(player),
+                            ));
+                        }
+                    }
+                }
             }
         }
     }
 
-    // CR 602.1: Hand-activated abilities (Cycling per CR 702.29a, etc.)
+    // CR 605.1a + CR 605.3b: Hand-zone mana abilities (Elvish Spirit Guide
+    // class) are still legal under split second because they are mana
+    // abilities. Non-mana hand activations remain in the split-second-gated
+    // block above.
     for &obj_id in &state.players[player.0 as usize].hand {
         if let Some(obj) = state.objects.get(&obj_id) {
             if obj.controller == player {
                 for (i, ability_def) in obj.abilities.iter().enumerate() {
                     if ability_def.kind == crate::types::ability::AbilityKind::Activated
                         && ability_def.activation_zone == Some(crate::types::zones::Zone::Hand)
-                        && !crate::game::mana_abilities::is_mana_ability(ability_def)
-                        && casting::can_activate_ability_now(state, player, obj_id, i)
+                        && crate::game::mana_abilities::is_mana_ability(ability_def)
+                        && crate::game::mana_abilities::can_activate_mana_ability_now(
+                            state,
+                            player,
+                            obj_id,
+                            i,
+                            ability_def,
+                        )
                     {
                         actions.push(candidate(
                             GameAction::ActivateAbility {
                                 source_id: obj_id,
                                 ability_index: i,
                             },
-                            TacticalClass::Ability,
+                            TacticalClass::Mana,
                             Some(player),
                         ));
                     }
@@ -1961,111 +2149,114 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
         }
     }
 
-    // CR 702.122a: Crew actions for Vehicles (keyword action, not ActivateAbility).
-    // Unlike Equip/Saddle, Crew has no "Activate only as a sorcery" restriction —
-    // it can be activated any time the controller has priority.
-    for &obj_id in &state.battlefield {
-        if let Some(obj) = state.objects.get(&obj_id) {
-            if obj.controller == player {
-                for kw in &obj.keywords {
-                    if let crate::types::keywords::Keyword::Crew(_) = kw {
-                        let has_eligible = state.battlefield.iter().any(|&cid| {
-                            cid != obj_id
-                                && state.objects.get(&cid).is_some_and(|c| {
-                                    c.controller == player
-                                        && !c.tapped
-                                        && c.card_types.core_types.contains(&CoreType::Creature)
-                                })
-                        });
-                        if has_eligible {
-                            actions.push(candidate(
-                                GameAction::CrewVehicle {
-                                    vehicle_id: obj_id,
-                                    creature_ids: vec![],
-                                },
-                                TacticalClass::Utility,
-                                Some(player),
-                            ));
+    // CR 702.61a: Crew/Saddle/Station are activated abilities — blocked by split second.
+    if !split_second_active {
+        // CR 702.122a: Crew actions for Vehicles (keyword action, not ActivateAbility).
+        // Unlike Equip/Saddle, Crew has no "Activate only as a sorcery" restriction —
+        // it can be activated any time the controller has priority.
+        for &obj_id in &state.battlefield {
+            if let Some(obj) = state.objects.get(&obj_id) {
+                if obj.controller == player {
+                    for kw in &obj.keywords {
+                        if let crate::types::keywords::Keyword::Crew(_) = kw {
+                            let has_eligible = state.battlefield.iter().any(|&cid| {
+                                cid != obj_id
+                                    && state.objects.get(&cid).is_some_and(|c| {
+                                        c.controller == player
+                                            && !c.tapped
+                                            && c.card_types.core_types.contains(&CoreType::Creature)
+                                    })
+                            });
+                            if has_eligible {
+                                actions.push(candidate(
+                                    GameAction::CrewVehicle {
+                                        vehicle_id: obj_id,
+                                        creature_ids: vec![],
+                                    },
+                                    TacticalClass::Utility,
+                                    Some(player),
+                                ));
+                            }
+                            break; // One crew action per Vehicle
                         }
-                        break; // One crew action per Vehicle
                     }
                 }
             }
         }
-    }
 
-    // CR 702.171a: Saddle actions for Mounts (keyword action, not
-    // ActivateAbility). Sorcery-speed only — the duplicate check here keeps the
-    // AI search tree free of illegal candidates (mirrors the Station guard).
-    if crate::game::restrictions::is_sorcery_speed_window(state, player) {
-        for &obj_id in &state.battlefield {
-            if let Some(obj) = state.objects.get(&obj_id) {
-                if obj.controller != player {
-                    continue;
-                }
-                if !obj
-                    .keywords
-                    .iter()
-                    .any(|k| matches!(k, crate::types::keywords::Keyword::Saddle(_)))
-                {
-                    continue;
-                }
-                let has_eligible = state.battlefield.iter().any(|&cid| {
-                    cid != obj_id
-                        && state.objects.get(&cid).is_some_and(|c| {
-                            c.controller == player
-                                && !c.tapped
-                                && c.card_types.core_types.contains(&CoreType::Creature)
-                        })
-                });
-                if has_eligible {
-                    actions.push(candidate(
-                        GameAction::SaddleMount {
-                            mount_id: obj_id,
-                            creature_ids: vec![],
-                        },
-                        TacticalClass::Utility,
-                        Some(player),
-                    ));
+        // CR 702.171a: Saddle actions for Mounts (keyword action, not
+        // ActivateAbility). Sorcery-speed only — the duplicate check here keeps the
+        // AI search tree free of illegal candidates (mirrors the Station guard).
+        if crate::game::restrictions::is_sorcery_speed_window(state, player) {
+            for &obj_id in &state.battlefield {
+                if let Some(obj) = state.objects.get(&obj_id) {
+                    if obj.controller != player {
+                        continue;
+                    }
+                    if !obj
+                        .keywords
+                        .iter()
+                        .any(|k| matches!(k, crate::types::keywords::Keyword::Saddle(_)))
+                    {
+                        continue;
+                    }
+                    let has_eligible = state.battlefield.iter().any(|&cid| {
+                        cid != obj_id
+                            && state.objects.get(&cid).is_some_and(|c| {
+                                c.controller == player
+                                    && !c.tapped
+                                    && c.card_types.core_types.contains(&CoreType::Creature)
+                            })
+                    });
+                    if has_eligible {
+                        actions.push(candidate(
+                            GameAction::SaddleMount {
+                                mount_id: obj_id,
+                                creature_ids: vec![],
+                            },
+                            TacticalClass::Utility,
+                            Some(player),
+                        ));
+                    }
                 }
             }
         }
-    }
 
-    // CR 702.184a: Station actions for Spacecraft (keyword action, not
-    // ActivateAbility). Sorcery-speed only — guarded by the priority arm of
-    // `handle_station_activation`; duplicating the check here keeps the AI
-    // search tree free of illegal candidates.
-    if crate::game::restrictions::is_sorcery_speed_window(state, player) {
-        for &obj_id in &state.battlefield {
-            if let Some(obj) = state.objects.get(&obj_id) {
-                if obj.controller != player {
-                    continue;
-                }
-                if !obj
-                    .keywords
-                    .iter()
-                    .any(|k| matches!(k, crate::types::keywords::Keyword::Station))
-                {
-                    continue;
-                }
-                let has_eligible = state.battlefield.iter().any(|&cid| {
-                    cid != obj_id
-                        && state.objects.get(&cid).is_some_and(|c| {
-                            c.controller == player
-                                && !c.tapped
-                                && c.card_types.core_types.contains(&CoreType::Creature)
-                        })
-                });
-                if has_eligible {
-                    actions.push(candidate(
-                        GameAction::ActivateStation {
-                            spacecraft_id: obj_id,
-                            creature_id: None,
-                        },
-                        TacticalClass::Utility,
-                        Some(player),
-                    ));
+        // CR 702.184a: Station actions for Spacecraft (keyword action, not
+        // ActivateAbility). Sorcery-speed only — guarded by the priority arm of
+        // `handle_station_activation`; duplicating the check here keeps the AI
+        // search tree free of illegal candidates.
+        if crate::game::restrictions::is_sorcery_speed_window(state, player) {
+            for &obj_id in &state.battlefield {
+                if let Some(obj) = state.objects.get(&obj_id) {
+                    if obj.controller != player {
+                        continue;
+                    }
+                    if !obj
+                        .keywords
+                        .iter()
+                        .any(|k| matches!(k, crate::types::keywords::Keyword::Station))
+                    {
+                        continue;
+                    }
+                    let has_eligible = state.battlefield.iter().any(|&cid| {
+                        cid != obj_id
+                            && state.objects.get(&cid).is_some_and(|c| {
+                                c.controller == player
+                                    && !c.tapped
+                                    && c.card_types.core_types.contains(&CoreType::Creature)
+                            })
+                    });
+                    if has_eligible {
+                        actions.push(candidate(
+                            GameAction::ActivateStation {
+                                spacecraft_id: obj_id,
+                                creature_id: None,
+                            },
+                            TacticalClass::Utility,
+                            Some(player),
+                        ));
+                    }
                 }
             }
         }
@@ -2089,35 +2280,27 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
     }
 
     // CR 702.49: Offer Ninjutsu-family activations during combat
-    if state.active_player == player {
-        let family_cards = keywords::ninjutsu_family_activatable_cards(state, player);
-        for (card_id, variant) in &family_cards {
+    // CR 702.61a: Ninjutsu is an activated ability — blocked by split second.
+    if !split_second_active && state.active_player == player {
+        let family_cards = keywords::ninjutsu_family_activatable_sources(state, player);
+        for (ninjutsu_object_id, _card_id, variant, cost) in &family_cards {
             let returnable = keywords::returnable_creatures_for_variant(state, player, variant);
             let timing_ok = keywords::ninjutsu_timing_ok(&state.phase, variant);
             if timing_ok {
-                // CR 702.49b: Only offer ninjutsu if the player can afford it
-                let can_afford = keywords::ninjutsu_family_cost_for_card(state, player, *card_id)
-                    .is_some_and(|cost| {
-                        let pool = &state.players[player.0 as usize].mana_pool;
-                        let any_color =
-                            crate::game::static_abilities::player_can_spend_as_any_color(
-                                state, player,
-                            );
-                        // CR 107.4f + CR 118.3 + CR 119.8: honor the player's
-                        // Phyrexian life budget for costs containing {C/P}.
-                        let max_life =
-                            crate::game::life_costs::max_phyrexian_life_payments(state, player);
-                        crate::game::mana_payment::can_pay_for_spell(
-                            pool, &cost, None, any_color, max_life,
-                        )
-                    });
+                // CR 702.49a/d: Only offer ninjutsu if the player can afford its activation cost.
+                let can_afford = casting::can_pay_ability_mana_cost_after_auto_tap(
+                    state,
+                    player,
+                    *ninjutsu_object_id,
+                    cost,
+                );
                 if !can_afford {
                     continue;
                 }
                 for &creature_id in &returnable {
                     actions.push(candidate(
                         GameAction::ActivateNinjutsu {
-                            ninjutsu_card_id: *card_id,
+                            ninjutsu_object_id: *ninjutsu_object_id,
                             creature_to_return: creature_id,
                         },
                         TacticalClass::Ability,
@@ -2136,7 +2319,11 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
     // keyword to permanent spells; CR 702.190b's enter-attacking-alongside
     // only applies when the cast spell is a permanent (handled at
     // resolution).
-    if state.active_player == player && state.phase == Phase::DeclareBlockers {
+    // CR 702.61a: Sneak is a spell cast — blocked by split second.
+    if !split_second_active
+        && state.active_player == player
+        && state.phase == Phase::DeclareBlockers
+    {
         let unblocked: Vec<ObjectId> = crate::game::combat::unblocked_attackers(state)
             .into_iter()
             .filter(|&id| {
@@ -2179,6 +2366,59 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
                             creature_to_return: creature_id,
                         },
                         TacticalClass::Ability,
+                        Some(player),
+                    ));
+                }
+            }
+        }
+    }
+
+    // CR 702.188a: Offer Web-slinging casts from hand by pairing each
+    // Web-slinging spell with each tapped creature the caster controls.
+    // Unlike Sneak, Web-slinging grants no special timing permission; the
+    // casting helper below enforces normal spell timing plus restrictions.
+    if !split_second_active {
+        let tapped_creatures: Vec<ObjectId> = state
+            .objects
+            .iter()
+            .filter_map(|(&id, obj)| {
+                (obj.zone == Zone::Battlefield
+                    && obj.controller == player
+                    && obj.tapped
+                    && obj.card_types.core_types.contains(&CoreType::Creature))
+                .then_some(id)
+            })
+            .collect();
+        if !tapped_creatures.is_empty() {
+            let hand_ids: Vec<ObjectId> = state
+                .players
+                .iter()
+                .find(|p| p.id == player)
+                .map(|p| p.hand.iter().copied().collect::<Vec<_>>())
+                .unwrap_or_default();
+            for hand_id in hand_ids {
+                if keywords::effective_web_slinging_cost(state, hand_id).is_none() {
+                    continue;
+                }
+                let Some(card_id) = state.objects.get(&hand_id).map(|o| o.card_id) else {
+                    continue;
+                };
+                for &creature_id in &tapped_creatures {
+                    if !casting::can_cast_spell_as_web_slinging_now(
+                        state,
+                        player,
+                        hand_id,
+                        creature_id,
+                    ) {
+                        continue;
+                    }
+                    actions.push(candidate(
+                        GameAction::CastSpellAsWebSlinging {
+                            hand_object: hand_id,
+                            card_id,
+                            creature_to_return: creature_id,
+                        },
+                        TacticalClass::Spell,
                         Some(player),
                     ));
                 }
@@ -2765,7 +3005,9 @@ fn cap_search_choice_pool(
                 })
                 .collect()
         }
-        SearchSelectionConstraint::None => cards.to_vec(),
+        SearchSelectionConstraint::None | SearchSelectionConstraint::TotalManaValue { .. } => {
+            cards.to_vec()
+        }
     };
     if collapsed.len() <= cap {
         collapsed
@@ -2829,7 +3071,7 @@ mod tests {
         ManaContribution, ManaProduction, QuantityExpr, StaticDefinition, TargetFilter, TargetRef,
     };
     use crate::types::identifiers::CardId;
-    use crate::types::mana::{ManaColor, ManaCostShard};
+    use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
     use crate::types::zones::Zone;
 
     // CR 702.xxx: Prepare (Strixhaven) — the AI candidate enumerator must
@@ -3542,6 +3784,201 @@ mod tests {
             actions.len(),
             163,
             "cap must collapse 80 ids → 8 unique names → 163 candidates"
+        );
+    }
+
+    /// CR 702.61a: While a spell with split second is on the stack, players
+    /// can't cast spells or activate non-mana abilities. Only PassPriority
+    /// should be offered.
+    #[test]
+    fn priority_actions_suppressed_by_split_second_on_stack() {
+        use crate::types::game_state::{CastingVariant, StackEntry, StackEntryKind};
+        use crate::types::keywords::Keyword;
+
+        let mut state = GameState::new_two_player(42);
+        let p0 = PlayerId(0);
+        state.phase = Phase::PreCombatMain;
+        state.active_player = p0;
+
+        // Put a spell with split second on the stack.
+        let ss_id = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Krosan Grip".to_string(),
+            Zone::Stack,
+        );
+        if let Some(obj) = state.objects.get_mut(&ss_id) {
+            obj.keywords.push(Keyword::SplitSecond);
+        }
+        state.stack.push_back(StackEntry {
+            id: ss_id,
+            source_id: ss_id,
+            controller: PlayerId(1),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(3),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 3,
+            },
+        });
+
+        state.waiting_for = WaitingFor::Priority { player: p0 };
+        state.priority_player = p0;
+
+        let actions = candidate_actions(&state);
+        assert_eq!(
+            actions.len(),
+            1,
+            "only PassPriority should be offered while split second is on the stack"
+        );
+        assert!(matches!(actions[0].action, GameAction::PassPriority));
+    }
+
+    /// CR 702.188a: Web-slinging is an alternative casting cost, not a
+    /// Ninjutsu-family activated ability. Legal-action generation must expose
+    /// it as a cast action sourced from the hand object.
+    #[test]
+    fn web_slinging_candidates_are_cast_actions_grouped_under_hand_object() {
+        use crate::types::card_type::CoreType;
+        use crate::types::keywords::Keyword;
+
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        state.phase = Phase::PreCombatMain;
+        state.active_player = player;
+        state.priority_player = player;
+        state.waiting_for = WaitingFor::Priority { player };
+
+        let tapped_creature = create_object(
+            &mut state,
+            CardId(1),
+            player,
+            "Tapped Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&tapped_creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.tapped = true;
+        }
+
+        let web_spell = create_object(
+            &mut state,
+            CardId(2),
+            player,
+            "Web-Slinger".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&web_spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.mana_cost = ManaCost::Cost {
+                generic: 7,
+                shards: vec![],
+            };
+            obj.keywords.push(Keyword::WebSlinging(ManaCost::Cost {
+                generic: 0,
+                shards: vec![ManaCostShard::Blue],
+            }));
+            obj.base_keywords = obj.keywords.clone();
+        }
+
+        state.players[0].mana_pool.add(ManaUnit {
+            color: ManaType::Blue,
+            source_id: ObjectId(0),
+            snow: false,
+            restrictions: Vec::new(),
+            grants: vec![],
+            expiry: None,
+        });
+
+        let (actions, _, grouped) = crate::ai_support::legal_actions_full(&state);
+        assert!(
+            actions.iter().any(|action| matches!(
+                action,
+                GameAction::CastSpellAsWebSlinging {
+                    hand_object,
+                    card_id,
+                    creature_to_return,
+                } if *hand_object == web_spell
+                    && *card_id == CardId(2)
+                    && *creature_to_return == tapped_creature
+            )),
+            "Web-slinging should be offered as a cast action from hand"
+        );
+        assert!(
+            !actions.iter().any(|action| matches!(
+                action,
+                GameAction::ActivateNinjutsu {
+                    ninjutsu_object_id,
+                    ..
+                } if *ninjutsu_object_id == web_spell
+            )),
+            "Web-slinging must not be routed through ActivateNinjutsu"
+        );
+        assert!(
+            grouped
+                .get(&web_spell)
+                .is_some_and(|actions| actions.iter().any(|action| matches!(
+                    action,
+                    GameAction::CastSpellAsWebSlinging {
+                        hand_object,
+                        creature_to_return,
+                        ..
+                    } if *hand_object == web_spell && *creature_to_return == tapped_creature
+                ))),
+            "Web-slinging should be grouped under the hand object for UI playability"
+        );
+    }
+
+    /// Issue #167: A sorcery in the graveyard without any graveyard-cast keyword
+    /// (flashback, escape, harmonize, aftermath) must NOT appear as a CastSpell
+    /// candidate. Reproduces the Gitaxian Probe bug where the AI repeatedly cast
+    /// a card from the graveyard without paying any cost.
+    #[test]
+    fn graveyard_sorcery_without_keywords_not_castable() {
+        let mut state = GameState::new_two_player(42);
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        // Create a sorcery in the graveyard (simulates Gitaxian Probe post-resolution)
+        let probe = create_object(
+            &mut state,
+            CardId(500),
+            PlayerId(0),
+            "Gitaxian Probe".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&probe).unwrap();
+            obj.card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Sorcery);
+            obj.mana_cost = crate::types::mana::ManaCost::Cost {
+                shards: vec![ManaCostShard::PhyrexianBlue],
+                generic: 0,
+            };
+        }
+
+        let actions = candidate_actions(&state);
+        let has_cast_from_gy = actions.iter().any(|c| {
+            matches!(
+                c.action,
+                GameAction::CastSpell {
+                    object_id,
+                    ..
+                } if object_id == probe
+            )
+        });
+        assert!(
+            !has_cast_from_gy,
+            "CR 601.2a: A sorcery in the graveyard without flashback/escape/harmonize/aftermath \
+             must NOT be offered as a CastSpell candidate"
         );
     }
 }

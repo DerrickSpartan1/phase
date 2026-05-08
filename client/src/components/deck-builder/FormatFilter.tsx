@@ -1,31 +1,20 @@
-export type DeckFormat =
-  | "standard"
-  | "commander"
-  | "modern"
-  | "pioneer"
-  | "legacy"
-  | "vintage"
-  | "pauper";
+import type { GameFormat } from "../../adapter/types";
+import { FORMAT_REGISTRY } from "../../data/formatRegistry";
 
-const FORMATS: { value: DeckFormat; label: string }[] = [
-  { value: "standard", label: "Standard" },
-  { value: "commander", label: "Commander" },
-  { value: "modern", label: "Modern" },
-  { value: "pioneer", label: "Pioneer" },
-  { value: "legacy", label: "Legacy" },
-  { value: "vintage", label: "Vintage" },
-  { value: "pauper", label: "Pauper" },
-];
+const DECK_BUILDER_FORMATS = FORMAT_REGISTRY.map(({ format, label }) => ({
+  value: format,
+  label,
+}));
 
 interface FormatFilterProps {
-  selected: DeckFormat;
-  onChange: (format: DeckFormat) => void;
+  selected: GameFormat;
+  onChange: (format: GameFormat) => void;
 }
 
 export function FormatFilter({ selected, onChange }: FormatFilterProps) {
   return (
     <div className="flex flex-wrap gap-1.5">
-      {FORMATS.map(({ value, label }) => (
+      {DECK_BUILDER_FORMATS.map(({ value, label }) => (
         <button
           key={value}
           onClick={() => onChange(value)}
