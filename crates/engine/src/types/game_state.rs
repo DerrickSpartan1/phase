@@ -1375,6 +1375,17 @@ pub enum WaitingFor {
         /// The Bestow keyword's alternative mana cost (for display in the choice modal).
         bestow_cost: ManaCost,
     },
+    /// CR 110.4: Player chooses which permanent type slot to consume when
+    /// casting/playing a multi-type card from the graveyard via a
+    /// `OncePerTurnPerPermanentType` permission source (Muldrotha).
+    /// Only presented when the card has more than one available slot.
+    ChoosePermanentTypeSlot {
+        player: PlayerId,
+        object_id: ObjectId,
+        card_id: CardId,
+        source: ObjectId,
+        available_slots: Vec<super::card_type::CoreType>,
+    },
     /// CR 601.2c: Player chooses any number of legal targets from a set.
     /// Used for "exile any number of" and similar variable-count targeting.
     MultiTargetSelection {
@@ -2042,6 +2053,7 @@ impl WaitingFor {
             | WaitingFor::EvokeCostChoice { player, .. }
             | WaitingFor::OverloadCostChoice { player, .. }
             | WaitingFor::BestowCostChoice { player, .. }
+            | WaitingFor::ChoosePermanentTypeSlot { player, .. }
             | WaitingFor::ChooseRingBearer { player, .. }
             | WaitingFor::ChooseDungeon { player, .. }
             | WaitingFor::ChooseDungeonRoom { player, .. }
@@ -2752,6 +2764,11 @@ pub struct GameState {
     /// resetting all slots.
     #[serde(default)]
     pub graveyard_cast_permissions_used_per_type: HashSet<(ObjectId, super::card_type::CoreType)>,
+    /// CR 110.4: Transient slot stashed by the ChoosePermanentTypeSlot dispatch
+    /// for the land-play path. Consumed by `record_graveyard_play_permission` on
+    /// re-entry into `handle_play_land`. `None` when no slot choice is pending.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_permanent_type_slot: Option<(ObjectId, super::card_type::CoreType)>,
     /// CR 601.2b: Tracks which `CastFromHandFree` once-per-turn permission sources
     /// have been used this turn (Zaffai and the Tempests). Keyed by the granting
     /// permanent's ObjectId. Unlimited sources (Omniscience) never populate this.
@@ -3251,6 +3268,7 @@ impl GameState {
             ability_resolutions_this_turn: HashMap::new(),
             graveyard_cast_permissions_used: HashSet::new(),
             graveyard_cast_permissions_used_per_type: HashSet::new(),
+            pending_permanent_type_slot: None,
             hand_cast_free_permissions_used: HashSet::new(),
             first_card_drawn_this_turn: HashMap::new(),
             cards_drawn_this_turn: HashMap::new(),
@@ -3460,6 +3478,7 @@ impl PartialEq for GameState {
             && self.graveyard_cast_permissions_used == other.graveyard_cast_permissions_used
             && self.graveyard_cast_permissions_used_per_type
                 == other.graveyard_cast_permissions_used_per_type
+            && self.pending_permanent_type_slot == other.pending_permanent_type_slot
             && self.hand_cast_free_permissions_used == other.hand_cast_free_permissions_used
             && self.first_card_drawn_this_turn == other.first_card_drawn_this_turn
             && self.cards_drawn_this_turn == other.cards_drawn_this_turn

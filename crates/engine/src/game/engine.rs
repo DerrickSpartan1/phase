@@ -1321,6 +1321,38 @@ fn apply_action(
             use_bestow,
             &mut events,
         )?,
+        // CR 110.4: Player chose which permanent type slot to consume for a
+        // multi-type graveyard cast via OncePerTurnPerPermanentType (Muldrotha).
+        (
+            WaitingFor::ChoosePermanentTypeSlot {
+                player,
+                object_id,
+                card_id,
+                source,
+                ..
+            },
+            GameAction::ChoosePermanentTypeSlot { slot },
+        ) => {
+            let is_land_play = slot == crate::types::card_type::CoreType::Land;
+            if is_land_play {
+                state.pending_permanent_type_slot = Some((*source, slot));
+                handle_play_land(state, *object_id, *card_id, &mut events)?
+            } else {
+                casting::handle_permanent_type_slot_choice(
+                    state,
+                    *player,
+                    *object_id,
+                    *card_id,
+                    *source,
+                    slot,
+                    &mut events,
+                )?
+            }
+        }
+        // CR 110.4: Cancel during slot choice — return to priority.
+        (WaitingFor::ChoosePermanentTypeSlot { player, .. }, GameAction::CancelCast) => {
+            WaitingFor::Priority { player: *player }
+        }
         (WaitingFor::ModeChoice { player, .. }, GameAction::SelectModes { indices }) => {
             casting::handle_select_modes(state, *player, indices, &mut events)?
         }
@@ -3192,14 +3224,18 @@ fn record_graveyard_play_permission(
             state.graveyard_cast_permissions_used.insert(source_id);
         }
         Some(crate::types::statics::CastFrequency::OncePerTurnPerPermanentType) => {
-            // CR 110.4: Pick the permanent-type slot the played card credits to.
-            // For a played land this is normally `CoreType::Land`, but the picker
-            // honors the canonical CR 110.4 enumeration order so a land that
-            // also has e.g. Creature (Dryad Arbor) takes Artifact/Battle/Creature
-            // before Land if those slots are still open.
-            if let Some(slot) =
-                super::casting::pick_per_permanent_type_slot(state, source_id, played_object)
-            {
+            // CR 110.4: Use the player-chosen slot if one was stashed by the
+            // ChoosePermanentTypeSlot dispatch (multi-type card). Otherwise
+            // auto-pick (single-type card).
+            let slot = state
+                .pending_permanent_type_slot
+                .take()
+                .filter(|(src, _)| *src == source_id)
+                .map(|(_, ct)| ct)
+                .or_else(|| {
+                    super::casting::pick_per_permanent_type_slot(state, source_id, played_object)
+                });
+            if let Some(slot) = slot {
                 state
                     .graveyard_cast_permissions_used_per_type
                     .insert((source_id, slot));
@@ -3277,6 +3313,42 @@ fn handle_play_land(
         return Err(EngineError::InvalidAction(
             "Card not found or card_id mismatch".to_string(),
         ));
+    }
+
+    // CR 110.4: For multi-type graveyard lands via OncePerTurnPerPermanentType,
+    // prompt the player to choose which permanent type slot to consume. Skip
+    // if a slot was already chosen (pending_permanent_type_slot is set).
+    if in_graveyard_with_permission && state.pending_permanent_type_slot.is_none() {
+        if let Some(source) = gy_permission_source {
+            if let Some(src_obj) = state.objects.get(&source) {
+                let is_per_type = super::functioning_abilities::active_static_definitions(
+                    state, src_obj,
+                )
+                .any(|s| {
+                    matches!(
+                        s.mode,
+                        StaticMode::GraveyardCastPermission {
+                            frequency:
+                                crate::types::statics::CastFrequency::OncePerTurnPerPermanentType,
+                            ..
+                        }
+                    )
+                });
+                if is_per_type {
+                    let slots =
+                        super::casting::available_permanent_type_slots(state, source, object_id);
+                    if slots.len() > 1 {
+                        return Ok(WaitingFor::ChoosePermanentTypeSlot {
+                            player,
+                            object_id,
+                            card_id,
+                            source,
+                            available_slots: slots,
+                        });
+                    }
+                }
+            }
+        }
     }
 
     // CR 712.12: MDFC land face selection

@@ -710,6 +710,35 @@ fn graveyard_objects_castable_by_permission(
 }
 
 /// CR 110.4 + CR 601.2a: For a `OncePerTurnPerPermanentType` source (Muldrotha),
+/// returns all available permanent-type slots that the graveyard object qualifies for.
+///
+/// Each element is a `CoreType` whose `(source_id, slot_type)` entry is not yet
+/// present in `graveyard_cast_permissions_used_per_type`. Returns an empty vec if
+/// every permanent type the object carries has already been consumed by this source
+/// this turn, or if the object is not a permanent (CR 110.4).
+///
+/// Order matches `CoreType::PERMANENT_TYPES` (CR 110.4 enumeration).
+pub(crate) fn available_permanent_type_slots(
+    state: &GameState,
+    source_id: ObjectId,
+    object_id: ObjectId,
+) -> Vec<crate::types::card_type::CoreType> {
+    let Some(obj) = state.objects.get(&object_id) else {
+        return Vec::new();
+    };
+    crate::types::card_type::CoreType::PERMANENT_TYPES
+        .iter()
+        .copied()
+        .filter(|core_type| {
+            obj.card_types.core_types.contains(core_type)
+                && !state
+                    .graveyard_cast_permissions_used_per_type
+                    .contains(&(source_id, *core_type))
+        })
+        .collect()
+}
+
+/// CR 110.4 + CR 601.2a: For a `OncePerTurnPerPermanentType` source (Muldrotha),
 /// pick an available permanent-type slot that the graveyard object qualifies for.
 ///
 /// Returns `Some(slot_type)` if the object has at least one permanent type whose
@@ -728,16 +757,9 @@ pub(crate) fn pick_per_permanent_type_slot(
     source_id: ObjectId,
     object_id: ObjectId,
 ) -> Option<crate::types::card_type::CoreType> {
-    let obj = state.objects.get(&object_id)?;
-    crate::types::card_type::CoreType::PERMANENT_TYPES
-        .iter()
-        .copied()
-        .find(|core_type| {
-            obj.card_types.core_types.contains(core_type)
-                && !state
-                    .graveyard_cast_permissions_used_per_type
-                    .contains(&(source_id, *core_type))
-        })
+    available_permanent_type_slots(state, source_id, object_id)
+        .into_iter()
+        .next()
 }
 
 /// CR 601.2a: Returns true if a graveyard-cast source's frequency slot is
@@ -1285,12 +1307,17 @@ fn prepare_spell_cast_with_variant_override(
         {
             CastingVariant::Aftermath
         } else if let Some((source, frequency)) = graveyard_permission_src {
-            // CR 110.4: For OncePerTurnPerPermanentType permissions, capture
-            // which permanent-type slot will be consumed when this spell is
-            // finalized to the stack. Picked deterministically by
-            // `pick_per_permanent_type_slot` (CR 110.4 enumeration order).
+            // CR 110.4: For OncePerTurnPerPermanentType permissions, auto-pick
+            // the slot when only one is available. When multiple slots are
+            // available (multi-type card), leave `None` — the engine will
+            // prompt the player to choose via `ChoosePermanentTypeSlot`.
             let slot_type = if frequency == CastFrequency::OncePerTurnPerPermanentType {
-                pick_per_permanent_type_slot(state, source, object_id)
+                let slots = available_permanent_type_slots(state, source, object_id);
+                if slots.len() == 1 {
+                    Some(slots[0])
+                } else {
+                    None
+                }
             } else {
                 None
             };
@@ -3035,7 +3062,54 @@ pub fn handle_cast_spell(
         }
     }
 
+    // CR 110.4: For graveyard spells via OncePerTurnPerPermanentType, prompt
+    // the player to choose which permanent type slot to consume when the card
+    // has multiple available slots (multi-type permanents like Artifact Creature).
+    if let Some(obj) = state.objects.get(&object_id) {
+        if obj.zone == Zone::Graveyard {
+            if let Some((source, CastFrequency::OncePerTurnPerPermanentType)) =
+                graveyard_permission_source(state, player, object_id)
+            {
+                let slots = available_permanent_type_slots(state, source, object_id);
+                if slots.len() > 1 {
+                    return Ok(WaitingFor::ChoosePermanentTypeSlot {
+                        player,
+                        object_id,
+                        card_id,
+                        source,
+                        available_slots: slots,
+                    });
+                }
+            }
+        }
+    }
+
     continue_cast_from_prepared(state, player, object_id, events)
+}
+
+/// CR 110.4: Handle player's permanent type slot choice for a multi-type
+/// graveyard cast via OncePerTurnPerPermanentType. Re-enters the casting
+/// pipeline with the chosen slot injected into `CastingVariant`.
+pub fn handle_permanent_type_slot_choice(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    _card_id: CardId,
+    source: ObjectId,
+    slot: crate::types::card_type::CoreType,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let prepared = prepare_spell_cast_with_variant_override(
+        state,
+        player,
+        object_id,
+        Some(CastingVariant::GraveyardPermission {
+            source,
+            frequency: CastFrequency::OncePerTurnPerPermanentType,
+            slot_type: Some(slot),
+        }),
+    )?;
+    continue_with_prepared(state, player, prepared, events)
 }
 
 /// CR 601.2a: Announce the spell by pushing a placeholder `StackEntry` onto

@@ -1915,6 +1915,17 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
                 .graveyard_cast_permissions_used_per_type
                 .insert((source, slot));
         }
+        CastingVariant::GraveyardPermission {
+            frequency: crate::types::statics::CastFrequency::OncePerTurnPerPermanentType,
+            slot_type: None,
+            ..
+        } => {
+            debug_assert!(
+                false,
+                "OncePerTurnPerPermanentType reached finalization with slot_type: None — \
+                 the slot choice should have been resolved before reaching this point"
+            );
+        }
         CastingVariant::HandPermission {
             source,
             frequency: crate::types::statics::CastFrequency::OncePerTurn,
